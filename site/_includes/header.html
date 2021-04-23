@@ -20,18 +20,24 @@
           </ul>
           <form class="navbar-form navbar-right" action="/search.html" id="cse-search-box">
             <div class="form-group">
-              <input type="hidden" name="cx" value="012346921571893344015:xv_nfgpzbu4">
+              <input type="hidden" name="cx" value="009927877080525621790:2pxlpaexqpc">
               <input type="hidden" name="cof" value="FORID:10">
               <input type="hidden" name="ie" value="UTF-8">
-              <input type="search" name="q" class="form-control input-sm" placeholder="Search">
+              <input type="search" name="q" id="q" class="form-control input-sm" placeholder="Search">
             </div>
           </form>
           <ul class="nav navbar-nav navbar-right">
             <li{% if page.nav == "docs" %} class="active"{% endif %}>
-              <a href="{{ site.docs_site_url }}">Documentation</a>
+              <a href="/versions/{{ current_version }}{{ site.getting_started_category_url }}">Getting Started</a>
+            </li>
+            <li{% if page.nav == "docs" %} class="active"{% endif %}>
+              <a href="/versions/{{ current_version }}{{ site.docs_site_url }}">Using Bazel</a>
+            </li>
+            <li{% if page.nav == "docs" %} class="active"{% endif %}>
+              <a href="/versions/{{ current_version }}{{ site.extending_category_url }}">Extending Bazel</a>
             </li>
             <li{% if page.nav == "contribute" %} class="active"{% endif %}>
-              <a href="{{ site.main_site_url }}/contributing.html">Contribute</a>
+              <a href="{{ site.main_site_url }}/contributing.html">Contributing</a>
             </li>
             <li{% if page.nav == "blog" %} class="active"{% endif %}>
               <a href="{{ site.blog_site_url }}">Blog</a>

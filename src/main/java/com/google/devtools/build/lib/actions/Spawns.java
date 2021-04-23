@@ -14,9 +14,13 @@
 
 package com.google.devtools.build.lib.actions;
 
+import com.google.devtools.build.lib.server.FailureDetails;
+import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
+import com.google.devtools.build.lib.server.FailureDetails.Spawn.Code;
 import com.google.devtools.build.lib.util.CommandDescriptionForm;
 import com.google.devtools.build.lib.util.CommandFailureUtils;
 import com.google.devtools.build.lib.vfs.Path;
+import java.io.IOException;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.Map;
@@ -29,15 +33,37 @@ public final class Spawns {
    * Returns {@code true} if the result of {@code spawn} may be cached.
    */
   public static boolean mayBeCached(Spawn spawn) {
-    return !spawn.getExecutionInfo().containsKey(ExecutionRequirements.NO_CACHE);
+    return !spawn.getExecutionInfo().containsKey(ExecutionRequirements.NO_CACHE)
+        && !spawn.getExecutionInfo().containsKey(ExecutionRequirements.LOCAL);
   }
 
+  /** Returns {@code true} if the result of {@code spawn} may be cached remotely. */
+  public static boolean mayBeCachedRemotely(Spawn spawn) {
+    return mayBeCached(spawn)
+        && !spawn.getExecutionInfo().containsKey(ExecutionRequirements.NO_REMOTE)
+        && !spawn.getExecutionInfo().containsKey(ExecutionRequirements.NO_REMOTE_CACHE);
+  }
+
+  /** Returns {@code true} if {@code spawn} may be executed remotely. */
+  public static boolean mayBeExecutedRemotely(Spawn spawn) {
+    return !spawn.getExecutionInfo().containsKey(ExecutionRequirements.LOCAL)
+        && !spawn.getExecutionInfo().containsKey(ExecutionRequirements.NO_REMOTE)
+        && !spawn.getExecutionInfo().containsKey(ExecutionRequirements.NO_REMOTE_EXEC);
+  }
+
+  /** Returns {@code true} if {@code spawn} may be executed locally. */
+  public static boolean mayBeExecutedLocally(Spawn spawn) {
+    return !spawn.getExecutionInfo().containsKey(ExecutionRequirements.NO_LOCAL);
+  }
+
+  /** Returns whether a Spawn can be executed in a sandbox environment. */
   public static boolean mayBeSandboxed(Spawn spawn) {
     return !spawn.getExecutionInfo().containsKey(ExecutionRequirements.LEGACY_NOSANDBOX)
         && !spawn.getExecutionInfo().containsKey(ExecutionRequirements.NO_SANDBOX)
         && !spawn.getExecutionInfo().containsKey(ExecutionRequirements.LOCAL);
   }
 
+  /** Returns whether a Spawn needs network access in order to run successfully. */
   public static boolean requiresNetwork(Spawn spawn, boolean defaultSandboxDisallowNetwork) {
     if (spawn.getExecutionInfo().containsKey(ExecutionRequirements.BLOCK_NETWORK)) {
       return false;
@@ -49,29 +75,70 @@ public final class Spawns {
     return defaultSandboxDisallowNetwork;
   }
 
-  public static boolean mayBeExecutedRemotely(Spawn spawn) {
-    return !spawn.getExecutionInfo().containsKey(ExecutionRequirements.LOCAL)
-        && !spawn.getExecutionInfo().containsKey(ExecutionRequirements.NO_REMOTE);
+  /**
+   * Returns whether a Spawn claims to support being executed with the persistent worker strategy
+   * according to its execution info tags.
+   */
+  public static boolean supportsWorkers(Spawn spawn) {
+    return "1".equals(spawn.getExecutionInfo().get(ExecutionRequirements.SUPPORTS_WORKERS));
   }
 
   /**
-   * Parse the timeout key in the spawn execution info, if it exists. Otherwise, return -1.
+   * Returns whether a Spawn claims to support being executed with the persistent multiplex worker
+   * strategy according to its execution info tags.
+   */
+  public static boolean supportsMultiplexWorkers(Spawn spawn) {
+    return "1"
+        .equals(spawn.getExecutionInfo().get(ExecutionRequirements.SUPPORTS_MULTIPLEX_WORKERS));
+  }
+
+  public static boolean supportsWorkerCancellation(Spawn spawn) {
+    return "1"
+        .equals(spawn.getExecutionInfo().get(ExecutionRequirements.SUPPORTS_WORKER_CANCELLATION));
+  }
+
+  /**
+   * Returns which worker protocol format a Spawn claims a persistent worker uses. Defaults to proto
+   * if the protocol format is not specified.
+   */
+  public static ExecutionRequirements.WorkerProtocolFormat getWorkerProtocolFormat(Spawn spawn)
+      throws IOException {
+    String protocolFormat =
+        spawn.getExecutionInfo().get(ExecutionRequirements.REQUIRES_WORKER_PROTOCOL);
+
+    if (protocolFormat != null) {
+      switch (protocolFormat) {
+        case "json":
+          return ExecutionRequirements.WorkerProtocolFormat.JSON;
+        case "proto":
+          return ExecutionRequirements.WorkerProtocolFormat.PROTO;
+        default:
+          throw new IOException(
+              "requires-worker-protocol must be set to a valid worker protocol format: json or"
+                  + " proto");
+      }
+    } else {
+      return ExecutionRequirements.WorkerProtocolFormat.PROTO;
+    }
+  }
+
+  /** Returns the mnemonic that should be used in the worker's key. */
+  public static String getWorkerKeyMnemonic(Spawn spawn) {
+    String customValue = spawn.getExecutionInfo().get(ExecutionRequirements.WORKER_KEY_MNEMONIC);
+    return customValue != null ? customValue : spawn.getMnemonic();
+  }
+
+  /**
+   * Parse the timeout key in the spawn execution info, if it exists. Otherwise, return {@link
+   * Duration#ZERO}.
    */
   public static Duration getTimeout(Spawn spawn) throws ExecException {
-    String timeoutStr = spawn.getExecutionInfo().get(ExecutionRequirements.TIMEOUT);
-    if (timeoutStr == null) {
-      return Duration.ZERO;
-    }
-    try {
-      return Duration.ofSeconds(Integer.parseInt(timeoutStr));
-    } catch (NumberFormatException e) {
-      throw new UserExecException("could not parse timeout: ", e);
-    }
+    return getTimeout(spawn, Duration.ZERO);
   }
 
   /**
    * Parse the timeout key in the spawn execution info, if it exists. Otherwise, return
-   * defaultTimeout, or 0 if that is null.
+   * defaultTimeout, or {@code Duration.ZERO} if that is null.
    */
   public static Duration getTimeout(Spawn spawn, Duration defaultTimeout) throws ExecException {
     String timeoutStr = spawn.getExecutionInfo().get(ExecutionRequirements.TIMEOUT);
@@ -81,7 +148,12 @@ public final class Spawns {
     try {
       return Duration.ofSeconds(Integer.parseInt(timeoutStr));
     } catch (NumberFormatException e) {
-      throw new UserExecException("could not parse timeout: ", e);
+      throw new UserExecException(
+          e,
+          FailureDetail.newBuilder()
+              .setMessage("could not parse timeout")
+              .setSpawn(FailureDetails.Spawn.newBuilder().setCode(Code.INVALID_TIMEOUT))
+              .build());
     }
   }
 

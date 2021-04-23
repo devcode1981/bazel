@@ -1,4 +1,3 @@
-
 // Copyright 2016 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,7 +15,7 @@
 package com.google.devtools.build.lib.rules.cpp;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSortedMap;
 import com.google.devtools.build.lib.actions.AbstractAction;
 import com.google.devtools.build.lib.actions.ActionExecutionContext;
@@ -25,16 +24,24 @@ import com.google.devtools.build.lib.actions.ActionKeyContext;
 import com.google.devtools.build.lib.actions.ActionOwner;
 import com.google.devtools.build.lib.actions.ActionResult;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.actions.ArtifactPathResolver;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
+import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
+import com.google.devtools.build.lib.server.FailureDetails.SymlinkAction;
+import com.google.devtools.build.lib.server.FailureDetails.SymlinkAction.Code;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.util.DetailedExitCode;
 import com.google.devtools.build.lib.util.Fingerprint;
-import com.google.devtools.build.lib.vfs.FileSystem;
-import com.google.devtools.build.lib.vfs.FileSystemUtils;
+import com.google.devtools.build.lib.vfs.BulkDeleter;
 import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Symlinks;
 import java.io.IOException;
 import java.util.Map;
 import java.util.SortedMap;
+import javax.annotation.Nullable;
 
 /** This action creates a set of symbolic links. */
 @AutoCodec
@@ -50,17 +57,25 @@ public final class CreateIncSymlinkAction extends AbstractAction {
    */
   public CreateIncSymlinkAction(
       ActionOwner owner, Map<Artifact, Artifact> symlinks, Path includePath) {
-    super(owner, ImmutableList.copyOf(symlinks.values()), ImmutableList.copyOf(symlinks.keySet()));
+    super(
+        owner,
+        NestedSetBuilder.wrap(Order.STABLE_ORDER, symlinks.values()),
+        ImmutableSet.copyOf(symlinks.keySet()));
     this.symlinks = ImmutableSortedMap.copyOf(symlinks, Artifact.EXEC_PATH_COMPARATOR);
     this.includePath = includePath;
   }
 
   @Override
-  public void prepare(FileSystem fileSystem, Path execRoot) throws IOException {
+  public void prepare(
+      Path execRoot,
+      ArtifactPathResolver pathResolver,
+      @Nullable BulkDeleter bulkDeleter,
+      @Nullable PathFragment outputPrefixForArchivedArtifactsCleanup)
+      throws IOException, InterruptedException {
     if (includePath.isDirectory(Symlinks.NOFOLLOW)) {
-      FileSystemUtils.deleteTree(includePath);
+      includePath.deleteTree();
     }
-    super.prepare(fileSystem, execRoot);
+    super.prepare(execRoot, pathResolver, bulkDeleter, outputPrefixForArchivedArtifactsCleanup);
   }
 
   @Override
@@ -72,8 +87,15 @@ public final class CreateIncSymlinkAction extends AbstractAction {
         symlink.createSymbolicLink(actionExecutionContext.getInputPath(entry.getValue()));
       }
     } catch (IOException e) {
-      String message = "IO Error while creating symlink";
-      throw new ActionExecutionException(message, e, this, false);
+      String message = "IO Error while creating symlink: " + e.getMessage();
+      DetailedExitCode code =
+          DetailedExitCode.of(
+              FailureDetail.newBuilder()
+                  .setMessage(message)
+                  .setSymlinkAction(
+                      SymlinkAction.newBuilder().setCode(Code.LINK_CREATION_IO_EXCEPTION))
+                  .build());
+      throw new ActionExecutionException(message, e, this, false, code);
     }
     return ActionResult.EMPTY;
   }
@@ -84,7 +106,10 @@ public final class CreateIncSymlinkAction extends AbstractAction {
   }
 
   @Override
-  public void computeKey(ActionKeyContext actionKeyContext, Fingerprint fp) {
+  public void computeKey(
+      ActionKeyContext actionKeyContext,
+      @Nullable Artifact.ArtifactExpander artifactExpander,
+      Fingerprint fp) {
     for (Map.Entry<Artifact, Artifact> entry : symlinks.entrySet()) {
       fp.addPath(entry.getKey().getExecPath());
       fp.addPath(entry.getValue().getExecPath());
@@ -99,6 +124,11 @@ public final class CreateIncSymlinkAction extends AbstractAction {
   @Override
   public String getMnemonic() {
     return "Symlink";
+  }
+
+  @Override
+  public boolean mayInsensitivelyPropagateInputs() {
+    return true;
   }
 }
 

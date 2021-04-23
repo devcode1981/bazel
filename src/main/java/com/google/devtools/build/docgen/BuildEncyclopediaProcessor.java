@@ -62,15 +62,16 @@ public abstract class BuildEncyclopediaProcessor {
   }
 
   /**
-   * Collects and processes all the rule and attribute documentation in inputDirs and
-   * generates the Build Encyclopedia into the outputDir.
+   * Collects and processes all the rule and attribute documentation in inputDirs and generates the
+   * Build Encyclopedia into the outputDir.
    *
    * @param inputDirs list of directory to scan for document in the source code
    * @param outputRootDir output directory where to write the build encyclopedia
-   * @param blackList optional path to a file listing rules to not document
+   * @param denyList optional path to a file listing rules to not document
    */
-  public abstract void generateDocumentation(List<String> inputDirs, String outputDir,
-      String blackList) throws BuildEncyclopediaDocException, IOException;
+  public abstract void generateDocumentation(
+      List<String> inputDirs, String outputDir, String denyList)
+      throws BuildEncyclopediaDocException, IOException;
 
   /**
    * POD class for containing lists of rule families separated into language-specific and generic as
@@ -100,14 +101,18 @@ public abstract class BuildEncyclopediaProcessor {
     Map<String, ListMultimap<RuleType, RuleDocumentation>> ruleMapping = new HashMap<>();
     createRuleMapping(docEntries, ruleMapping);
 
+    // Create a mapping with the summary string for the individual rule families
+    Map<String, StringBuilder> familySummary = new HashMap<>();
+    createFamilySummary(docEntries, familySummary);
+
     // Create lists of RuleFamily objects that will be used to generate the documentation.
     // The separate language-specific and general rule families will be used to generate
     // the Overview page while the list containing all rule families will be used to
     // generate all other documentation.
     List<RuleFamily> langSpecificRuleFamilies =
-        filterRuleFamilies(ruleMapping, langSpecificRuleFamilyNames);
+        filterRuleFamilies(ruleMapping, langSpecificRuleFamilyNames, familySummary);
     List<RuleFamily> genericRuleFamilies =
-        filterRuleFamilies(ruleMapping, genericRuleFamilyNames);
+        filterRuleFamilies(ruleMapping, genericRuleFamilyNames, familySummary);
     List<RuleFamily> allRuleFamilies = new ArrayList<>(langSpecificRuleFamilies);
     allRuleFamilies.addAll(genericRuleFamilies);
     return new RuleFamilies(langSpecificRuleFamilies, genericRuleFamilies, allRuleFamilies);
@@ -115,11 +120,12 @@ public abstract class BuildEncyclopediaProcessor {
 
   private List<RuleFamily> filterRuleFamilies(
       Map<String, ListMultimap<RuleType, RuleDocumentation>> ruleMapping,
-      Set<String> ruleFamilyNames) {
+      Set<String> ruleFamilyNames,
+      Map<String, StringBuilder> familySummary) {
     List<RuleFamily> ruleFamilies = new ArrayList<>(ruleFamilyNames.size());
     for (String name : ruleFamilyNames) {
       ListMultimap<RuleType, RuleDocumentation> ruleTypeMap = ruleMapping.get(name);
-      ruleFamilies.add(new RuleFamily(ruleTypeMap, name));
+      ruleFamilies.add(new RuleFamily(ruleTypeMap, name, familySummary.get(name).toString()));
     }
     return ruleFamilies;
   }
@@ -142,6 +148,22 @@ public abstract class BuildEncyclopediaProcessor {
         }
       } else {
         throw ruleDoc.createException("Can't find RuleClass for " + ruleDoc.getRuleName());
+      }
+    }
+  }
+
+  /**
+   * Obtain the summary string for a rule family from whatever member of the family providing it (if
+   * any; otherwise use the empty string).
+   */
+  private void createFamilySummary(
+      Iterable<RuleDocumentation> docEntries, Map<String, StringBuilder> familySummary) {
+    for (RuleDocumentation ruleDoc : docEntries) {
+      RuleClass ruleClass = ruleClassProvider.getRuleClassMap().get(ruleDoc.getRuleName());
+      if (ruleClass != null) {
+        String ruleFamily = ruleDoc.getRuleFamily();
+        familySummary.computeIfAbsent(ruleFamily, (String k) -> new StringBuilder());
+        familySummary.get(ruleFamily).append(ruleDoc.getFamilySummary());
       }
     }
   }
@@ -184,24 +206,20 @@ public abstract class BuildEncyclopediaProcessor {
   /**
    * Sets the {@link RuleLinkExpander} for the provided {@link RuleDocumentationAttributes}.
    *
-   * <p>This method is used to set the {@link RuleLinkExpander} for common attributes, such as
-   * those defined in {@link PredefinedAttributes}, so that rule references in the docs for those
+   * <p>This method is used to set the {@link RuleLinkExpander} for common attributes, such as those
+   * defined in {@link PredefinedAttributes}, so that rule references in the docs for those
    * attributes can be expanded.
    *
    * @param attributes The map containing the RuleDocumentationAttributes, keyed by attribute name.
    * @param expander The RuleLinkExpander to set in each of the RuleDocumentationAttributes.
-   * @return A map of name to RuleDocumentationAttribute with the RuleLinkExpander set for each
-   *     attribute.
+   * @return The provided map of attributes.
    */
   protected static Map<String, RuleDocumentationAttribute> expandCommonAttributes(
       Map<String, RuleDocumentationAttribute> attributes, RuleLinkExpander expander) {
-    Map<String, RuleDocumentationAttribute> expanded = new HashMap<>(attributes.size());
-    for (Map.Entry<String, RuleDocumentationAttribute> entry : attributes.entrySet()) {
-      RuleDocumentationAttribute attribute = entry.getValue();
+    for (RuleDocumentationAttribute attribute : attributes.values()) {
       attribute.setRuleLinkExpander(expander);
-      expanded.put(entry.getKey(), attribute);
     }
-    return expanded;
+    return attributes;
   }
 
   /**

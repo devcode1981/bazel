@@ -13,22 +13,23 @@
 // limitations under the License.
 package com.google.devtools.build.lib.rules.cpp;
 
-import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.LicensesProvider;
 import com.google.devtools.build.lib.analysis.MiddlemanProvider;
-import com.google.devtools.build.lib.analysis.PlatformConfiguration;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
 import com.google.devtools.build.lib.analysis.TemplateVariableInfo;
-import com.google.devtools.build.lib.events.Location;
-import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.analysis.config.BuildOptions;
+import com.google.devtools.build.lib.analysis.platform.ToolchainInfo;
+import com.google.devtools.build.lib.cmdline.Label;
+import java.io.Serializable;
 import java.util.HashMap;
+import net.starlark.java.syntax.Location;
 
 /**
  * Implementation for the cc_toolchain rule.
@@ -38,15 +39,33 @@ public class CcToolchain implements RuleConfiguredTargetFactory {
   /** Default attribute name where rules store the reference to cc_toolchain */
   public static final String CC_TOOLCHAIN_DEFAULT_ATTRIBUTE_NAME = ":cc_toolchain";
 
+  public static final String CC_TOOLCHAIN_DEFAULT_ATTRIBUTE_NAME_FOR_STARLARK = "$cc_toolchain";
+
   /** Default attribute name for the c++ toolchain type */
   public static final String CC_TOOLCHAIN_TYPE_ATTRIBUTE_NAME = "$cc_toolchain_type";
+
+  public static final String ALLOWED_LAYERING_CHECK_FEATURES_ALLOWLIST =
+      "disabling_parse_headers_and_layering_check_allowed";
+  public static final String ALLOWED_LAYERING_CHECK_FEATURES_TARGET =
+      "@bazel_tools//tools/build_defs/cc/whitelists/parse_headers_and_layering_check:"
+          + ALLOWED_LAYERING_CHECK_FEATURES_ALLOWLIST;
+  public static final Label ALLOWED_LAYERING_CHECK_FEATURES_LABEL =
+      Label.parseAbsoluteUnchecked(ALLOWED_LAYERING_CHECK_FEATURES_TARGET);
+
+  public static final String LOOSE_HEADER_CHECK_ALLOWLIST =
+      "loose_header_check_allowed_in_toolchain";
+  public static final String LOOSE_HEADER_CHECK_TARGET =
+      "@bazel_tools//tools/build_defs/cc/whitelists/starlark_hdrs_check:" + LOOSE_HEADER_CHECK_ALLOWLIST;
+  public static final Label LOOSE_HEADER_CHECK_LABEL =
+      Label.parseAbsoluteUnchecked(LOOSE_HEADER_CHECK_TARGET);
 
   @Override
   public ConfiguredTarget create(RuleContext ruleContext)
       throws InterruptedException, RuleErrorException, ActionConflictException {
+    validateToolchain(ruleContext);
     CcToolchainAttributesProvider attributes =
         new CcToolchainAttributesProvider(
-            ruleContext, isAppleToolchain(), getAdditionalBuildVariables(ruleContext));
+            ruleContext, isAppleToolchain(), getAdditionalBuildVariablesComputer(ruleContext));
 
     RuleConfiguredTargetBuilder ruleConfiguredTargetBuilder =
         new RuleConfiguredTargetBuilder(ruleContext)
@@ -57,20 +76,16 @@ public class CcToolchain implements RuleConfiguredTargetFactory {
       ruleConfiguredTargetBuilder.add(LicensesProvider.class, attributes.getLicensesProvider());
     }
 
-    CppConfiguration cppConfiguration = ruleContext.getFragment(CppConfiguration.class);
-    PlatformConfiguration platformConfig =
-        Preconditions.checkNotNull(ruleContext.getFragment(PlatformConfiguration.class));
-    if (cppConfiguration.provideCcToolchainInfoFromCcToolchainSuite()
-        && !platformConfig.isToolchainTypeEnabled(
-            CppHelper.getToolchainTypeFromRuleClass(ruleContext))) {
+    if (!CppHelper.useToolchainResolution(ruleContext)) {
       // This is not a platforms-backed build, let's provide CcToolchainAttributesProvider
       // and have cc_toolchain_suite select one of its toolchains and create CcToolchainProvider
-      // from its attributes.
-      return ruleConfiguredTargetBuilder.build();
+      // from its attributes. We also need to provide a do-nothing ToolchainInfo.
+      return ruleConfiguredTargetBuilder
+          .addNativeDeclaredProvider(new ToolchainInfo(ImmutableMap.of("cc", "dummy cc toolchain")))
+          .build();
     }
 
-    // This is either a legacy-package-loading-in-cpp-configuration-backed build, or a
-    // platforms-backed build, we will not analyze cc_toolchain_suite at all, and we are
+    // This is a platforms-backed build, we will not analyze cc_toolchain_suite at all, and we are
     // sure current cc_toolchain is the one selected. We can create CcToolchainProvider here.
     CcToolchainProvider ccToolchainProvider =
         CcToolchainProviderHelper.getCcToolchainProvider(ruleContext, attributes);
@@ -82,59 +97,63 @@ public class CcToolchain implements RuleConfiguredTargetFactory {
 
     TemplateVariableInfo templateVariableInfo =
         createMakeVariableProvider(
-            ccToolchainProvider.getCppConfiguration(),
             ccToolchainProvider,
-            ccToolchainProvider.getSysrootPathFragment(),
             ruleContext.getRule().getLocation());
 
+    ToolchainInfo toolchain =
+        new ToolchainInfo(
+            ImmutableMap.<String, Object>builder()
+                .put("cc", ccToolchainProvider)
+                // Add a clear signal that this is a CcToolchainProvider, since just "cc" is
+                // generic enough to possibly be re-used.
+                .put("cc_provider_in_toolchain", true)
+                .build());
     ruleConfiguredTargetBuilder
         .addNativeDeclaredProvider(ccToolchainProvider)
+        .addNativeDeclaredProvider(toolchain)
         .addNativeDeclaredProvider(templateVariableInfo)
-        .setFilesToBuild(ccToolchainProvider.getCrosstool())
-        .addProvider(new MiddlemanProvider(ccToolchainProvider.getCrosstoolMiddleman()));
+        .setFilesToBuild(ccToolchainProvider.getAllFiles())
+        .addProvider(new MiddlemanProvider(ccToolchainProvider.getAllFilesMiddleman()));
     return ruleConfiguredTargetBuilder.build();
   }
 
-  static TemplateVariableInfo createMakeVariableProvider(
-      CppConfiguration cppConfiguration,
-      CcToolchainProvider toolchainProvider,
-      PathFragment sysroot,
-      Location location) {
+  public static TemplateVariableInfo createMakeVariableProvider(
+      CcToolchainProvider toolchainProvider, Location location) {
 
     HashMap<String, String> makeVariables =
-        new HashMap<>(cppConfiguration.getAdditionalMakeVariables());
+        new HashMap<>(toolchainProvider.getAdditionalMakeVariables());
 
     // Add make variables from the toolchainProvider, also.
     ImmutableMap.Builder<String, String> ccProviderMakeVariables = new ImmutableMap.Builder<>();
     toolchainProvider.addGlobalMakeVariables(ccProviderMakeVariables);
     makeVariables.putAll(ccProviderMakeVariables.build());
 
-    // Overwrite the CC_FLAGS variable to include sysroot, if it's available.
-    if (sysroot != null) {
-      String sysrootFlag = "--sysroot=" + sysroot;
-      String ccFlags = makeVariables.get(CppConfiguration.CC_FLAGS_MAKE_VARIABLE_NAME);
-      ccFlags = ccFlags.isEmpty() ? sysrootFlag : ccFlags + " " + sysrootFlag;
-      makeVariables.put(CppConfiguration.CC_FLAGS_MAKE_VARIABLE_NAME, ccFlags);
-    }
     return new TemplateVariableInfo(ImmutableMap.copyOf(makeVariables), location);
   }
 
   /**
-   * Add local build variables from subclasses into {@link CcToolchainVariables} returned from
-   * {@link CcToolchainProviderHelper#getBuildVariables(RuleContext, CcToolchainAttributesProvider,
-   * PathFragment, CcToolchainVariables)}.
-   *
-   * <p>This method is meant to be overridden by subclasses of CcToolchain.
+   * This method marks that the toolchain at hand is actually apple_cc_toolchain. Good job me for
+   * object design and encapsulation.
    */
   protected boolean isAppleToolchain() {
     // To be overridden in subclass.
     return false;
   }
 
-  protected CcToolchainVariables getAdditionalBuildVariables(RuleContext ruleContext)
-      throws RuleErrorException {
-    // To be overridden in subclass.
-    return CcToolchainVariables.EMPTY;
+  /** Functional interface for a function that accepts cpu and {@link BuildOptions}. */
+  protected interface AdditionalBuildVariablesComputer {
+    CcToolchainVariables apply(BuildOptions buildOptions);
   }
 
+  /** Returns a function that will be called to retrieve root {@link CcToolchainVariables}. */
+  protected AdditionalBuildVariablesComputer getAdditionalBuildVariablesComputer(
+      RuleContext ruleContextPossiblyInHostConfiguration) {
+    return (AdditionalBuildVariablesComputer & Serializable)
+        (options) -> CcToolchainVariables.EMPTY;
+  }
+
+  /** Will be called during analysis to ensure target attributes are set correctly. */
+  protected void validateToolchain(RuleContext ruleContext) throws RuleErrorException {
+    // To be overridden in subclass.
+  }
 }

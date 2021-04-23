@@ -1,4 +1,4 @@
-// Copyright 2014 The Bazel Authors. All rights reserved.
+// Copyright 2019 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,20 +11,24 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
 package com.google.devtools.build.lib.vfs;
+
+import static java.nio.file.StandardOpenOption.READ;
 
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.profiler.ProfilerTask;
-import com.google.devtools.build.lib.vfs.DigestHashFunction.DefaultHashFunctionNotSetException;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.nio.channels.FileChannel;
-import javax.annotation.Nullable;
+import java.nio.channels.ReadableByteChannel;
+import java.nio.file.Files;
+import java.util.EnumSet;
 
 /** This class implements the FileSystem interface using direct calls to the UNIX filesystem. */
 @ThreadSafe
@@ -33,20 +37,18 @@ public abstract class AbstractFileSystem extends FileSystem {
   protected static final String ERR_PERMISSION_DENIED = " (Permission denied)";
   protected static final Profiler profiler = Profiler.instance();
 
-  public AbstractFileSystem() throws DefaultHashFunctionNotSetException {}
-
   public AbstractFileSystem(DigestHashFunction digestFunction) {
     super(digestFunction);
   }
 
   @Override
-  protected InputStream getInputStream(Path path) throws IOException {
+  protected InputStream getInputStream(PathFragment path) throws IOException {
     // This loop is a workaround for an apparent bug in FileInputStream.open, which delegates
     // ultimately to JVM_Open in the Hotspot JVM.  This call is not EINTR-safe, so we must do the
     // retry here.
     for (; ; ) {
       try {
-        return createFileInputStream(path);
+        return createMaybeProfiledInputStream(path);
       } catch (FileNotFoundException e) {
         if (e.getMessage().endsWith("(Interrupted system call)")) {
           continue;
@@ -57,8 +59,13 @@ public abstract class AbstractFileSystem extends FileSystem {
     }
   }
 
+  /** Allows the mapping of PathFragment to InputStream to be overridden in subclasses. */
+  protected InputStream createFileInputStream(PathFragment path) throws IOException {
+    return new FileInputStream(path.toString());
+  }
+
   /** Returns either normal or profiled FileInputStream. */
-  private InputStream createFileInputStream(Path path) throws IOException {
+  private InputStream createMaybeProfiledInputStream(PathFragment path) throws IOException {
     final String name = path.toString();
     if (profiler.isActive()
         && (profiler.isProfiling(ProfilerTask.VFS_READ)
@@ -66,46 +73,57 @@ public abstract class AbstractFileSystem extends FileSystem {
       long startTime = Profiler.nanoTimeMaybe();
       try {
         // Replace default FileInputStream instance with the custom one that does profiling.
-        return new ProfiledInputStream(name, newFileInputStream(name));
+        return new ProfiledInputStream(createFileInputStream(path), name);
       } finally {
         profiler.logSimpleTask(startTime, ProfilerTask.VFS_OPEN, name);
       }
     } else {
       // Use normal FileInputStream instance if profiler is not enabled.
-      return newFileInputStream(name);
+      return createFileInputStream(path);
     }
   }
 
-  protected InputStream newFileInputStream(String path) throws IOException {
-    return new FileInputStream(path);
-  }
-
-  protected OutputStream newFileOutputStream(String path, boolean append) throws IOException {
-    return new FileOutputStream(path, append);
+  @Override
+  protected ReadableByteChannel createReadableByteChannel(PathFragment path) throws IOException {
+    final String name = path.toString();
+    if (profiler.isActive()
+        && (profiler.isProfiling(ProfilerTask.VFS_READ)
+            || profiler.isProfiling(ProfilerTask.VFS_OPEN))) {
+      long startTime = Profiler.nanoTimeMaybe();
+      try {
+        // Currently, we do not proxy ReadableByteChannel for profiling.
+        return Files.newByteChannel(java.nio.file.Paths.get(name), EnumSet.of(READ));
+      } finally {
+        profiler.logSimpleTask(startTime, ProfilerTask.VFS_OPEN, name);
+      }
+    } else {
+      return Files.newByteChannel(java.nio.file.Paths.get(name));
+    }
   }
 
   /**
    * Returns either normal or profiled FileOutputStream. Should be used by subclasses to create
    * default OutputStream instance.
    */
-  protected OutputStream createFileOutputStream(Path path, boolean append) throws IOException {
+  protected OutputStream createFileOutputStream(PathFragment path, boolean append)
+      throws FileNotFoundException {
     final String name = path.toString();
     if (profiler.isActive()
         && (profiler.isProfiling(ProfilerTask.VFS_WRITE)
             || profiler.isProfiling(ProfilerTask.VFS_OPEN))) {
       long startTime = Profiler.nanoTimeMaybe();
       try {
-        return new ProfiledFileOutputStream(name, newFileOutputStream(name, append));
+        return new ProfiledFileOutputStream(name, append);
       } finally {
         profiler.logSimpleTask(startTime, ProfilerTask.VFS_OPEN, name);
       }
     } else {
-      return newFileOutputStream(name, append);
+      return new FileOutputStream(name, append);
     }
   }
 
   @Override
-  protected OutputStream getOutputStream(Path path, boolean append) throws IOException {
+  protected OutputStream getOutputStream(PathFragment path, boolean append) throws IOException {
     try {
       return createFileOutputStream(path, append);
     } catch (FileNotFoundException e) {
@@ -119,43 +137,21 @@ public abstract class AbstractFileSystem extends FileSystem {
     }
   }
 
-  private static final class ProfiledInputStream extends InputStream implements
-      FileChannelSupplier {
+  private static final class ProfiledInputStream extends FilterInputStream {
+    private final InputStream impl;
     private final String name;
-    private final InputStream stm;
 
-    public ProfiledInputStream(String name, InputStream stm) {
+    public ProfiledInputStream(InputStream impl, String name) {
+      super(impl);
+      this.impl = impl;
       this.name = name;
-      this.stm = stm;
-    }
-
-    @Override
-    public int available() throws IOException {
-      return stm.available();
-    }
-
-    @Override
-    public void close() throws IOException {
-      stm.close();
-    }
-
-    @Override
-    public void mark(int readlimit) {
-      stm.mark(readlimit);
-    }
-
-    @Override
-    public boolean markSupported() {
-      return stm.markSupported();
     }
 
     @Override
     public int read() throws IOException {
       long startTime = Profiler.nanoTimeMaybe();
       try {
-        // Note that FileInputStream#read() does *not* call any of our overridden methods,
-        // so there's no concern with double counting here.
-        return stm.read();
+        return impl.read();
       } finally {
         profiler.logSimpleTask(startTime, ProfilerTask.VFS_READ, name);
       }
@@ -170,55 +166,19 @@ public abstract class AbstractFileSystem extends FileSystem {
     public int read(byte[] b, int off, int len) throws IOException {
       long startTime = Profiler.nanoTimeMaybe();
       try {
-        return stm.read(b, off, len);
+        return impl.read(b, off, len);
       } finally {
         profiler.logSimpleTask(startTime, ProfilerTask.VFS_READ, name);
       }
     }
-
-    @Override
-    public void reset() throws IOException {
-      stm.reset();
-    }
-
-    @Override
-    public long skip(long n) throws IOException {
-      return stm.skip(n);
-    }
-
-    @Override
-    public FileChannel getChannel() {
-      return stm instanceof FileInputStream
-          ? ((FileInputStream) stm).getChannel()
-          : null;
-    }
   }
 
-  /**
-   * Interface to return a {@link FileChannel}.
-   */
-  public interface FileChannelSupplier {
-    @Nullable
-    FileChannel getChannel();
-  }
-
-  private static final class ProfiledFileOutputStream extends OutputStream {
+  private static final class ProfiledFileOutputStream extends FileOutputStream {
     private final String name;
-    private final OutputStream stm;
 
-    public ProfiledFileOutputStream(String name, OutputStream stm) {
+    public ProfiledFileOutputStream(String name, boolean append) throws FileNotFoundException {
+      super(name, append);
       this.name = name;
-      this.stm = stm;
-    }
-
-    @Override
-    public void close() throws IOException {
-      stm.close();
-    }
-
-    @Override
-    public void flush() throws IOException {
-      stm.flush();
     }
 
     @Override
@@ -230,17 +190,7 @@ public abstract class AbstractFileSystem extends FileSystem {
     public void write(byte[] b, int off, int len) throws IOException {
       long startTime = Profiler.nanoTimeMaybe();
       try {
-        stm.write(b, off, len);
-      } finally {
-        profiler.logSimpleTask(startTime, ProfilerTask.VFS_WRITE, name);
-      }
-    }
-
-    @Override
-    public void write(int b) throws IOException {
-      long startTime = Profiler.nanoTimeMaybe();
-      try {
-        stm.write(b);
+        super.write(b, off, len);
       } finally {
         profiler.logSimpleTask(startTime, ProfilerTask.VFS_WRITE, name);
       }

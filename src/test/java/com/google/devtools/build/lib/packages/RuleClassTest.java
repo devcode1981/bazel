@@ -18,45 +18,45 @@ import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.devtools.build.lib.packages.Attribute.attr;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL_LIST;
+import static com.google.devtools.build.lib.packages.BuildType.NODEP_LABEL;
 import static com.google.devtools.build.lib.packages.BuildType.OUTPUT_LIST;
 import static com.google.devtools.build.lib.packages.ImplicitOutputsFunction.substitutePlaceholderIntoTemplate;
-import static com.google.devtools.build.lib.packages.RuleClass.Builder.SKYLARK_BUILD_SETTING_DEFAULT_ATTR_NAME;
+import static com.google.devtools.build.lib.packages.RuleClass.Builder.STARLARK_BUILD_SETTING_DEFAULT_ATTR_NAME;
 import static com.google.devtools.build.lib.packages.RuleClass.NO_EXTERNAL_BINDINGS;
-import static com.google.devtools.build.lib.syntax.Type.BOOLEAN;
-import static com.google.devtools.build.lib.syntax.Type.INTEGER;
-import static com.google.devtools.build.lib.syntax.Type.STRING;
-import static com.google.devtools.build.lib.syntax.Type.STRING_LIST;
+import static com.google.devtools.build.lib.packages.RuleClass.NO_TOOLCHAINS_TO_REGISTER;
+import static com.google.devtools.build.lib.packages.Type.BOOLEAN;
+import static com.google.devtools.build.lib.packages.Type.INTEGER;
+import static com.google.devtools.build.lib.packages.Type.STRING;
+import static com.google.devtools.build.lib.packages.Type.STRING_LIST;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.fail;
 
-import com.google.common.base.Function;
 import com.google.common.base.Predicate;
 import com.google.common.base.Predicates;
+import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.analysis.config.Fragment;
+import com.google.devtools.build.lib.analysis.config.transitions.TransitionFactory;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventCollector;
 import com.google.devtools.build.lib.events.EventKind;
-import com.google.devtools.build.lib.events.Location;
-import com.google.devtools.build.lib.events.Location.LineAndColumn;
-import com.google.devtools.build.lib.packages.Attribute.SkylarkComputedDefaultTemplate.CannotPrecomputeDefaultsException;
+import com.google.devtools.build.lib.packages.Attribute.StarlarkComputedDefaultTemplate.CannotPrecomputeDefaultsException;
 import com.google.devtools.build.lib.packages.Attribute.ValidityPredicate;
-import com.google.devtools.build.lib.packages.ConfigurationFragmentPolicy.MissingFragmentPolicy;
 import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
+import com.google.devtools.build.lib.packages.RuleClass.Builder.ThirdPartyLicenseExistencePolicy;
 import com.google.devtools.build.lib.packages.RuleClass.ConfiguredTargetFactory;
-import com.google.devtools.build.lib.packages.RuleClass.ExecutionPlatformConstraintsAllowed;
+import com.google.devtools.build.lib.packages.RuleClass.ToolchainResolutionMode;
+import com.google.devtools.build.lib.packages.RuleClass.ToolchainTransitionMode;
 import com.google.devtools.build.lib.packages.RuleFactory.BuildLangTypedAttributeValuesMap;
 import com.google.devtools.build.lib.packages.util.PackageLoadingTestCase;
-import com.google.devtools.build.lib.syntax.BaseFunction;
-import com.google.devtools.build.lib.syntax.Environment;
-import com.google.devtools.build.lib.syntax.Type;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import java.util.ArrayList;
@@ -70,6 +70,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import javax.annotation.Nullable;
+import net.starlark.java.eval.StarlarkFunction;
+import net.starlark.java.eval.StarlarkInt;
+import net.starlark.java.eval.StarlarkSemantics;
+import net.starlark.java.eval.StarlarkThread;
+import net.starlark.java.syntax.Location;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -90,16 +95,22 @@ public class RuleClassTest extends PackageLoadingTestCase {
             }
           };
 
-  private static final class DummyFragment extends BuildConfiguration.Fragment {
+  private static final ImmutableList<StarlarkThread.CallStackEntry> DUMMY_STACK =
+      ImmutableList.of(
+          new StarlarkThread.CallStackEntry(
+              "<toplevel>", Location.fromFileLineColumn("BUILD", 10, 1)),
+          new StarlarkThread.CallStackEntry("bar", Location.fromFileLineColumn("bar.bzl", 42, 1)),
+          new StarlarkThread.CallStackEntry("rule", Location.BUILTIN));
 
-  }
+  private static final class DummyFragment extends Fragment {}
+
+  private static final ImmutableList<StarlarkThread.CallStackEntry> NO_STACK = ImmutableList.of();
 
   private static final Predicate<String> PREFERRED_DEPENDENCY_PREDICATE = Predicates.alwaysFalse();
 
   private static RuleClass createRuleClassA() throws LabelSyntaxException {
     return newRuleClass(
         "ruleA",
-        false,
         false,
         false,
         false,
@@ -113,10 +124,7 @@ public class RuleClassTest extends PackageLoadingTestCase {
         PREFERRED_DEPENDENCY_PREDICATE,
         AdvertisedProviderSet.EMPTY,
         null,
-        NO_EXTERNAL_BINDINGS,
-        null,
         ImmutableSet.<Class<?>>of(),
-        MissingFragmentPolicy.FAIL_ANALYSIS,
         true,
         attr("my-string-attr", STRING).mandatory().build(),
         attr("my-label-attr", LABEL)
@@ -125,7 +133,7 @@ public class RuleClassTest extends PackageLoadingTestCase {
             .value(Label.parseAbsolute("//default:label", ImmutableMap.of()))
             .build(),
         attr("my-labellist-attr", LABEL_LIST).mandatory().legacyAllowAnyFileType().build(),
-        attr("my-integer-attr", INTEGER).value(42).build(),
+        attr("my-integer-attr", INTEGER).value(StarlarkInt.of(42)).build(),
         attr("my-string-attr2", STRING).mandatory().value((String) null).build(),
         attr("my-stringlist-attr", STRING_LIST).build(),
         attr("my-sorted-stringlist-attr", STRING_LIST).orderIndependent().build());
@@ -143,7 +151,6 @@ public class RuleClassTest extends PackageLoadingTestCase {
         false,
         false,
         false,
-        false,
         ImplicitOutputsFunction.NONE,
         null,
         DUMMY_CONFIGURED_TARGET_FACTORY,
@@ -151,10 +158,7 @@ public class RuleClassTest extends PackageLoadingTestCase {
         PREFERRED_DEPENDENCY_PREDICATE,
         AdvertisedProviderSet.EMPTY,
         null,
-        NO_EXTERNAL_BINDINGS,
-        null,
         ImmutableSet.<Class<?>>of(),
-        MissingFragmentPolicy.FAIL_ANALYSIS,
         true,
         attributes.toArray(new Attribute[0]));
   }
@@ -194,7 +198,7 @@ public class RuleClassTest extends PackageLoadingTestCase {
     assertThat(ruleClassA.getAttribute(1).getDefaultValue(null))
         .isEqualTo(Label.parseAbsolute("//default:label", ImmutableMap.of()));
     assertThat(ruleClassA.getAttribute(2).getDefaultValue(null)).isEqualTo(Collections.emptyList());
-    assertThat(ruleClassA.getAttribute(3).getDefaultValue(null)).isEqualTo(42);
+    assertThat(ruleClassA.getAttribute(3).getDefaultValue(null)).isEqualTo(StarlarkInt.of(42));
     // default explicitly specified
     assertThat(ruleClassA.getAttribute(4).getDefaultValue(null)).isNull();
     assertThat(ruleClassA.getAttribute(5).getDefaultValue(null)).isEqualTo(Collections.emptyList());
@@ -250,13 +254,17 @@ public class RuleClassTest extends PackageLoadingTestCase {
   @Before
   public final void setRuleLocation() throws Exception {
     testBuildfilePath = root.getRelative("testpackage/BUILD");
-    testRuleLocation = Location.fromPathAndStartColumn(
-        testBuildfilePath.asFragment(), 0, 0, new LineAndColumn(TEST_RULE_DEFINED_AT_LINE, 0));
+    testRuleLocation =
+        Location.fromFileLineColumn(testBuildfilePath.toString(), TEST_RULE_DEFINED_AT_LINE, 0);
   }
 
   private Package.Builder createDummyPackageBuilder() {
     return packageFactory
-        .newPackageBuilder(PackageIdentifier.createInMainRepo(TEST_PACKAGE_NAME), "TESTING")
+        .newPackageBuilder(
+            PackageIdentifier.createInMainRepo(TEST_PACKAGE_NAME),
+            "TESTING",
+            StarlarkSemantics.DEFAULT,
+            /*repositoryMapping=*/ ImmutableMap.of())
         .setFilename(RootedPath.toRootedPath(root, testBuildfilePath));
   }
 
@@ -271,7 +279,6 @@ public class RuleClassTest extends PackageLoadingTestCase {
             false,
             false,
             false,
-            false,
             ImplicitOutputsFunction.NONE,
             null,
             DUMMY_CONFIGURED_TARGET_FACTORY,
@@ -279,10 +286,7 @@ public class RuleClassTest extends PackageLoadingTestCase {
             PREFERRED_DEPENDENCY_PREDICATE,
             AdvertisedProviderSet.EMPTY,
             null,
-            NO_EXTERNAL_BINDINGS,
-            null,
             ImmutableSet.<Class<?>>of(),
-            MissingFragmentPolicy.FAIL_ANALYSIS,
             true,
             attr("list1", LABEL_LIST).mandatory().legacyAllowAnyFileType().build(),
             attr("list2", LABEL_LIST).mandatory().legacyAllowAnyFileType().build(),
@@ -295,9 +299,9 @@ public class RuleClassTest extends PackageLoadingTestCase {
     attributeValues.put("list3", Lists.newArrayList(":dup1", ":dup1", ":dup2", ":dup2"));
 
     reporter.removeHandler(failFastHandler);
-    createRule(depsRuleClass, "depsRule", attributeValues, testRuleLocation);
+    createRule(depsRuleClass, "depsRule", attributeValues, testRuleLocation, NO_STACK);
 
-    assertThat(eventCollector.count()).isSameAs(3);
+    assertThat(eventCollector.count()).isSameInstanceAs(3);
     assertDupError("//testpackage:dup1", "list1", "depsRule");
     assertDupError("//testpackage:dup1", "list3", "depsRule");
     assertDupError("//testpackage:dup2", "list3", "depsRule");
@@ -306,43 +310,6 @@ public class RuleClassTest extends PackageLoadingTestCase {
   private void assertDupError(String label, String attrName, String ruleName) {
     assertContainsEvent(String.format("Label '%s' is duplicated in the '%s' attribute of rule '%s'",
         label, attrName, ruleName));
-  }
-
-  @Test
-  public void testCreateRuleWithLegacyPublicVisibility() throws Exception {
-    RuleClass ruleClass =
-        newRuleClass(
-            "ruleVis",
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            ImplicitOutputsFunction.NONE,
-            null,
-            DUMMY_CONFIGURED_TARGET_FACTORY,
-            PredicatesWithMessage.<Rule>alwaysTrue(),
-            PREFERRED_DEPENDENCY_PREDICATE,
-            AdvertisedProviderSet.EMPTY,
-            null,
-            NO_EXTERNAL_BINDINGS,
-            null,
-            ImmutableSet.<Class<?>>of(),
-            MissingFragmentPolicy.FAIL_ANALYSIS,
-            true,
-            attr("visibility", LABEL_LIST).legacyAllowAnyFileType().build());
-    Map<String, Object> attributeValues = new HashMap<>();
-    attributeValues.put("visibility", Arrays.asList("//visibility:legacy_public"));
-
-    reporter.removeHandler(failFastHandler);
-    EventCollector collector = new EventCollector(EventKind.ERRORS);
-    reporter.addHandler(collector);
-
-    createRule(ruleClass, TEST_RULE_NAME, attributeValues, testRuleLocation);
-
-    assertContainsEvent("//visibility:legacy_public only allowed in package declaration");
   }
 
   @Test
@@ -359,7 +326,7 @@ public class RuleClassTest extends PackageLoadingTestCase {
     EventCollector collector = new EventCollector(EventKind.ERRORS);
     reporter.addHandler(collector);
 
-    Rule rule = createRule(ruleClassA, TEST_RULE_NAME, attributeValues, testRuleLocation);
+    Rule rule = createRule(ruleClassA, TEST_RULE_NAME, attributeValues, testRuleLocation, NO_STACK);
 
     // TODO(blaze-team): (2009) refactor to use assertContainsEvent
     Iterator<String> expectedMessages = Arrays.asList(
@@ -376,9 +343,8 @@ public class RuleClassTest extends PackageLoadingTestCase {
     ).iterator();
 
     for (Event event : collector) {
-      assertThat(event.getLocation().getStartLineAndColumn().getLine())
-          .isEqualTo(TEST_RULE_DEFINED_AT_LINE);
-      assertThat(event.getLocation().getPath()).isEqualTo(testBuildfilePath.asFragment());
+      assertThat(event.getLocation().line()).isEqualTo(TEST_RULE_DEFINED_AT_LINE);
+      assertThat(event.getLocation().file()).isEqualTo(testBuildfilePath.toString());
       assertThat(event.getMessage())
           .isEqualTo(TEST_RULE_LABEL.toString().substring(1) + ": " + expectedMessages.next());
     }
@@ -392,19 +358,20 @@ public class RuleClassTest extends PackageLoadingTestCase {
     AttributeMap attributes = RawAttributeMapper.of(rule);
     assertThat(attributes.get("my-label-attr", BuildType.LABEL).toString())
         .isEqualTo("//default:label");
-    assertThat(attributes.get("my-integer-attr", Type.INTEGER).intValue()).isEqualTo(42);
+    assertThat(attributes.get("my-integer-attr", Type.INTEGER).toIntUnchecked()).isEqualTo(42);
     // missing attribute -> default chosen based on type
     assertThat(attributes.get("my-string-attr", Type.STRING)).isEmpty();
     assertThat(attributes.get("my-labellist-attr", BuildType.LABEL_LIST)).isEmpty();
     assertThat(attributes.get("my-stringlist-attr", Type.STRING_LIST))
         .isEqualTo(Arrays.asList("foo", "bar"));
-    try {
-      attributes.get("my-labellist-attr", Type.STRING); // wrong type
-      fail();
-    } catch (IllegalArgumentException e) {
-      assertThat(e).hasMessage("Attribute my-labellist-attr is of type list(label) "
-          + "and not of type string in ruleA rule //testpackage:my-rule-A");
-    }
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class, () -> attributes.get("my-labellist-attr", Type.STRING));
+    assertThat(e)
+        .hasMessageThat()
+        .isEqualTo(
+            "Attribute my-labellist-attr is of type list(label) "
+                + "and not of type string in ruleA rule //testpackage:my-rule-A");
   }
 
   @Test
@@ -412,7 +379,6 @@ public class RuleClassTest extends PackageLoadingTestCase {
     RuleClass ruleClassC =
         newRuleClass(
             "ruleC",
-            false,
             false,
             false,
             false,
@@ -427,10 +393,7 @@ public class RuleClassTest extends PackageLoadingTestCase {
             PREFERRED_DEPENDENCY_PREDICATE,
             AdvertisedProviderSet.EMPTY,
             null,
-            NO_EXTERNAL_BINDINGS,
-            null,
             ImmutableSet.<Class<?>>of(),
-            MissingFragmentPolicy.FAIL_ANALYSIS,
             true,
             attr("name", STRING).build(),
             attr("outs", OUTPUT_LIST).build());
@@ -439,12 +402,12 @@ public class RuleClassTest extends PackageLoadingTestCase {
     attributeValues.put("outs", Collections.singletonList("explicit_out"));
     attributeValues.put("name", "myrule");
 
-    Rule rule = createRule(ruleClassC, "myrule", attributeValues, testRuleLocation);
+    Rule rule = createRule(ruleClassC, "myrule", attributeValues, testRuleLocation, NO_STACK);
 
     Set<String> set = new HashSet<>();
     for (OutputFile outputFile : rule.getOutputFiles()) {
       set.add(outputFile.getName());
-      assertThat(outputFile.getGeneratingRule()).isSameAs(rule);
+      assertThat(outputFile.getGeneratingRule()).isSameInstanceAs(rule);
     }
     assertThat(set).containsExactly("foo-myrule.bar", "libmyrule-wazoo-myrule.mumble",
         "stuff-explicit_out-bar", "explicit_out");
@@ -461,7 +424,6 @@ public class RuleClassTest extends PackageLoadingTestCase {
             false,
             false,
             false,
-            false,
             ImplicitOutputsFunction.fromTemplates("%{dirname}lib%{basename}.bar"),
             null,
             DUMMY_CONFIGURED_TARGET_FACTORY,
@@ -469,19 +431,15 @@ public class RuleClassTest extends PackageLoadingTestCase {
             PREFERRED_DEPENDENCY_PREDICATE,
             AdvertisedProviderSet.EMPTY,
             null,
-            NO_EXTERNAL_BINDINGS,
-            null,
             ImmutableSet.<Class<?>>of(),
-            MissingFragmentPolicy.FAIL_ANALYSIS,
             true);
 
-    Rule rule = createRule(ruleClass, "myRule", Collections.<String, Object>emptyMap(),
-        testRuleLocation);
+    Rule rule = createRule(ruleClass, "myRule", ImmutableMap.of(), testRuleLocation, NO_STACK);
     assertThat(Iterables.getOnlyElement(rule.getOutputFiles()).getName())
         .isEqualTo("libmyRule.bar");
 
-    Rule ruleWithSlash = createRule(ruleClass, "myRule/with/slash",
-        Collections.<String, Object>emptyMap(), testRuleLocation);
+    Rule ruleWithSlash =
+        createRule(ruleClass, "myRule/with/slash", ImmutableMap.of(), testRuleLocation, NO_STACK);
     assertThat(Iterables.getOnlyElement(ruleWithSlash.getOutputFiles()).getName())
         .isEqualTo("myRule/with/libslash.bar");
   }
@@ -499,7 +457,6 @@ public class RuleClassTest extends PackageLoadingTestCase {
         false,
         false,
         false,
-        false,
         ImplicitOutputsFunction.fromTemplates("empty"),
         null,
         DUMMY_CONFIGURED_TARGET_FACTORY,
@@ -507,10 +464,7 @@ public class RuleClassTest extends PackageLoadingTestCase {
         PREFERRED_DEPENDENCY_PREDICATE,
         AdvertisedProviderSet.EMPTY,
         null,
-        NO_EXTERNAL_BINDINGS,
-        null,
         ImmutableSet.<Class<?>>of(),
-        MissingFragmentPolicy.FAIL_ANALYSIS,
         true,
         attr("condition", BOOLEAN).value(false).build(),
         attr("declared1", BOOLEAN).value(false).build(),
@@ -524,10 +478,15 @@ public class RuleClassTest extends PackageLoadingTestCase {
    */
   private void checkValidComputedDefault(Object expectedValue, Attribute computedDefault,
       ImmutableMap<String, Object> attrValueMap) throws Exception {
-    assertThat(computedDefault.getDefaultValueForTesting() instanceof Attribute.ComputedDefault)
-        .isTrue();
-    Rule rule = createRule(getRuleClassWithComputedDefault(computedDefault), "myRule",
-        attrValueMap, testRuleLocation);
+    assertThat(computedDefault.getDefaultValueUnchecked())
+        .isInstanceOf(Attribute.ComputedDefault.class);
+    Rule rule =
+        createRule(
+            getRuleClassWithComputedDefault(computedDefault),
+            "myRule",
+            attrValueMap,
+            testRuleLocation,
+            NO_STACK);
     AttributeMap attributes = RawAttributeMapper.of(rule);
     assertThat(attributes.get(computedDefault.getName(), computedDefault.getType()))
         .isEqualTo(expectedValue);
@@ -539,15 +498,17 @@ public class RuleClassTest extends PackageLoadingTestCase {
    */
   private void checkInvalidComputedDefault(Attribute computedDefault, String expectedMessage)
       throws Exception {
-    try {
-      createRule(getRuleClassWithComputedDefault(computedDefault), "myRule",
-              ImmutableMap.<String, Object>of(), testRuleLocation);
-      fail("Expected computed default \"" + computedDefault.getName() + "\" to fail with "
-          + "declaration errors");
-    } catch (IllegalArgumentException e) {
-      // Expected outcome.
-      assertThat(e).hasMessage(expectedMessage);
-    }
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                createRule(
+                    getRuleClassWithComputedDefault(computedDefault),
+                    "myRule",
+                    ImmutableMap.<String, Object>of(),
+                    testRuleLocation,
+                    NO_STACK));
+    assertThat(e).hasMessageThat().isEqualTo(expectedMessage);
   }
 
   /**
@@ -662,7 +623,6 @@ public class RuleClassTest extends PackageLoadingTestCase {
             false,
             false,
             false,
-            false,
             ImplicitOutputsFunction.fromTemplates("first-%{name}", "second-%{name}", "out-%{outs}"),
             null,
             DUMMY_CONFIGURED_TARGET_FACTORY,
@@ -670,10 +630,7 @@ public class RuleClassTest extends PackageLoadingTestCase {
             PREFERRED_DEPENDENCY_PREDICATE,
             AdvertisedProviderSet.EMPTY,
             null,
-            NO_EXTERNAL_BINDINGS,
-            null,
             ImmutableSet.<Class<?>>of(),
-            MissingFragmentPolicy.FAIL_ANALYSIS,
             true,
             attr("name", STRING).build(),
             attr("outs", OUTPUT_LIST).build());
@@ -682,12 +639,12 @@ public class RuleClassTest extends PackageLoadingTestCase {
     attributeValues.put("outs", ImmutableList.of("third", "fourth"));
     attributeValues.put("name", "myrule");
 
-    Rule rule = createRule(ruleClassC, "myrule", attributeValues, testRuleLocation);
+    Rule rule = createRule(ruleClassC, "myrule", attributeValues, testRuleLocation, NO_STACK);
 
     List<String> actual = new ArrayList<>();
     for (OutputFile outputFile : rule.getOutputFiles()) {
       actual.add(outputFile.getName());
-      assertThat(outputFile.getGeneratingRule()).isSameAs(rule);
+      assertThat(outputFile.getGeneratingRule()).isSameInstanceAs(rule);
     }
     assertWithMessage("unexpected output set").that(actual).containsExactly("first-myrule",
         "second-myrule", "out-third", "out-fourth", "third", "fourth");
@@ -706,7 +663,6 @@ public class RuleClassTest extends PackageLoadingTestCase {
             false,
             false,
             false,
-            false,
             ImplicitOutputsFunction.NONE,
             null,
             DUMMY_CONFIGURED_TARGET_FACTORY,
@@ -714,10 +670,7 @@ public class RuleClassTest extends PackageLoadingTestCase {
             PREFERRED_DEPENDENCY_PREDICATE,
             AdvertisedProviderSet.EMPTY,
             null,
-            NO_EXTERNAL_BINDINGS,
-            null,
             ImmutableSet.<Class<?>>of(),
-            MissingFragmentPolicy.FAIL_ANALYSIS,
             true,
             attr("a", STRING_LIST).mandatory().build(),
             attr("b", STRING_LIST).mandatory().build(),
@@ -732,8 +685,9 @@ public class RuleClassTest extends PackageLoadingTestCase {
     attributeValues.put("baz", ImmutableList.of("baz", "BAZ"));
     attributeValues.put("empty", ImmutableList.<String>of());
 
-    AttributeMap rule = RawAttributeMapper.of(
-        createRule(ruleClass, "testrule", attributeValues, testRuleLocation));
+    AttributeMap rule =
+        RawAttributeMapper.of(
+            createRule(ruleClass, "testrule", attributeValues, testRuleLocation, NO_STACK));
 
     assertThat(substitutePlaceholderIntoTemplate("foo", rule)).containsExactly("foo");
     assertThat(substitutePlaceholderIntoTemplate("foo-%{baz}-bar", rule)).containsExactly(
@@ -761,7 +715,7 @@ public class RuleClassTest extends PackageLoadingTestCase {
     attributeValues.put("my-stringlist-attr", list);
     attributeValues.put("my-sorted-stringlist-attr", list);
 
-    Rule rule = createRule(ruleClassA, "testrule", attributeValues, testRuleLocation);
+    Rule rule = createRule(ruleClassA, "testrule", attributeValues, testRuleLocation, NO_STACK);
     AttributeMap attributes = RawAttributeMapper.of(rule);
 
     assertThat(attributes.get("my-stringlist-attr", Type.STRING_LIST)).isEqualTo(list);
@@ -770,7 +724,11 @@ public class RuleClassTest extends PackageLoadingTestCase {
   }
 
   private Rule createRule(
-      RuleClass ruleClass, String name, Map<String, Object> attributeValues, Location location)
+      RuleClass ruleClass,
+      String name,
+      Map<String, Object> attributeValues,
+      Location location,
+      List<StarlarkThread.CallStackEntry> callstack)
       throws LabelSyntaxException, InterruptedException, CannotPrecomputeDefaultsException {
     Package.Builder pkgBuilder = createDummyPackageBuilder();
     Label ruleLabel;
@@ -784,24 +742,26 @@ public class RuleClassTest extends PackageLoadingTestCase {
         ruleLabel,
         new BuildLangTypedAttributeValuesMap(attributeValues),
         reporter,
-        /*ast=*/ null,
         location,
-        new AttributeContainer(ruleClass));
+        callstack,
+        /*checkThirdPartyRulesHaveLicenses=*/ true);
   }
 
   @Test
   public void testOverrideWithWrongType() {
-    try {
-      RuleClass parentRuleClass = createParentRuleClass();
+    RuleClass parentRuleClass = createParentRuleClass();
 
-      RuleClass.Builder childRuleClassBuilder = new RuleClass.Builder(
-          "child_rule", RuleClassType.NORMAL, false, parentRuleClass);
-      childRuleClassBuilder.override(attr("attr", INTEGER));
-      fail();
-    } catch (IllegalStateException e) {
-      assertThat(e).hasMessage("The type of the new attribute 'int' is different from "
-          + "the original one 'string'.");
-    }
+    RuleClass.Builder childRuleClassBuilder =
+        new RuleClass.Builder("child_rule", RuleClassType.NORMAL, false, parentRuleClass);
+    IllegalStateException e =
+        assertThrows(
+            IllegalStateException.class,
+            () -> childRuleClassBuilder.override(attr("attr", INTEGER)));
+    assertThat(e)
+        .hasMessageThat()
+        .isEqualTo(
+            "The type of the new attribute 'int' is different from "
+                + "the original one 'string'.");
   }
 
   @Test
@@ -821,8 +781,8 @@ public class RuleClassTest extends PackageLoadingTestCase {
     Map<String, Object> parentValues = new LinkedHashMap<>();
     Map<String, Object> childValues = new LinkedHashMap<>();
     childValues.put("attr", "somevalue");
-    createRule(parentRuleClass, "parent_rule", parentValues, testRuleLocation);
-    createRule(childRuleClass, "child_rule", childValues, testRuleLocation);
+    createRule(parentRuleClass, "parent_rule", parentValues, testRuleLocation, NO_STACK);
+    createRule(childRuleClass, "child_rule", childValues, testRuleLocation, NO_STACK);
   }
 
   @Test
@@ -832,9 +792,9 @@ public class RuleClassTest extends PackageLoadingTestCase {
 
     Map<String, Object> childValues = new LinkedHashMap<>();
     reporter.removeHandler(failFastHandler);
-    createRule(childRuleClass, "child_rule", childValues, testRuleLocation);
+    createRule(childRuleClass, "child_rule", childValues, testRuleLocation, NO_STACK);
 
-    assertThat(eventCollector.count()).isSameAs(1);
+    assertThat(eventCollector.count()).isSameInstanceAs(1);
     assertContainsEvent("//testpackage:child_rule: missing value for mandatory "
         + "attribute 'attr' in 'child_rule' rule");
   }
@@ -851,66 +811,59 @@ public class RuleClassTest extends PackageLoadingTestCase {
 
   private static RuleClass newRuleClass(
       String name,
-      boolean skylarkExecutable,
+      boolean starlarkExecutable,
       boolean documented,
-      boolean publicByDefault,
       boolean binaryOutput,
       boolean workspaceOnly,
       boolean outputsDefaultExecutable,
       boolean isAnalysisTest,
       ImplicitOutputsFunction implicitOutputsFunction,
-      RuleTransitionFactory transitionFactory,
+      TransitionFactory<Rule> transitionFactory,
       ConfiguredTargetFactory<?, ?, ?> configuredTargetFactory,
       PredicateWithMessage<Rule> validityPredicate,
       Predicate<String> preferredDependencyPredicate,
       AdvertisedProviderSet advertisedProviders,
-      @Nullable BaseFunction configuredTargetFunction,
-      Function<? super Rule, Map<String, Label>> externalBindingsFunction,
-      @Nullable Environment ruleDefinitionEnvironment,
+      @Nullable StarlarkFunction configuredTargetFunction,
       Set<Class<?>> allowedConfigurationFragments,
-      MissingFragmentPolicy missingFragmentPolicy,
       boolean supportsConstraintChecking,
       Attribute... attributes) {
-    String ruleDefinitionEnvironmentHashCode =
-        ruleDefinitionEnvironment == null
-            ? null
-            : ruleDefinitionEnvironment.getTransitiveContentHashCode();
     return new RuleClass(
         name,
-        name,
+        DUMMY_STACK,
+        /*key=*/ name,
         RuleClassType.NORMAL,
-        /*isSkylark=*/ skylarkExecutable,
-        /*skylarkTestable=*/ false,
+        /*isStarlark=*/ starlarkExecutable,
+        /*starlarkTestable=*/ false,
         documented,
-        publicByDefault,
         binaryOutput,
         workspaceOnly,
         outputsDefaultExecutable,
         isAnalysisTest,
-        /* hasFunctionTransitionWhitelist=*/ false,
+        /* hasAnalysisTestTransition=*/ false,
+        /* hasFunctionTransitionAllowlist= */ false,
+        /* ignoreLicenses=*/ false,
         implicitOutputsFunction,
-        /*isConfigMatcher=*/ false,
         transitionFactory,
         configuredTargetFactory,
         validityPredicate,
         preferredDependencyPredicate,
         advertisedProviders,
         configuredTargetFunction,
-        externalBindingsFunction,
+        NO_EXTERNAL_BINDINGS,
+        NO_TOOLCHAINS_TO_REGISTER,
         /*optionReferenceFunction=*/ RuleClass.NO_OPTION_REFERENCE,
-        ruleDefinitionEnvironment == null
-            ? null
-            : ruleDefinitionEnvironment.getGlobals().getLabel(),
-        ruleDefinitionEnvironmentHashCode,
+        /*ruleDefinitionEnvironmentLabel=*/ null,
+        /*ruleDefinitionEnvironmentDigest=*/ null,
         new ConfigurationFragmentPolicy.Builder()
             .requiresConfigurationFragments(allowedConfigurationFragments)
-            .setMissingFragmentPolicy(missingFragmentPolicy)
             .build(),
         supportsConstraintChecking,
+        ThirdPartyLicenseExistencePolicy.USER_CONTROLLABLE,
         /*requiredToolchains=*/ ImmutableSet.of(),
-        /*supportsPlatforms=*/ true,
-        ExecutionPlatformConstraintsAllowed.PER_RULE,
+        /*useToolchainResolution=*/ ToolchainResolutionMode.ENABLED,
+        /*useToolchainTransition=*/ ToolchainTransitionMode.ENABLED,
         /* executionPlatformConstraints= */ ImmutableSet.of(),
+        /* execGroups= */ ImmutableMap.of(),
         OutputFile.Kind.FILE,
         ImmutableList.copyOf(attributes),
         /* buildSetting= */ null);
@@ -925,7 +878,6 @@ public class RuleClassTest extends PackageLoadingTestCase {
         false,
         false,
         false,
-        false,
         ImplicitOutputsFunction.NONE,
         null,
         DUMMY_CONFIGURED_TARGET_FACTORY,
@@ -933,10 +885,7 @@ public class RuleClassTest extends PackageLoadingTestCase {
         PREFERRED_DEPENDENCY_PREDICATE,
         AdvertisedProviderSet.EMPTY,
         null,
-        NO_EXTERNAL_BINDINGS,
-        null,
         ImmutableSet.<Class<?>>of(DummyFragment.class),
-        MissingFragmentPolicy.FAIL_ANALYSIS,
         true,
         attr("attr", STRING).build());
   }
@@ -958,10 +907,8 @@ public class RuleClassTest extends PackageLoadingTestCase {
         .factory(DUMMY_CONFIGURED_TARGET_FACTORY)
         .add(attr("tags", STRING_LIST))
         .build();
-    final Rule dep1 = createRule(depClass, "dep1", Collections.<String, Object>emptyMap(),
-        testRuleLocation);
-    final Rule dep2 = createRule(depClass, "dep2", Collections.<String, Object>emptyMap(),
-        testRuleLocation);
+    final Rule dep1 = createRule(depClass, "dep1", ImmutableMap.of(), testRuleLocation, NO_STACK);
+    final Rule dep2 = createRule(depClass, "dep2", ImmutableMap.of(), testRuleLocation, NO_STACK);
 
     ValidityPredicate checker =
         new ValidityPredicate() {
@@ -986,8 +933,7 @@ public class RuleClassTest extends PackageLoadingTestCase {
               .validityPredicate(checker))
         .build();
 
-    Rule topRule = createRule(topClass, "top", Collections.<String, Object>emptyMap(),
-        testRuleLocation);
+    Rule topRule = createRule(topClass, "top", ImmutableMap.of(), testRuleLocation, NO_STACK);
 
     assertThat(topClass.getAttributeByName("deps").getValidityPredicate().checkValid(topRule, dep1))
         .isEqualTo("pear");
@@ -1009,8 +955,8 @@ public class RuleClassTest extends PackageLoadingTestCase {
         .factory(DUMMY_CONFIGURED_TARGET_FACTORY)
         .add(attr("tags", STRING_LIST))
         .build();
-    final Rule defaultRule = createRule(defaultClass, "defaultRule",
-        Collections.<String, Object>emptyMap(), testRuleLocation);
+    final Rule defaultRule =
+        createRule(defaultClass, "defaultRule", ImmutableMap.of(), testRuleLocation, NO_STACK);
     assertThat(defaultRule.getRuleClassObject().isPreferredDependency(cppFile)).isFalse();
     assertThat(defaultRule.getRuleClassObject().isPreferredDependency(textFile)).isFalse();
 
@@ -1025,8 +971,8 @@ public class RuleClassTest extends PackageLoadingTestCase {
           }
         })
         .build();
-    final Rule cppRule = createRule(cppClass, "cppRule",
-        Collections.<String, Object>emptyMap(), testRuleLocation);
+    final Rule cppRule =
+        createRule(cppClass, "cppRule", ImmutableMap.of(), testRuleLocation, NO_STACK);
     assertThat(cppRule.getRuleClassObject().isPreferredDependency(cppFile)).isTrue();
     assertThat(cppRule.getRuleClassObject().isPreferredDependency(textFile)).isFalse();
   }
@@ -1039,12 +985,7 @@ public class RuleClassTest extends PackageLoadingTestCase {
   }
 
   private void expectError(RuleClassType type, String name) {
-    try {
-      type.checkName(name);
-      fail();
-    } catch (IllegalArgumentException expected) {
-      // expected
-    }
+    assertThrows(IllegalArgumentException.class, () -> type.checkName(name));
   }
 
   @Test
@@ -1067,12 +1008,11 @@ public class RuleClassTest extends PackageLoadingTestCase {
   }
 
   @Test
-  public void testExecutionPlatformConstraints_perRule() throws Exception {
+  public void testExecutionPlatformConstraints() throws Exception {
     RuleClass.Builder ruleClassBuilder =
         new RuleClass.Builder("ruleClass", RuleClassType.NORMAL, false)
             .factory(DUMMY_CONFIGURED_TARGET_FACTORY)
-            .add(attr("tags", STRING_LIST))
-            .executionPlatformConstraintsAllowed(ExecutionPlatformConstraintsAllowed.PER_RULE);
+            .add(attr("tags", STRING_LIST));
 
     ruleClassBuilder.addExecutionPlatformConstraints(
         Label.parseAbsolute("//constraints:cv1", ImmutableMap.of()),
@@ -1084,24 +1024,6 @@ public class RuleClassTest extends PackageLoadingTestCase {
         .containsExactly(
             Label.parseAbsolute("//constraints:cv1", ImmutableMap.of()),
             Label.parseAbsolute("//constraints:cv2", ImmutableMap.of()));
-    assertThat(ruleClass.hasAttr("exec_compatible_with", LABEL_LIST)).isFalse();
-  }
-
-  @Test
-  public void testExecutionPlatformConstraints_perTarget() {
-    RuleClass.Builder ruleClassBuilder =
-        new RuleClass.Builder("ruleClass", RuleClassType.NORMAL, false)
-            .factory(DUMMY_CONFIGURED_TARGET_FACTORY)
-            .add(attr("tags", STRING_LIST));
-
-    ruleClassBuilder.executionPlatformConstraintsAllowed(
-        ExecutionPlatformConstraintsAllowed.PER_TARGET);
-
-    RuleClass ruleClass = ruleClassBuilder.build();
-
-    assertThat(ruleClass.executionPlatformConstraintsAllowed())
-        .isEqualTo(ExecutionPlatformConstraintsAllowed.PER_TARGET);
-    assertThat(ruleClass.hasAttr("exec_compatible_with", LABEL_LIST)).isTrue();
   }
 
   @Test
@@ -1109,7 +1031,6 @@ public class RuleClassTest extends PackageLoadingTestCase {
     RuleClass parentRuleClass =
         new RuleClass.Builder("$parentRuleClass", RuleClassType.ABSTRACT, false)
             .add(attr("tags", STRING_LIST))
-            .executionPlatformConstraintsAllowed(ExecutionPlatformConstraintsAllowed.PER_RULE)
             .addExecutionPlatformConstraints(
                 Label.parseAbsolute("//constraints:cv1", ImmutableMap.of()),
                 Label.parseAbsolute("//constraints:cv2", ImmutableMap.of()))
@@ -1124,7 +1045,6 @@ public class RuleClassTest extends PackageLoadingTestCase {
         .containsExactly(
             Label.parseAbsolute("//constraints:cv1", ImmutableMap.of()),
             Label.parseAbsolute("//constraints:cv2", ImmutableMap.of()));
-    assertThat(childRuleClass.hasAttr("exec_compatible_with", LABEL_LIST)).isFalse();
   }
 
   @Test
@@ -1137,7 +1057,6 @@ public class RuleClassTest extends PackageLoadingTestCase {
     RuleClass.Builder childRuleClassBuilder =
         new RuleClass.Builder("childRuleClass", RuleClassType.NORMAL, false, parentRuleClass)
             .factory(DUMMY_CONFIGURED_TARGET_FACTORY)
-            .executionPlatformConstraintsAllowed(ExecutionPlatformConstraintsAllowed.PER_RULE)
             .addExecutionPlatformConstraints(
                 Label.parseAbsolute("//constraints:cv1", ImmutableMap.of()),
                 Label.parseAbsolute("//constraints:cv2", ImmutableMap.of()));
@@ -1148,92 +1067,29 @@ public class RuleClassTest extends PackageLoadingTestCase {
         .containsExactly(
             Label.parseAbsolute("//constraints:cv1", ImmutableMap.of()),
             Label.parseAbsolute("//constraints:cv2", ImmutableMap.of()));
-    assertThat(childRuleClass.hasAttr("exec_compatible_with", LABEL_LIST)).isFalse();
   }
 
   @Test
-  public void testExecutionPlatformConstraints_inherit_parentAllowsPerTarget() {
-    RuleClass parentRuleClass =
-        new RuleClass.Builder("parentRuleClass", RuleClassType.NORMAL, false)
+  public void testExecGroups() throws Exception {
+    RuleClass.Builder ruleClassBuilder =
+        new RuleClass.Builder("ruleClass", RuleClassType.NORMAL, false)
             .factory(DUMMY_CONFIGURED_TARGET_FACTORY)
-            .add(attr("tags", STRING_LIST))
-            .executionPlatformConstraintsAllowed(ExecutionPlatformConstraintsAllowed.PER_TARGET)
-            .build();
+            .add(attr("tags", STRING_LIST));
 
-    RuleClass.Builder childRuleClassBuilder =
-        new RuleClass.Builder("childRuleClass", RuleClassType.NORMAL, false, parentRuleClass)
-            .factory(DUMMY_CONFIGURED_TARGET_FACTORY);
+    Label toolchain = Label.parseAbsoluteUnchecked("//toolchain");
+    Label constraint = Label.parseAbsoluteUnchecked("//constraint");
 
-    RuleClass childRuleClass = childRuleClassBuilder.build();
+    ruleClassBuilder.addExecGroups(
+        ImmutableMap.of(
+            "cherry", ExecGroup.create(ImmutableSet.of(toolchain), ImmutableSet.of(constraint))));
 
-    assertThat(childRuleClass.executionPlatformConstraintsAllowed())
-        .isEqualTo(ExecutionPlatformConstraintsAllowed.PER_TARGET);
-    assertThat(childRuleClass.hasAttr("exec_compatible_with", LABEL_LIST)).isTrue();
-  }
+    RuleClass ruleClass = ruleClassBuilder.build();
 
-  @Test
-  public void testExecutionPlatformConstraints_inherit_multipleParents() {
-    RuleClass parentRuleClass1 =
-        new RuleClass.Builder("parentRuleClass1", RuleClassType.NORMAL, false)
-            .factory(DUMMY_CONFIGURED_TARGET_FACTORY)
-            .add(attr("tags", STRING_LIST))
-            .executionPlatformConstraintsAllowed(ExecutionPlatformConstraintsAllowed.PER_TARGET)
-            .build();
-    RuleClass parentRuleClass2 =
-        new RuleClass.Builder("$parentRuleClass2", RuleClassType.ABSTRACT, false)
-            .executionPlatformConstraintsAllowed(ExecutionPlatformConstraintsAllowed.PER_RULE)
-            .build();
-
-    RuleClass.Builder childRuleClassBuilder =
-        new RuleClass.Builder(
-                "childRuleClass", RuleClassType.NORMAL, false, parentRuleClass1, parentRuleClass2)
-            .factory(DUMMY_CONFIGURED_TARGET_FACTORY);
-
-    RuleClass childRuleClass = childRuleClassBuilder.build();
-
-    assertThat(childRuleClass.executionPlatformConstraintsAllowed())
-        .isEqualTo(ExecutionPlatformConstraintsAllowed.PER_TARGET);
-    assertThat(childRuleClass.hasAttr("exec_compatible_with", LABEL_LIST)).isTrue();
-  }
-
-  @Test
-  public void testExecutionPlatformConstraints_inherit_parentAllowsPerTarget_override() {
-    RuleClass parentRuleClass =
-        new RuleClass.Builder("parentRuleClass", RuleClassType.NORMAL, false)
-            .factory(DUMMY_CONFIGURED_TARGET_FACTORY)
-            .add(attr("tags", STRING_LIST))
-            .executionPlatformConstraintsAllowed(ExecutionPlatformConstraintsAllowed.PER_TARGET)
-            .build();
-
-    RuleClass.Builder childRuleClassBuilder =
-        new RuleClass.Builder("childRuleClass", RuleClassType.NORMAL, false, parentRuleClass)
-            .factory(DUMMY_CONFIGURED_TARGET_FACTORY)
-            .executionPlatformConstraintsAllowed(ExecutionPlatformConstraintsAllowed.PER_RULE);
-
-    RuleClass childRuleClass = childRuleClassBuilder.build();
-
-    assertThat(childRuleClass.executionPlatformConstraintsAllowed())
-        .isEqualTo(ExecutionPlatformConstraintsAllowed.PER_RULE);
-  }
-
-  @Test
-  public void testExecutionPlatformConstraints_inherit_childAllowsPerTarget() {
-    RuleClass parentRuleClass =
-        new RuleClass.Builder("$parentRuleClass", RuleClassType.ABSTRACT, false)
-            .add(attr("tags", STRING_LIST))
-            .executionPlatformConstraintsAllowed(ExecutionPlatformConstraintsAllowed.PER_RULE)
-            .build();
-
-    RuleClass.Builder childRuleClassBuilder =
-        new RuleClass.Builder("childRuleClass", RuleClassType.NORMAL, false, parentRuleClass)
-            .factory(DUMMY_CONFIGURED_TARGET_FACTORY)
-            .executionPlatformConstraintsAllowed(ExecutionPlatformConstraintsAllowed.PER_TARGET);
-
-    RuleClass childRuleClass = childRuleClassBuilder.build();
-
-    assertThat(childRuleClass.executionPlatformConstraintsAllowed())
-        .isEqualTo(ExecutionPlatformConstraintsAllowed.PER_TARGET);
-    assertThat(childRuleClass.hasAttr("exec_compatible_with", LABEL_LIST)).isTrue();
+    assertThat(ruleClass.getExecGroups()).hasSize(1);
+    assertThat(ruleClass.getExecGroups().get("cherry").requiredToolchains())
+        .containsExactly(toolchain);
+    assertThat(ruleClass.getExecGroups().get("cherry").execCompatibleWith())
+        .containsExactly(constraint);
   }
 
   @Test
@@ -1242,17 +1098,17 @@ public class RuleClassTest extends PackageLoadingTestCase {
         new RuleClass.Builder("label_flag", RuleClassType.NORMAL, false)
             .factory(DUMMY_CONFIGURED_TARGET_FACTORY)
             .add(attr("tags", STRING_LIST))
-            .setBuildSetting(new BuildSetting(true, LABEL))
+            .setBuildSetting(BuildSetting.create(true, NODEP_LABEL))
             .build();
     RuleClass stringSetting =
         new RuleClass.Builder("string_setting", RuleClassType.NORMAL, false)
             .factory(DUMMY_CONFIGURED_TARGET_FACTORY)
             .add(attr("tags", STRING_LIST))
-            .setBuildSetting(new BuildSetting(false, STRING))
+            .setBuildSetting(BuildSetting.create(false, STRING))
             .build();
 
-    assertThat(labelFlag.hasAttr(SKYLARK_BUILD_SETTING_DEFAULT_ATTR_NAME, LABEL)).isTrue();
-    assertThat(stringSetting.hasAttr(SKYLARK_BUILD_SETTING_DEFAULT_ATTR_NAME, STRING)).isTrue();
+    assertThat(labelFlag.hasAttr(STARLARK_BUILD_SETTING_DEFAULT_ATTR_NAME, NODEP_LABEL)).isTrue();
+    assertThat(stringSetting.hasAttr(STARLARK_BUILD_SETTING_DEFAULT_ATTR_NAME, STRING)).isTrue();
   }
 
   @Test
@@ -1263,6 +1119,41 @@ public class RuleClassTest extends PackageLoadingTestCase {
             .add(attr("tags", STRING_LIST))
             .build();
 
-    assertThat(stringSetting.hasAttr(SKYLARK_BUILD_SETTING_DEFAULT_ATTR_NAME, LABEL)).isFalse();
+    assertThat(stringSetting.hasAttr(STARLARK_BUILD_SETTING_DEFAULT_ATTR_NAME, LABEL)).isFalse();
+  }
+
+  @Test
+  public void testBuildTooManyAttributesRejected() {
+    RuleClass.Builder builder =
+        new RuleClass.Builder("myclass", RuleClassType.NORMAL, /*starlark=*/ false)
+            .factory(DUMMY_CONFIGURED_TARGET_FACTORY)
+            .add(attr("tags", STRING_LIST));
+    for (int i = 0; i < 200; i++) {
+      builder.add(attr("attr" + i, STRING));
+    }
+
+    IllegalArgumentException expected =
+        assertThrows(IllegalArgumentException.class, builder::build);
+
+    assertThat(expected)
+        .hasMessageThat()
+        .isEqualTo("Rule class myclass declared too many attributes (202 > 200)");
+  }
+
+  @Test
+  public void testBuildTooLongAttributeNameRejected() {
+    IllegalArgumentException expected =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                new RuleClass.Builder("myclass", RuleClassType.NORMAL, /*starlark=*/ false)
+                    .factory(DUMMY_CONFIGURED_TARGET_FACTORY)
+                    .add(attr("tags", STRING_LIST))
+                    .add(attr(Strings.repeat("x", 150), STRING))
+                    .build());
+
+    assertThat(expected)
+        .hasMessageThat()
+        .matches("Attribute myclass\\.x{150}'s name is too long \\(150 > 128\\)");
   }
 }

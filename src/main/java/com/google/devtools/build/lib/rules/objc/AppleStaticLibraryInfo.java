@@ -17,8 +17,8 @@ package com.google.devtools.build.lib.rules.objc;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.packages.BuiltinProvider;
 import com.google.devtools.build.lib.packages.NativeInfo;
-import com.google.devtools.build.lib.skylarkbuildapi.apple.AppleStaticLibraryInfoApi;
-import com.google.devtools.build.lib.syntax.EvalException;
+import com.google.devtools.build.lib.starlarkbuildapi.apple.AppleStaticLibraryInfoApi;
+import net.starlark.java.eval.EvalException;
 
 /**
  * Provider containing information regarding multi-architecture Apple static libraries, as is
@@ -35,21 +35,24 @@ import com.google.devtools.build.lib.syntax.EvalException;
  */
 public final class AppleStaticLibraryInfo extends NativeInfo implements AppleStaticLibraryInfoApi {
 
-  /** Skylark constructor and identifier for AppleStaticLibraryInfo. */
-  public static final Provider SKYLARK_CONSTRUCTOR = new Provider();
+  /** Starlark constructor and identifier for AppleStaticLibraryInfo. */
+  public static final Provider STARLARK_CONSTRUCTOR = new Provider();
 
   private final Artifact multiArchArchive;
   private final ObjcProvider depsObjcProvider;
 
   /**
-   * Creates a new AppleStaticLibraryInfo provider that propagates the given
-   * {@code apple_static_library} information.
+   * Creates a new AppleStaticLibraryInfo provider that propagates the given {@code
+   * apple_static_library} information.
    */
-  public AppleStaticLibraryInfo(Artifact multiArchArchive,
-      ObjcProvider depsObjcProvider) {
-    super(SKYLARK_CONSTRUCTOR);
+  public AppleStaticLibraryInfo(Artifact multiArchArchive, ObjcProvider depsObjcProvider) {
     this.multiArchArchive = multiArchArchive;
     this.depsObjcProvider = depsObjcProvider;
+  }
+
+  @Override
+  public Provider getProvider() {
+    return STARLARK_CONSTRUCTOR;
   }
 
   @Override
@@ -68,7 +71,7 @@ public final class AppleStaticLibraryInfo extends NativeInfo implements AppleSta
   public static class Provider extends BuiltinProvider<AppleStaticLibraryInfo>
        implements AppleStaticLibraryInfoApi.AppleStaticLibraryInfoProvider<Artifact, ObjcProvider> {
     private Provider() {
-      super(SKYLARK_NAME, AppleStaticLibraryInfo.class);
+      super(STARLARK_NAME, AppleStaticLibraryInfo.class);
     }
 
     @Override

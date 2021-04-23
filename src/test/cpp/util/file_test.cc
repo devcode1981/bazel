@@ -141,18 +141,27 @@ TEST(FileTest, TestWriteFile) {
   ASSERT_EQ(0, remove(filename.c_str()));
 }
 
+TEST(FileTest, TestLargeFileWrite) {
+  // Buffer over the write limit (2,147,479,552 for Linux, INT32_MAX for MacOS).
+  const size_t size = 4000000000;
+  std::unique_ptr<char[]> buffer(new char[size]);
+  std::fill(buffer.get(), buffer.get() + size, '\0');
+
+  ASSERT_TRUE(WriteFile(buffer.get(), size, "/dev/null"));
+}
+
 TEST(FileTest, TestMtimeHandling) {
   const char* tempdir_cstr = getenv("TEST_TMPDIR");
   ASSERT_NE(tempdir_cstr, nullptr);
   ASSERT_NE(tempdir_cstr[0], 0);
-  string tempdir(tempdir_cstr);
+  Path tempdir(tempdir_cstr);
 
   std::unique_ptr<IFileMtime> mtime(CreateFileMtime());
   // Assert that a directory is always untampered with. (We do
   // not care about directories' mtimes.)
   ASSERT_TRUE(mtime->IsUntampered(tempdir));
   // Create a new file, assert its mtime is not in the future.
-  string file(JoinPath(tempdir, "foo.txt"));
+  Path file = tempdir.GetRelative("foo.txt");
   ASSERT_TRUE(WriteFile("hello", 5, file));
   ASSERT_FALSE(mtime->IsUntampered(file));
   // Set the file's mtime to the future, assert that it's so.
@@ -173,6 +182,28 @@ TEST(FileTest, TestMtimeHandling) {
   ASSERT_FALSE(mtime->SetToNow(file));
   ASSERT_FALSE(mtime->SetToDistantFuture(file));
   ASSERT_FALSE(mtime->IsUntampered(file));
+}
+
+TEST(FileTest, TestCreateTempDir) {
+  const char* tempdir_cstr = getenv("TEST_TMPDIR");
+  EXPECT_NE(tempdir_cstr, nullptr);
+  EXPECT_NE(tempdir_cstr[0], 0);
+  string tempdir(tempdir_cstr);
+  string tmpdir(tempdir_cstr);
+
+  string prefix_in_existing_dir(JoinPath(tempdir, "foo."));
+  string result_in_existing_dir(CreateTempDir(prefix_in_existing_dir));
+  ASSERT_NE(result_in_existing_dir, prefix_in_existing_dir);
+  ASSERT_EQ(0, result_in_existing_dir.find(prefix_in_existing_dir));
+  EXPECT_TRUE(PathExists(result_in_existing_dir));
+
+  string base_dir(JoinPath(tempdir, "doesntexistyet"));
+  ASSERT_FALSE(PathExists(base_dir));
+  string prefix_in_new_dir(JoinPath(base_dir, "foo."));
+  string result_in_new_dir(CreateTempDir(prefix_in_new_dir));
+  ASSERT_NE(result_in_new_dir, prefix_in_new_dir);
+  ASSERT_EQ(0, result_in_new_dir.find(prefix_in_new_dir));
+  EXPECT_TRUE(PathExists(result_in_new_dir));
 }
 
 TEST(FileTest, TestRenameDirectory) {
@@ -251,6 +282,38 @@ TEST(FileTest, IsDevNullTest) {
   ASSERT_FALSE(IsDevNull("/dev/nulll"));
   ASSERT_FALSE(IsDevNull((char *) nullptr));
   ASSERT_FALSE(IsDevNull(""));
+}
+
+TEST(FileTest, TestRemoveRecursively) {
+  const char* tempdir_cstr = getenv("TEST_TMPDIR");
+  ASSERT_NE(tempdir_cstr, nullptr);
+  string tempdir(tempdir_cstr);
+  ASSERT_TRUE(PathExists(tempdir));
+
+  string non_existent_dir(JoinPath(tempdir, "test_rmr_non_existent"));
+  EXPECT_TRUE(RemoveRecursively(non_existent_dir));
+  EXPECT_FALSE(PathExists(non_existent_dir));
+
+  string empty_dir(JoinPath(tempdir, "test_rmr_empty_dir"));
+  EXPECT_TRUE(MakeDirectories(empty_dir, 0700));
+  EXPECT_TRUE(RemoveRecursively(empty_dir));
+  EXPECT_FALSE(PathExists(empty_dir));
+
+  string dir_with_content(JoinPath(tempdir, "test_rmr_dir_w_content"));
+  EXPECT_TRUE(MakeDirectories(dir_with_content, 0700));
+  EXPECT_TRUE(WriteFile("junkdata", 8, JoinPath(dir_with_content, "file")));
+  string subdir = JoinPath(dir_with_content, "dir");
+  EXPECT_TRUE(MakeDirectories(subdir, 0700));
+  string subsubdir = JoinPath(subdir, "dir");
+  EXPECT_TRUE(MakeDirectories(subsubdir, 0700));
+  EXPECT_TRUE(WriteFile("junkdata", 8, JoinPath(subsubdir, "deep_file")));
+  EXPECT_TRUE(RemoveRecursively(dir_with_content));
+  EXPECT_FALSE(PathExists(dir_with_content));
+
+  string regular_file(JoinPath(tempdir, "test_rmr_regular_file"));
+  EXPECT_TRUE(WriteFile("junkdata", 8, regular_file));
+  EXPECT_TRUE(RemoveRecursively(regular_file));
+  EXPECT_FALSE(PathExists(regular_file));
 }
 
 }  // namespace blaze_util

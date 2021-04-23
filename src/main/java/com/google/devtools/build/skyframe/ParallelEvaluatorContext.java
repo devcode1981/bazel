@@ -34,6 +34,7 @@ import javax.annotation.Nullable;
  * <p>Also used during cycle detection.
  */
 class ParallelEvaluatorContext {
+
   enum EnqueueParentBehavior {
     ENQUEUE,
     SIGNAL,
@@ -42,7 +43,7 @@ class ParallelEvaluatorContext {
 
   private final QueryableGraph graph;
   private final Version graphVersion;
-  private final ImmutableMap<SkyFunctionName, ? extends SkyFunction> skyFunctions;
+  private final ImmutableMap<SkyFunctionName, SkyFunction> skyFunctions;
   private final ExtendedEventHandler reporter;
   private final NestedSetVisitor<TaggedEvents> replayingNestedSetEventVisitor;
   private final NestedSetVisitor<Postable> replayingNestedSetPostableVisitor;
@@ -76,11 +77,11 @@ class ParallelEvaluatorContext {
   public ParallelEvaluatorContext(
       QueryableGraph graph,
       Version graphVersion,
-      ImmutableMap<SkyFunctionName, ? extends SkyFunction> skyFunctions,
+      ImmutableMap<SkyFunctionName, SkyFunction> skyFunctions,
       ExtendedEventHandler reporter,
       EmittedEventState emittedEventState,
       boolean keepGoing,
-      final DirtyTrackingProgressReceiver progressReceiver,
+      DirtyTrackingProgressReceiver progressReceiver,
       EventFilter storedEventFilter,
       ErrorInfoManager errorInfoManager,
       GraphInconsistencyReceiver graphInconsistencyReceiver,
@@ -184,7 +185,7 @@ class ParallelEvaluatorContext {
     return reporter;
   }
 
-  ImmutableMap<SkyFunctionName, ? extends SkyFunction> getSkyFunctions() {
+  ImmutableMap<SkyFunctionName, SkyFunction> getSkyFunctions() {
     return skyFunctions;
   }
 
@@ -198,6 +199,10 @@ class ParallelEvaluatorContext {
 
   EvaluationVersionBehavior getEvaluationVersionBehavior() {
     return evaluationVersionBehavior;
+  }
+
+  boolean restartPermitted() {
+    return graphInconsistencyReceiver.restartPermitted();
   }
 
   /** Receives the events from the NestedSet and delegates to the reporter. */

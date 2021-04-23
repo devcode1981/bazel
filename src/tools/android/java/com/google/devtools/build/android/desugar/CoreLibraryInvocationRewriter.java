@@ -33,7 +33,7 @@ public class CoreLibraryInvocationRewriter extends ClassVisitor {
   private final CoreLibrarySupport support;
 
   public CoreLibraryInvocationRewriter(ClassVisitor cv, CoreLibrarySupport support) {
-    super(Opcodes.ASM7, cv);
+    super(Opcodes.ASM8, cv);
     this.support = support;
   }
 
@@ -45,20 +45,18 @@ public class CoreLibraryInvocationRewriter extends ClassVisitor {
   }
 
   private class CoreLibraryMethodInvocationRewriter extends MethodVisitor {
+
     public CoreLibraryMethodInvocationRewriter(MethodVisitor mv) {
-      super(Opcodes.ASM7, mv);
+      super(Opcodes.ASM8, mv);
     }
 
     @Override
     public void visitMethodInsn(int opcode, String owner, String name, String desc, boolean itf) {
       Class<?> coreInterface =
           support.getCoreInterfaceRewritingTarget(opcode, owner, name, desc, itf);
-
+      String originalDesc = desc;
       if (coreInterface != null) {
         String coreInterfaceName = coreInterface.getName().replace('.', '/');
-        name =
-            InterfaceDesugaring.normalizeInterfaceMethodName(
-                name, name.startsWith("lambda$"), opcode == Opcodes.INVOKESTATIC);
         if (opcode == Opcodes.INVOKESTATIC) {
           checkState(owner.equals(coreInterfaceName));
         } else {
@@ -66,11 +64,20 @@ public class CoreLibraryInvocationRewriter extends ClassVisitor {
         }
 
         if (opcode == Opcodes.INVOKESTATIC || opcode == Opcodes.INVOKESPECIAL) {
-          checkArgument(itf || opcode == Opcodes.INVOKESPECIAL,
-              "Expected interface to rewrite %s.%s : %s", owner, name, desc);
-          owner = coreInterface.isInterface()
-              ? InterfaceDesugaring.getCompanionClassName(coreInterfaceName)
-              : checkNotNull(support.getMoveTarget(coreInterfaceName, name));
+          checkArgument(
+              itf || opcode == Opcodes.INVOKESPECIAL,
+              "Expected interface to rewrite %s.%s : %s",
+              owner,
+              name,
+              desc);
+          if (coreInterface.isInterface()) {
+            owner = InterfaceDesugaring.getCompanionClassName(coreInterfaceName);
+            name =
+                InterfaceDesugaring.normalizeInterfaceMethodName(
+                    name, name.startsWith("lambda$"), opcode);
+          } else {
+            owner = checkNotNull(support.getMoveTarget(coreInterfaceName, name, originalDesc));
+          }
         } else {
           checkState(coreInterface.isInterface());
           owner = coreInterfaceName + "$$Dispatch";
@@ -79,7 +86,7 @@ public class CoreLibraryInvocationRewriter extends ClassVisitor {
         opcode = Opcodes.INVOKESTATIC;
         itf = false;
       } else {
-        String newOwner = support.getMoveTarget(owner, name);
+        String newOwner = support.getMoveTarget(owner, name, originalDesc);
         if (newOwner != null) {
           if (opcode != Opcodes.INVOKESTATIC) {
             // assuming a static method

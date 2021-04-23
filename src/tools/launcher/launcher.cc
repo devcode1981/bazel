@@ -12,7 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include "src/tools/launcher/launcher.h"
+
 #include <windows.h>
+
 #include <algorithm>
 #include <fstream>
 #include <iostream>
@@ -22,7 +28,6 @@
 
 #include "src/main/cpp/util/path_platform.h"
 #include "src/main/cpp/util/strings.h"
-#include "src/tools/launcher/launcher.h"
 #include "src/tools/launcher/util/data_parser.h"
 #include "src/tools/launcher/util/launcher_util.h"
 
@@ -68,25 +73,9 @@ BinaryLauncherBase::BinaryLauncherBase(
 }
 
 static bool FindManifestFileImpl(const wchar_t* argv0, wstring* result) {
-  // If this binary X runs as the data-dependency of some other binary Y, then
-  // X has no runfiles manifest/directory and should use Y's.
-  if (GetEnv(L"RUNFILES_MANIFEST_FILE", result) &&
-      DoesFilePathExist(result->c_str())) {
-    return true;
-  }
-
-  wstring directory;
-  if (GetEnv(L"RUNFILES_DIR", &directory)) {
-    *result = directory + L"/MANIFEST";
-    if (DoesFilePathExist(result->c_str())) {
-      return true;
-    }
-  }
-
-  // If this binary X runs by itself (not as a data-dependency of another
-  // binary), then look for the manifest in a runfiles directory next to the
-  // main binary, then look for it (the manifest) next to the main binary.
-  directory = GetBinaryPathWithExtension(argv0) + L".runfiles";
+  // Look for the runfiles manifest of the binary in a runfiles directory next
+  // to the binary, then look for it (the manifest) next to the binary.
+  wstring directory = GetBinaryPathWithExtension(argv0) + L".runfiles";
   *result = directory + L"/MANIFEST";
   if (DoesFilePathExist(result->c_str())) {
     return true;
@@ -95,6 +84,21 @@ static bool FindManifestFileImpl(const wchar_t* argv0, wstring* result) {
   *result = directory + L"_manifest";
   if (DoesFilePathExist(result->c_str())) {
     return true;
+  }
+
+  // If the manifest is not found then this binary (X) runs as the
+  // data-dependency of some other binary (Y) and X has no runfiles
+  // manifest/directory so it should use Y's.
+  if (GetEnv(L"RUNFILES_MANIFEST_FILE", result) &&
+      DoesFilePathExist(result->c_str())) {
+    return true;
+  }
+
+  if (GetEnv(L"RUNFILES_DIR", &directory)) {
+    *result = directory + L"/MANIFEST";
+    if (DoesFilePathExist(result->c_str())) {
+      return true;
+    }
   }
 
   return false;
@@ -139,40 +143,35 @@ void BinaryLauncherBase::ParseManifestFile(ManifestFileMap* manifest_file_map,
   }
 }
 
-wstring BinaryLauncherBase::Rlocation(const wstring& path,
-                                      bool need_workspace_name) const {
+wstring BinaryLauncherBase::Rlocation(wstring path,
+                                      bool has_workspace_name) const {
   // No need to do rlocation if the path is absolute.
   if (blaze_util::IsAbsolute(path)) {
     return path;
   }
 
+  if (path.find(L"../") == 0) {
+    // Ignore 'has_workspace_name' when the runfile path is under "../". Such
+    // paths already have a workspace name in the next path component. We could
+    // append it to this->workspace_name and re-evaluate it, but this is
+    // simpler.
+    path = path.substr(3);
+  } else if (!has_workspace_name) {
+    path = this->workspace_name + L"/" + path;
+  }
+
   // If the manifest file map is empty, then we're using the runfiles directory
   // instead.
   if (manifest_file_map.empty()) {
-    wstring query_path = runfiles_dir;
-    if (need_workspace_name) {
-      query_path += L"/" + this->workspace_name;
-    }
-    query_path += L"/" + path;
-    return query_path;
+    return runfiles_dir + L"/" + path;
   }
 
-  wstring query_path = path;
-  if (need_workspace_name) {
-    query_path = this->workspace_name + L"/" + path;
-  }
-  auto entry = manifest_file_map.find(query_path);
+  auto entry = manifest_file_map.find(path);
   if (entry == manifest_file_map.end()) {
     die(L"Rlocation failed on %s, path doesn't exist in MANIFEST file",
-        query_path.c_str());
+        path.c_str());
   }
   return entry->second;
-}
-
-wstring BinaryLauncherBase::Rlocation(const string& path,
-                                      bool need_workspace_name) const {
-  return this->Rlocation(blaze_util::CstringToWstring(path),
-                         need_workspace_name);
 }
 
 wstring BinaryLauncherBase::GetLaunchInfoByKey(const string& key) {
@@ -245,16 +244,16 @@ ExitCode BinaryLauncherBase::LaunchProcess(const wstring& executable,
   STARTUPINFOW startupInfo = {0};
   startupInfo.cb = sizeof(startupInfo);
   BOOL ok = CreateProcessW(
-      /* lpApplicationName */ NULL,
+      /* lpApplicationName */ nullptr,
       /* lpCommandLine */ cmdline.cmdline,
-      /* lpProcessAttributes */ NULL,
-      /* lpThreadAttributes */ NULL,
+      /* lpProcessAttributes */ nullptr,
+      /* lpThreadAttributes */ nullptr,
       /* bInheritHandles */ FALSE,
       /* dwCreationFlags */
       suppressOutput ? CREATE_NO_WINDOW  // no console window => no output
                      : 0,
-      /* lpEnvironment */ NULL,
-      /* lpCurrentDirectory */ NULL,
+      /* lpEnvironment */ nullptr,
+      /* lpCurrentDirectory */ nullptr,
       /* lpStartupInfo */ &startupInfo,
       /* lpProcessInformation */ &processInfo);
   if (!ok) {

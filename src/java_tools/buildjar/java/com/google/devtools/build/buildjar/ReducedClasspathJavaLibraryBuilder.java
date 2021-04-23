@@ -15,9 +15,10 @@
 package com.google.devtools.build.buildjar;
 
 import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.buildjar.OptionsParser.ReduceClasspathMode;
 import com.google.devtools.build.buildjar.javac.BlazeJavacResult;
-import com.google.devtools.build.buildjar.javac.FormattedDiagnostic;
 import com.google.devtools.build.buildjar.javac.JavacRunner;
+import com.google.devtools.build.buildjar.javac.statistics.BlazeJavacStatistics;
 import java.io.IOException;
 import java.nio.file.Path;
 
@@ -44,7 +45,8 @@ public class ReducedClasspathJavaLibraryBuilder extends SimpleJavaLibraryBuilder
     // Minimize classpath, but only if we're actually compiling some sources (some invocations of
     // JavaBuilder are only building resource jars).
     ImmutableList<Path> compressedClasspath = build.getClassPath();
-    if (!build.getSourceFiles().isEmpty()) {
+    if (!build.getSourceFiles().isEmpty()
+        && build.reduceClasspathMode() == ReduceClasspathMode.JAVABUILDER_REDUCED) {
       compressedClasspath =
           build.getDependencyModule().computeStrictClasspath(build.getClassPath());
     }
@@ -53,60 +55,51 @@ public class ReducedClasspathJavaLibraryBuilder extends SimpleJavaLibraryBuilder
     BlazeJavacResult result =
         javacRunner.invokeJavac(build.toBlazeJavacArguments(compressedClasspath));
 
-    result =
-        result.withStatistics(
-            result
-                .statistics()
-                .toBuilder()
-                .transitiveClasspathLength(build.getClassPath().size())
-                .reducedClasspathLength(compressedClasspath.size())
-                .transitiveClasspathFallback(false)
-                .build());
-
     // If javac errored out because of missing entries on the classpath, give it another try.
-    // TODO(bazel-team): check performance impact of additional retries.
-    if (shouldFallBack(result)) {
-      // TODO(cushon): warn for transitive classpath fallback
-
-      // Reset output directories
-      prepareSourceCompilation(build);
-
-      // Fall back to the regular compile, but add extra checks to catch transitive uses
-      result = javacRunner.invokeJavac(build.toBlazeJavacArguments(build.getClassPath()));
-      result =
-          result.withStatistics(
-              result.statistics().toBuilder().transitiveClasspathFallback(true).build());
+    boolean fallback = !result.isOk();
+    if (fallback) {
+      if (build.reduceClasspathMode() == ReduceClasspathMode.BAZEL_REDUCED) {
+        return BlazeJavacResult.fallback();
+      }
+      if (build.reduceClasspathMode() == ReduceClasspathMode.JAVABUILDER_REDUCED) {
+        result = fallback(build, javacRunner);
+      }
     }
-    return result;
+
+    BlazeJavacStatistics.Builder stats =
+        result.statistics().toBuilder()
+            .minClasspathLength(build.getDependencyModule().getImplicitDependenciesMap().size());
+    build.getProcessors().stream()
+        .map(p -> p.substring(p.lastIndexOf('.') + 1))
+        .forEachOrdered(stats::addProcessor);
+
+    switch (build.reduceClasspathMode()) {
+      case BAZEL_REDUCED:
+      case BAZEL_FALLBACK:
+        stats.transitiveClasspathLength(build.fullClasspathLength());
+        stats.reducedClasspathLength(build.reducedClasspathLength());
+        stats.transitiveClasspathFallback(
+            build.reduceClasspathMode() == ReduceClasspathMode.BAZEL_FALLBACK);
+        break;
+      case JAVABUILDER_REDUCED:
+        stats.transitiveClasspathLength(build.getClassPath().size());
+        stats.reducedClasspathLength(compressedClasspath.size());
+        stats.transitiveClasspathFallback(fallback);
+        break;
+      default:
+        throw new AssertionError(build.reduceClasspathMode());
+    }
+    return result.withStatistics(stats.build());
   }
 
-  private static boolean shouldFallBack(BlazeJavacResult result) {
-    if (result.isOk()) {
-      return false;
-    }
-    for (FormattedDiagnostic diagnostic : result.diagnostics()) {
-      String code = diagnostic.getCode();
-      if (code.contains("doesnt.exist")
-          || code.contains("cant.resolve")
-          || code.contains("cant.access")) {
-        return true;
-      }
-      // handle -Xdoclint:reference errors, which don't have a diagnostic code
-      // TODO(cushon): this is locale-dependent
-      if (diagnostic.getFormatted().contains("error: reference not found")) {
-        return true;
-      }
-      // Error Prone wraps completion failures
-      if (code.equals("compiler.err.error.prone.crash")
-          && diagnostic
-              .getFormatted()
-              .contains("com.sun.tools.javac.code.Symbol$CompletionFailure")) {
-        return true;
-      }
-    }
-    if (result.output().contains("com.sun.tools.javac.code.Symbol$CompletionFailure")) {
-      return true;
-    }
-    return false;
+  private BlazeJavacResult fallback(JavaLibraryBuildRequest build, JavacRunner javacRunner)
+      throws IOException {
+    // TODO(cushon): warn for transitive classpath fallback
+
+    // Reset output directories
+    prepareSourceCompilation(build);
+
+    // Fall back to the regular compile, but add extra checks to catch transitive uses
+    return javacRunner.invokeJavac(build.toBlazeJavacArguments(build.getClassPath()));
   }
 }

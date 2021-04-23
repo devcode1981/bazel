@@ -14,10 +14,14 @@
 package com.google.devtools.build.lib.skyframe;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.actions.PackageRoots;
+import com.google.devtools.build.lib.analysis.ConfiguredAspect;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
+import com.google.devtools.build.lib.skyframe.AspectValueKey.AspectKey;
 import com.google.devtools.build.skyframe.WalkableGraph;
-import java.util.Collection;
 
 /**
  *  Encapsulates the raw analysis result of top level targets and aspects coming from Skyframe.
@@ -25,20 +29,23 @@ import java.util.Collection;
 public class SkyframeAnalysisResult {
   private final boolean hasLoadingError;
   private final boolean hasAnalysisError;
+  private final boolean hasActionConflicts;
   private final ImmutableList<ConfiguredTarget> configuredTargets;
   private final WalkableGraph walkableGraph;
-  private final ImmutableList<AspectValue> aspects;
+  private final ImmutableMap<AspectKey, ConfiguredAspect> aspects;
   private final PackageRoots packageRoots;
 
   SkyframeAnalysisResult(
       boolean hasLoadingError,
       boolean hasAnalysisError,
+      boolean hasActionConflicts,
       ImmutableList<ConfiguredTarget> configuredTargets,
       WalkableGraph walkableGraph,
-      ImmutableList<AspectValue> aspects,
+      ImmutableMap<AspectKey, ConfiguredAspect> aspects,
       PackageRoots packageRoots) {
     this.hasLoadingError = hasLoadingError;
     this.hasAnalysisError = hasAnalysisError;
+    this.hasActionConflicts = hasActionConflicts;
     this.configuredTargets = configuredTargets;
     this.walkableGraph = walkableGraph;
     this.aspects = aspects;
@@ -58,6 +65,10 @@ public class SkyframeAnalysisResult {
     return hasAnalysisError;
   }
 
+  public boolean hasActionConflicts() {
+    return hasActionConflicts;
+  }
+
   public ImmutableList<ConfiguredTarget> getConfiguredTargets() {
     return configuredTargets;
   }
@@ -66,11 +77,29 @@ public class SkyframeAnalysisResult {
     return walkableGraph;
   }
 
-  public Collection<AspectValue> getAspects() {
+  public ImmutableMap<AspectKey, ConfiguredAspect> getAspects() {
     return aspects;
   }
 
   public PackageRoots getPackageRoots() {
     return packageRoots;
+  }
+
+  /**
+   * Returns an equivalent {@link SkyframeAnalysisResult}, except with errored targets removed from
+   * the configured target list.
+   */
+  public SkyframeAnalysisResult withAdditionalErroredTargets(
+      ImmutableSet<ConfiguredTarget> erroredTargets) {
+    return new SkyframeAnalysisResult(
+        hasLoadingError,
+        /*hasAnalysisError=*/ true,
+        hasActionConflicts,
+        Sets.difference(ImmutableSet.copyOf(configuredTargets), erroredTargets)
+            .immutableCopy()
+            .asList(),
+        walkableGraph,
+        aspects,
+        packageRoots);
   }
 }

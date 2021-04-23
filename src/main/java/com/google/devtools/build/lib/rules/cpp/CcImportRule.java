@@ -17,13 +17,14 @@ package com.google.devtools.build.lib.rules.cpp;
 import static com.google.devtools.build.lib.packages.Attribute.attr;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL_LIST;
-import static com.google.devtools.build.lib.syntax.Type.BOOLEAN;
+import static com.google.devtools.build.lib.packages.Type.BOOLEAN;
 
 import com.google.devtools.build.lib.analysis.BaseRuleClasses;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
+import com.google.devtools.build.lib.packages.RuleClass.ToolchainTransitionMode;
 import com.google.devtools.build.lib.util.FileTypeSet;
 
 /** Rule definition for the cc_import rule. */
@@ -51,7 +52,10 @@ public final class CcImportRule implements RuleDefinition {
             or <code>.dylib</code>
           </p>
         <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
-        .add(attr("shared_library", LABEL).allowedFileTypes(CppFileTypes.SHARED_LIBRARY))
+        .add(
+            attr("shared_library", LABEL)
+                .allowedFileTypes(
+                    CppFileTypes.SHARED_LIBRARY, CppFileTypes.VERSIONED_SHARED_LIBRARY))
         /*<!-- #BLAZE_RULE($cc_import).ATTRIBUTE(interface_library) -->
           A single interface library for linking the shared library.
           <p> Permitted file types:
@@ -74,7 +78,7 @@ public final class CcImportRule implements RuleDefinition {
             attr("hdrs", LABEL_LIST)
                 .orderIndependent()
                 .direct_compile_time_input()
-                .allowedFileTypes(CppFileTypes.CPP_HEADER))
+                .allowedFileTypes(FileTypeSet.ANY_FILE))
         /*<!-- #BLAZE_RULE(cc_import).ATTRIBUTE(system_provided) -->
         If 1, it indicates the shared library required at runtime is provided by the system. In
         this case, <code>interface_library</code> should be specified and
@@ -90,15 +94,13 @@ public final class CcImportRule implements RuleDefinition {
         provided by some service.
 
         <p>If alwayslink doesn't work with VS 2017 on Windows, that is due to a
-        [known issue](https://github.com/bazelbuild/bazel/issues/3949),
+        <a href="https://github.com/bazelbuild/bazel/issues/3949">known issue</a>,
         please upgrade your VS 2017 to the latest version.</p>
         <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
         .add(attr("alwayslink", BOOLEAN))
-        .add(
-            attr("data", LABEL_LIST)
-                .allowedFileTypes(FileTypeSet.ANY_FILE)
-                .dontCheckConstraints())
+        .add(attr("data", LABEL_LIST).allowedFileTypes(FileTypeSet.ANY_FILE).dontCheckConstraints())
         .addRequiredToolchains(CppRuleClasses.ccToolchainTypeAttribute(env))
+        .useToolchainTransition(ToolchainTransitionMode.ENABLED)
         .build();
   }
 
@@ -106,7 +108,7 @@ public final class CcImportRule implements RuleDefinition {
   public  Metadata getMetadata() {
     return RuleDefinition.Metadata.builder()
         .name("$cc_import")
-        .ancestors(BaseRuleClasses.BaseRule.class)
+        .ancestors(BaseRuleClasses.NativeBuildRule.class)
         .type(RuleClassType.ABSTRACT)
         .build();
   }

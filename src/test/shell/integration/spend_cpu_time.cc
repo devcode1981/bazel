@@ -36,7 +36,7 @@ static uint64_t ElapsedCpuMillisSince(const clock_t before) {
 // Computes the time that passed, in millis, since the previous timestamp.
 static uint64_t ElapsedWallTimeMillisSince(const struct timeval* before) {
   struct timeval now;
-  gettimeofday(&now, NULL);
+  gettimeofday(&now, nullptr);
   return (now.tv_sec * 1000 + now.tv_usec / 1000) -
       (before->tv_sec * 1000 + before->tv_usec / 1000);
 }
@@ -72,12 +72,12 @@ static void WasteUserTime(const uint64_t millis) {
 // function again with the remainder.
 static void WasteSystemTime(const uint64_t millis) {
   char current_dir_path[MAXPATHLEN];
-  if (getcwd(current_dir_path, sizeof(current_dir_path)) == NULL) {
+  if (getcwd(current_dir_path, sizeof(current_dir_path)) == nullptr) {
     err(EXIT_FAILURE, "getcwd() failed");
   }
 
   struct timeval before;
-  gettimeofday(&before, NULL);
+  gettimeofday(&before, nullptr);
   while (ElapsedWallTimeMillisSince(&before) < millis) {
     // Arbitrary syscall to waste system time.
     if (chdir(current_dir_path) != 0) {
@@ -104,7 +104,7 @@ static uint64_t GetUsedSystemTimeMillis() {
   return my_rusage.ru_stime.tv_sec * 1000 + my_rusage.ru_stime.tv_usec / 1000;
 }
 
-// Substracts subtrahend from minuend, or returns zero if the subtrahend is
+// Subtracts subtrahend from minuend, or returns zero if the subtrahend is
 // larger than the minuend.
 static uint64_t SubtractOrZero(const uint64_t minuend,
                                const uint64_t subtrahend) {

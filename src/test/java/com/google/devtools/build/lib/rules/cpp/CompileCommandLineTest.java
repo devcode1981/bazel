@@ -18,14 +18,16 @@ import static com.google.common.truth.Truth.assertThat;
 import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ArtifactRoot;
+import com.google.devtools.build.lib.actions.ArtifactRoot.RootType;
+import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
 import com.google.devtools.build.lib.rules.cpp.CcCommon.CoptsFilter;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainFeatures.FeatureConfiguration;
-import com.google.devtools.build.lib.rules.cpp.CppCompileAction.DotdFile;
 import com.google.devtools.build.lib.vfs.Path;
 import java.io.IOException;
 import java.util.List;
 import java.util.regex.Pattern;
+import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -39,12 +41,19 @@ import org.junit.runners.JUnit4;
 @RunWith(JUnit4.class)
 public class CompileCommandLineTest extends BuildViewTestCase {
 
+  @Before
+  public void initializeRuleContext() throws Exception {
+    scratch.file("foo/BUILD", "cc_library(name = 'foo')");
+  }
+
   private Artifact scratchArtifact(String s) {
     Path execRoot = outputBase.getRelative("exec");
-    Path outputRoot = execRoot.getRelative("root");
-    ArtifactRoot root = ArtifactRoot.asDerivedRoot(execRoot, outputRoot);
+    String outSegment = "root";
+    Path outputRoot = execRoot.getRelative(outSegment);
+    ArtifactRoot root = ArtifactRoot.asDerivedRoot(execRoot, RootType.Output, outSegment);
     try {
-      return new Artifact(scratch.overwriteFile(outputRoot.getRelative(s).toString()), root);
+      return ActionsTestUtil.createArtifact(
+          root, scratch.overwriteFile(outputRoot.getRelative(s).toString()));
     } catch (IOException e) {
       throw new RuntimeException(e);
     }
@@ -52,7 +61,7 @@ public class CompileCommandLineTest extends BuildViewTestCase {
 
   private static FeatureConfiguration getMockFeatureConfiguration(String... crosstool)
       throws Exception {
-    return CcToolchainFeaturesTest.buildFeatures(crosstool)
+    return CcToolchainTestHelper.buildFeatures(crosstool)
         .getFeatureConfiguration(
             ImmutableSet.of(
                 CppActionNames.ASSEMBLE,
@@ -89,7 +98,9 @@ public class CompileCommandLineTest extends BuildViewTestCase {
                     "  }",
                     "}"))
             .build();
-    assertThat(compileCommandLine.getArguments(/* overwrittenVariables= */ null))
+    assertThat(
+            compileCommandLine.getArguments(
+                /* parameterFilePath= */ null, /* overwrittenVariables= */ null))
         .contains("-some_foo_flag");
   }
 
@@ -131,7 +142,8 @@ public class CompileCommandLineTest extends BuildViewTestCase {
                     "}"))
             .setCoptsFilter(CoptsFilter.fromRegex(Pattern.compile(".*i_am_a_flag.*")))
             .build();
-    return compileCommandLine.getArguments(/* overwrittenVariables= */ null);
+    return compileCommandLine.getArguments(
+        /* parameterFilePath= */ null, /* overwrittenVariables= */ null);
   }
 
   private CompileCommandLine.Builder makeCompileCommandLineBuilder() throws Exception {
@@ -139,6 +151,6 @@ public class CompileCommandLineTest extends BuildViewTestCase {
         scratchArtifact("a/FakeInput"),
         CoptsFilter.alwaysPasses(),
         "c++-compile",
-        new DotdFile(scratchArtifact("a/dotD")));
+        scratchArtifact("a/dotD"));
   }
 }

@@ -153,12 +153,25 @@ if [[ -z "$no_echo" ]]; then
 fi
 
 # Unused if EXPERIMENTAL_SPLIT_XML_GENERATION is set.
+function encode_stream {
+  # See generate-xml.sh for documentation.
+  LC_ALL=C sed -E \
+      -e 's/.*/& /g' \
+      -e 's/(('\
+"$(echo -e '[\x9\x20-\x7f]')|"\
+"$(echo -e '[\xc0-\xdf][\x80-\xbf]')|"\
+"$(echo -e '[\xe0-\xec][\x80-\xbf][\x80-\xbf]')|"\
+"$(echo -e '[\xed][\x80-\x9f][\x80-\xbf]')|"\
+"$(echo -e '[\xee-\xef][\x80-\xbf][\x80-\xbf]')|"\
+"$(echo -e '[\xf0][\x80-\x8f][\x80-\xbf][\x80-\xbf]')"\
+')*)./\1?/g' \
+      -e 's/(.*)\?/\1/g' \
+      -e 's|]]>|]]>]]<![CDATA[>|g'
+}
+
 function encode_output_file {
   if [ -f "$1" ]; then
-    # Replace invalid XML characters and invalid sequence in CDATA
-    # cf. https://stackoverflow.com/a/7774512/4717701
-    perl -CSDA -pe's/[^\x9\xA\xD\x20-\x{D7FF}\x{E000}-\x{FFFD}\x{10000}-\x{10FFFF}]+/?/g;' "$1" \
-      | sed 's|]]>|]]>]]<![CDATA[>|g'
+    cat "$1" | encode_stream
   fi
 }
 
@@ -184,6 +197,7 @@ function write_xml_output_file {
       error_msg="<error message=\"exited with error code $exitCode\"></error>"
     fi
     test_name="${TEST_BINARY#./}"
+    test_name="${TEST_BINARY#../}"
     # Ensure that test shards have unique names in the xml output.
     if [[ -n "${TEST_TOTAL_SHARDS+x}" ]] && ((TEST_TOTAL_SHARDS != 0)); then
       ((shard_num=TEST_SHARD_INDEX+1))
@@ -194,7 +208,9 @@ function write_xml_output_file {
 <testsuites>
   <testsuite name="$test_name" tests="1" failures="0" errors="${errors}">
     <testcase name="$test_name" status="run" duration="${duration}" time="${duration}">${error_msg}</testcase>
-    <system-out><![CDATA[$(encode_output_file "${XML_OUTPUT_FILE}.log")]]></system-out>
+    <system-out>Generated test.log (if the file is not UTF-8, then this may be unreadable):
+      <![CDATA[$(encode_output_file "${XML_OUTPUT_FILE}.log")]]>
+    </system-out>
   </testsuite>
 </testsuites>
 EOF
@@ -245,51 +261,116 @@ if [ ! -z "$TEST_SHORT_EXEC_PATH" ]; then
   TEST_PATH="${BASE}.exe"
 fi
 
+# Helper to kill a process and its entire group.
+function kill_group {
+  local signal="${1-}"
+  local pid="${2-}"
+  kill -$signal -$pid &> /dev/null
+}
+
+childPid=""
+function signal_children {
+  local signal="${1-}"
+  if [ "${signal}" = "SIGTERM" ] && [ -z "$no_echo" ]; then
+    echo "-- Test timed out at $(date +"%F %T %Z") --"
+  fi
+  if [ ! -z "$childPid" ]; then
+    # For consistency with historical bazel behaviour, send signal to all child
+    # processes, not just the first one. We use the process group for this
+    # purpose.
+    kill_group $signal $childPid
+  fi
+}
+
 exitCode=0
 signals="$(trap -l | sed -E 's/[0-9]+\)//g')"
-for signal in $signals; do
-  trap "write_xml_output_file ${signal}" ${signal}
-done
+if [[ "${EXPERIMENTAL_SPLIT_XML_GENERATION}" == "1" ]]; then
+  for signal in $signals; do
+    # SIGCHLD is expected when a subprocess dies
+    [ "${signal}" = "SIGCHLD" ] && continue
+    trap "signal_children ${signal}" ${signal}
+  done
+else
+  for signal in $signals; do
+    # SIGCHLD is expected when a subprocess dies
+    [ "${signal}" = "SIGCHLD" ] && continue
+    trap "write_xml_output_file ${signal}; signal_children ${signal}" ${signal}
+  done
+fi
 start=$(date +%s)
 
-# Check if we have tail --pid option
-dummy=1 &
-pid=$!
-has_tail=true
-tail -fq --pid $pid -s 0.001 /dev/null &> /dev/null || has_tail=false
-
-if [ "$has_tail" == true ] && [  -z "$no_echo" ]; then
-  touch "${XML_OUTPUT_FILE}.log"
+# We have a challenge here: we want to forward signals to our child processes,
+# but we also want them to send themselves signals like SIGINT. Catching signals
+# ourselves requires use of background processes, trap, and wait. But normally
+# background processes are themselves unable to receive signals like SIGINT,
+# since those signals are intended for interactive processes - the only way for
+# them to get SIGINT in bash is for us to run them in the foreground.
+# To achieve this, we have to use `set -m` to enable Job Control in bash. This
+# has the effect of putting the child processes and any children of their own
+# into their own process groups, which are then able to receive SIGINT, etc,
+# without our shell interfering. Of course, this has the new complication that
+# anyone trying to SIGKILL *us* by group (as we know bazel's legacy process
+# wrapper does) will only kill this process and not the children below it. Any
+# reasonable sandboxing uses at least a process namespace, but we don't have the
+# luxury of assuming one, so our children could be left behind in that
+# eventuality. So, what we do is spawn a *second* background process that
+# watches for us to be killed, and then chain-kills the test's process group.
+# Aren't processes fun?
+set -m
+if [[ "${EXPERIMENTAL_SPLIT_XML_GENERATION}" == "1" ]]; then
   if [ -z "$COVERAGE_DIR" ]; then
-    ("${TEST_PATH}" "$@" &>"${XML_OUTPUT_FILE}.log") &
-    pid=$!
+    ("${TEST_PATH}" "$@" 2>&1) <&0 &
   else
-    ("$1" "$TEST_PATH" "${@:3}" &> "${XML_OUTPUT_FILE}.log") &
-    pid=$!
+    ("$1" "$TEST_PATH" "${@:3}" 2>&1) <&0 &
   fi
-  tail -fq --pid $pid -s 0.001 "${XML_OUTPUT_FILE}.log"
-  wait $pid
-  exitCode=$?
 else
-  if [[ "${EXPERIMENTAL_SPLIT_XML_GENERATION}" == "1" ]]; then
-    if [ -z "$COVERAGE_DIR" ]; then
-      "${TEST_PATH}" "$@" 2>&1 || exitCode=$?
-    else
-      "$1" "$TEST_PATH" "${@:3}" 2>&1 || exitCode=$?
-    fi
+  if [ -z "$COVERAGE_DIR" ]; then
+    ("${TEST_PATH}" "$@" 2> >(tee -a "${XML_OUTPUT_FILE}.log" >&2) 1> >(tee -a "${XML_OUTPUT_FILE}.log") 2>&1) <&0 &
   else
-    if [ -z "$COVERAGE_DIR" ]; then
-      "${TEST_PATH}" "$@" 2> >(tee -a "${XML_OUTPUT_FILE}.log" >&2) 1> >(tee -a "${XML_OUTPUT_FILE}.log") 2>&1 || exitCode=$?
-    else
-      "$1" "$TEST_PATH" "${@:3}" 2> >(tee -a "${XML_OUTPUT_FILE}.log" >&2) 1> >(tee -a "${XML_OUTPUT_FILE}.log") 2>&1 || exitCode=$?
-    fi
+    ("$1" "$TEST_PATH" "${@:3}" 2> >(tee -a "${XML_OUTPUT_FILE}.log" >&2) 1> >(tee -a "${XML_OUTPUT_FILE}.log") 2>&1) <&0 &
   fi
 fi
+childPid=$!
+
+# Cleanup helper
+( if ! (ps -p $$ &> /dev/null || [ "`pgrep -a -g $$ 2> /dev/null`" != "" ] ); then
+   # `ps` is known to be unrunnable in the darwin sandbox-exec environment due
+   # to being a set-uid root program. pgrep exists in most environments, but not
+   # universally. In the event that we find ourselves running in an environment
+   # where *neither* exists, we have no reliable way to check if our parent is
+   # still alive - so simply disable this cleanup routine entirely.
+   exit 0
+ fi
+ while ps -p $$ &> /dev/null || [ "`pgrep -a -g $$ 2> /dev/null`" != "" ]; do
+    sleep 10
+ done
+ # Parent process not found - we've been abandoned! Clean up test processes.
+ kill_group SIGKILL $childPid
+) &
+cleanupPid=$!
+
+set +m
+
+wait $childPid
+# If interrupted by a signal, use the signal as the exit code. But allow
+# the child to actually finish from the signal we sent _it_ via signal_child.
+# (Waiting on a stopped process is a no-op).
+# Only once - if we receive multiple signals (of any sort), give up.
+exitCode=$?
+wait $childPid
+
+# By this point, we have everything we're willing to wait for. Tidy up our own
+# processes and move on.
+kill_group SIGKILL $childPid
+kill_group SIGKILL $cleanupPid &> /dev/null
+wait $cleanupPid
 
 for signal in $signals; do
   trap - ${signal}
 done
 if [[ "${EXPERIMENTAL_SPLIT_XML_GENERATION}" != "1" ]]; then
+  # This call to write_xml_output_file does nothing if a a test.xml already
+  # exists, e.g., because we received SIGTERM and the trap handler created it.
   write_xml_output_file
 fi
 
@@ -329,10 +410,14 @@ fi
 
 # Zip up undeclared outputs.
 if [[ -n "$TEST_UNDECLARED_OUTPUTS_ZIP" ]] && cd "$TEST_UNDECLARED_OUTPUTS_DIR"; then
-  (
-   shopt -s dotglob failglob
-   zip -qr "$TEST_UNDECLARED_OUTPUTS_ZIP" -- *
-  ) 2> /dev/null
+  shopt -s dotglob
+  if [[ "$(echo *)" != "*" ]]; then
+    # If * found nothing, echo printed the literal *.
+    # Otherwise echo printed the top-level files and directories.
+    # Pass files to zip with *, so paths with spaces aren't broken up.
+    zip -qr "$TEST_UNDECLARED_OUTPUTS_ZIP" -- * 2>/dev/null || \
+        echo >&2 "Could not create \"$TEST_UNDECLARED_OUTPUTS_ZIP\": zip not found or failed"
+  fi
 fi
 
 exit $exitCode

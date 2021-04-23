@@ -22,21 +22,24 @@ import com.google.common.io.ByteStreams;
 import com.google.devtools.build.lib.actions.ExecException;
 import com.google.devtools.build.lib.actions.ExecutionRequirements;
 import com.google.devtools.build.lib.actions.Spawn;
-import com.google.devtools.build.lib.actions.SpawnResult;
 import com.google.devtools.build.lib.actions.Spawns;
 import com.google.devtools.build.lib.actions.UserExecException;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
+import com.google.devtools.build.lib.exec.TreeDeleter;
 import com.google.devtools.build.lib.exec.local.LocalEnvProvider;
 import com.google.devtools.build.lib.exec.local.PosixLocalEnvProvider;
 import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.profiler.SilentCloseable;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
+import com.google.devtools.build.lib.sandbox.SandboxHelpers.SandboxInputs;
 import com.google.devtools.build.lib.sandbox.SandboxHelpers.SandboxOutputs;
+import com.google.devtools.build.lib.server.FailureDetails.Sandbox.Code;
 import com.google.devtools.build.lib.shell.Command;
 import com.google.devtools.build.lib.shell.CommandException;
 import com.google.devtools.build.lib.util.OS;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Symlinks;
 import java.io.File;
 import java.io.IOException;
@@ -56,7 +59,7 @@ final class LinuxSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
    * Returns whether the linux sandbox is supported on the local machine by running a small command
    * in it.
    */
-  public static boolean isSupported(final CommandEnvironment cmdEnv) {
+  public static boolean isSupported(final CommandEnvironment cmdEnv) throws InterruptedException {
     if (OS.getCurrent() != OS.LINUX) {
       return false;
     }
@@ -64,11 +67,20 @@ final class LinuxSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
       return false;
     }
     Path linuxSandbox = LinuxSandboxUtil.getLinuxSandbox(cmdEnv);
-    return isSupportedMap.computeIfAbsent(
-        linuxSandbox, linuxSandboxPath -> computeIsSupported(cmdEnv, linuxSandboxPath));
+    Boolean isSupported;
+    synchronized (isSupportedMap) {
+      isSupported = isSupportedMap.get(linuxSandbox);
+      if (isSupported != null) {
+        return isSupported;
+      }
+      isSupported = computeIsSupported(cmdEnv, linuxSandbox);
+      isSupportedMap.put(linuxSandbox, isSupported);
+    }
+    return isSupported;
   }
 
-  private static boolean computeIsSupported(CommandEnvironment cmdEnv, Path linuxSandbox) {
+  private static boolean computeIsSupported(CommandEnvironment cmdEnv, Path linuxSandbox)
+      throws InterruptedException {
     ImmutableList<String> linuxSandboxArgv =
         LinuxSandboxUtil.commandLineBuilder(linuxSandbox, ImmutableList.of("/bin/true")).build();
     ImmutableMap<String, String> env = ImmutableMap.of();
@@ -85,6 +97,7 @@ final class LinuxSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
     return true;
   }
 
+  private final SandboxHelpers helpers;
   private final FileSystem fileSystem;
   private final BlazeDirectories blazeDirs;
   private final Path execRoot;
@@ -95,11 +108,14 @@ final class LinuxSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
   private final Path inaccessibleHelperDir;
   private final LocalEnvProvider localEnvProvider;
   private final Duration timeoutKillDelay;
-  private final @Nullable SandboxfsProcess sandboxfsProcess;
+  @Nullable private final SandboxfsProcess sandboxfsProcess;
+  private final boolean sandboxfsMapSymlinkTargets;
+  private final TreeDeleter treeDeleter;
 
   /**
    * Creates a sandboxed spawn runner that uses the {@code linux-sandbox} tool.
    *
+   * @param helpers common tools and state across all spawns during sandboxed execution
    * @param cmdEnv the command environment to use
    * @param sandboxBase path to the sandbox base directory
    * @param inaccessibleHelperFile path to a file that is (already) inaccessible
@@ -107,30 +123,37 @@ final class LinuxSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
    * @param timeoutKillDelay an additional grace period before killing timing out commands
    * @param sandboxfsProcess instance of the sandboxfs process to use; may be null for none, in
    *     which case the runner uses a symlinked sandbox
+   * @param sandboxfsMapSymlinkTargets map the targets of symlinks within the sandbox if true
    */
   LinuxSandboxedSpawnRunner(
+      SandboxHelpers helpers,
       CommandEnvironment cmdEnv,
       Path sandboxBase,
       Path inaccessibleHelperFile,
       Path inaccessibleHelperDir,
       Duration timeoutKillDelay,
-      @Nullable SandboxfsProcess sandboxfsProcess) {
+      @Nullable SandboxfsProcess sandboxfsProcess,
+      boolean sandboxfsMapSymlinkTargets,
+      TreeDeleter treeDeleter) {
     super(cmdEnv);
+    this.helpers = helpers;
     this.fileSystem = cmdEnv.getRuntime().getFileSystem();
     this.blazeDirs = cmdEnv.getDirectories();
     this.execRoot = cmdEnv.getExecRoot();
-    this.allowNetwork = SandboxHelpers.shouldAllowNetwork(cmdEnv.getOptions());
+    this.allowNetwork = helpers.shouldAllowNetwork(cmdEnv.getOptions());
     this.linuxSandbox = LinuxSandboxUtil.getLinuxSandbox(cmdEnv);
     this.sandboxBase = sandboxBase;
     this.inaccessibleHelperFile = inaccessibleHelperFile;
     this.inaccessibleHelperDir = inaccessibleHelperDir;
     this.timeoutKillDelay = timeoutKillDelay;
     this.sandboxfsProcess = sandboxfsProcess;
+    this.sandboxfsMapSymlinkTargets = sandboxfsMapSymlinkTargets;
     this.localEnvProvider = new PosixLocalEnvProvider(cmdEnv.getClientEnv());
+    this.treeDeleter = treeDeleter;
   }
 
   @Override
-  protected SpawnResult actuallyExec(Spawn spawn, SpawnExecutionContext context)
+  protected SandboxedSpawn prepareSpawn(Spawn spawn, SpawnExecutionContext context)
       throws IOException, ExecException, InterruptedException {
     // Each invocation of "exec" gets its own sandbox base.
     // Note that the value returned by context.getId() is only unique inside one given SpawnRunner,
@@ -142,19 +165,29 @@ final class LinuxSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
 
     // b/64689608: The execroot of the sandboxed process must end with the workspace name, just like
     // the normal execroot does.
-    Path sandboxExecRoot = sandboxPath.getRelative("execroot").getRelative(execRoot.getBaseName());
+    String workspaceName = execRoot.getBaseName();
+    Path sandboxExecRoot = sandboxPath.getRelative("execroot").getRelative(workspaceName);
     sandboxExecRoot.getParentDirectory().createDirectory();
     sandboxExecRoot.createDirectory();
 
-    Map<String, String> environment =
+    ImmutableMap<String, String> environment =
         localEnvProvider.rewriteLocalEnv(spawn.getEnvironment(), binTools, "/tmp");
 
     ImmutableSet<Path> writableDirs = getWritableDirs(sandboxExecRoot, environment);
-    SandboxOutputs outputs = SandboxHelpers.getOutputs(spawn);
+
+    SandboxInputs inputs =
+        helpers.processInputFiles(
+            context.getInputMapping(PathFragment.EMPTY_FRAGMENT),
+            spawn,
+            context.getArtifactExpander(),
+            execRoot);
+    SandboxOutputs outputs = helpers.getOutputs(spawn);
+
     Duration timeout = context.getTimeout();
 
     LinuxSandboxUtil.CommandLineBuilder commandLineBuilder =
         LinuxSandboxUtil.commandLineBuilder(linuxSandbox, spawn.getArguments())
+            .addExecutionInfo(spawn.getExecutionInfo())
             .setWritableFilesAndDirectories(writableDirs)
             .setTmpfsDirectories(getTmpfsPaths())
             .setBindMounts(getReadOnlyBindMounts(blazeDirs, sandboxExecRoot))
@@ -182,38 +215,31 @@ final class LinuxSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
       commandLineBuilder.setStatisticsPath(statisticsPath);
     }
 
-    SandboxedSpawn sandbox;
     if (sandboxfsProcess != null) {
-      sandbox =
-          new SandboxfsSandboxedSpawn(
-              sandboxfsProcess,
-              sandboxPath,
-              commandLineBuilder.build(),
-              environment,
-              SandboxHelpers.processInputFiles(
-                  spawn,
-                  context,
-                  execRoot,
-                  getSandboxOptions().symlinkedSandboxExpandsTreeArtifactsInRunfilesTree),
-              outputs,
-              ImmutableSet.of());
+      return new SandboxfsSandboxedSpawn(
+          sandboxfsProcess,
+          sandboxPath,
+          workspaceName,
+          commandLineBuilder.build(),
+          environment,
+          inputs,
+          outputs,
+          ImmutableSet.of(),
+          sandboxfsMapSymlinkTargets,
+          treeDeleter,
+          statisticsPath);
     } else {
-      sandbox =
-          new SymlinkedSandboxedSpawn(
-              sandboxPath,
-              sandboxExecRoot,
-              commandLineBuilder.build(),
-              environment,
-              SandboxHelpers.processInputFiles(
-                  spawn,
-                  context,
-                  execRoot,
-                  getSandboxOptions().symlinkedSandboxExpandsTreeArtifactsInRunfilesTree),
-              outputs,
-              writableDirs);
+      return new SymlinkedSandboxedSpawn(
+          sandboxPath,
+          sandboxExecRoot,
+          commandLineBuilder.build(),
+          environment,
+          inputs,
+          outputs,
+          writableDirs,
+          treeDeleter,
+          statisticsPath);
     }
-
-    return runSpawn(spawn, sandbox, context, execRoot, timeout, statisticsPath);
   }
 
   @Override
@@ -262,7 +288,9 @@ final class LinuxSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
         bindMounts.put(mountTarget, mountSource);
       } catch (IllegalArgumentException e) {
         throw new UserExecException(
-            String.format("Error occurred when analyzing bind mount pairs. %s", e.getMessage()));
+            createFailureDetail(
+                String.format("Error occurred when analyzing bind mount pairs. %s", e.getMessage()),
+                Code.BIND_MOUNT_ANALYSIS_FAILURE));
       }
     }
     for (Path inaccessiblePath : getInaccessiblePaths()) {
@@ -277,20 +305,27 @@ final class LinuxSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
   }
 
   /**
-   * This method does the following things: - If mount source does not exist on the host system,
-   * throw an error message - If mount target exists, check whether the source and target are of the
-   * same type - If mount target does not exist on the host system, throw an error message
+   * This method does the following things:
+   *
+   * <ul>
+   *   <li>If mount source does not exist on the host system, throw an error message
+   *   <li>If mount target exists, check whether the source and target are of the same type
+   *   <li>If mount target does not exist on the host system, throw an error message
+   * </ul>
    *
    * @param bindMounts the bind mounts map with target as key and source as value
-   * @throws UserExecException
+   * @throws UserExecException if any of the mount points are not valid
    */
   private void validateBindMounts(SortedMap<Path, Path> bindMounts) throws UserExecException {
-    for (SortedMap.Entry<Path, Path> bindMount : bindMounts.entrySet()) {
+    for (Map.Entry<Path, Path> bindMount : bindMounts.entrySet()) {
       final Path source = bindMount.getValue();
       final Path target = bindMount.getKey();
       // Mount source should exist in the file system
       if (!source.exists()) {
-        throw new UserExecException(String.format("Mount source '%s' does not exist.", source));
+        throw new UserExecException(
+            createFailureDetail(
+                String.format("Mount source '%s' does not exist.", source),
+                Code.MOUNT_SOURCE_DOES_NOT_EXIST));
       }
       // If target exists, but is not of the same type as the source, then we cannot mount it.
       if (target.exists()) {
@@ -301,19 +336,45 @@ final class LinuxSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
         if (!(areBothDirectories || areBothFiles)) {
           // Source and target are not of the same type; we cannot mount it.
           throw new UserExecException(
-              String.format(
-                  "Mount target '%s' is not of the same type as mount source '%s'.",
-                  target, source));
+              createFailureDetail(
+                  String.format(
+                      "Mount target '%s' is a %s but mount source '%s' is a %s, they must be the"
+                          + " same type.",
+                      target,
+                      (isTargetFile ? "file" : "directory"),
+                      source,
+                      (isSourceFile ? "file" : "directory")),
+                  Code.MOUNT_SOURCE_TARGET_TYPE_MISMATCH));
         }
       } else {
         // Mount target should exist in the file system
         throw new UserExecException(
-            String.format(
-                "Mount target '%s' does not exist. Bazel only supports bind mounting on top of "
-                    + "existing files/directories. Please create an empty file or directory at "
-                    + "the mount target path according to the type of mount source.",
-                target));
+            createFailureDetail(
+                String.format(
+                    "Mount target '%s' does not exist. Bazel only supports bind mounting on top of "
+                        + "existing files/directories. Please create an empty file or directory at "
+                        + "the mount target path according to the type of mount source.",
+                    target),
+                Code.MOUNT_TARGET_DOES_NOT_EXIST));
       }
     }
+  }
+
+  @Override
+  public void cleanupSandboxBase(Path sandboxBase, TreeDeleter treeDeleter) throws IOException {
+    // Delete the inaccessible files synchronously, bypassing the treeDeleter. They are only a
+    // couple of files that can be deleted fast, and ensuring they are gone at the end of every
+    // build avoids annoying permission denied errors if the user happens to run "rm -rf" on the
+    // output base. (We have some tests that do that.)
+    if (inaccessibleHelperDir.exists()) {
+      inaccessibleHelperDir.chmod(0700);
+      inaccessibleHelperDir.deleteTree();
+    }
+    if (inaccessibleHelperFile.exists()) {
+      inaccessibleHelperFile.chmod(0600);
+      inaccessibleHelperFile.delete();
+    }
+
+    super.cleanupSandboxBase(sandboxBase, treeDeleter);
   }
 }

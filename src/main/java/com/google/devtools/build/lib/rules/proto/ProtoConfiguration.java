@@ -15,17 +15,15 @@
 package com.google.devtools.build.lib.rules.proto;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSet;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration.Fragment;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration.StrictDepsMode;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
-import com.google.devtools.build.lib.analysis.config.ConfigurationFragmentFactory;
+import com.google.devtools.build.lib.analysis.config.CoreOptionConverters;
+import com.google.devtools.build.lib.analysis.config.CoreOptionConverters.StrictDepsMode;
+import com.google.devtools.build.lib.analysis.config.Fragment;
 import com.google.devtools.build.lib.analysis.config.FragmentOptions;
-import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
+import com.google.devtools.build.lib.analysis.config.RequiresOptions;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
-import com.google.devtools.build.lib.skylarkbuildapi.ProtoConfigurationApi;
+import com.google.devtools.build.lib.starlarkbuildapi.ProtoConfigurationApi;
 import com.google.devtools.common.options.Converters;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
@@ -35,19 +33,33 @@ import java.util.List;
 
 /** Configuration for Protocol Buffer Libraries. */
 @Immutable
-// This module needs to be exported to Skylark so it can be passed as a mandatory host/target
+// This module needs to be exported to Starlark so it can be passed as a mandatory host/target
 // configuration fragment in aspect definitions.
+@RequiresOptions(options = {ProtoConfiguration.Options.class})
 public class ProtoConfiguration extends Fragment implements ProtoConfigurationApi {
   /** Command line options. */
   public static class Options extends FragmentOptions {
     @Option(
-      name = "protocopt",
-      allowMultiple = true,
-      defaultValue = "",
-      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-      effectTags = {OptionEffectTag.AFFECTS_OUTPUTS},
-      help = "Additional options to pass to the protobuf compiler."
-    )
+        name = "incompatible_generated_protos_in_virtual_imports",
+        defaultValue = "true",
+        documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+        effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
+        metadataTags = {
+          OptionMetadataTag.INCOMPATIBLE_CHANGE,
+          OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
+        },
+        help =
+            "If set, generated .proto files are put into a virtual import directory. For more "
+                + "information, see https://github.com/bazelbuild/bazel/issues/9215")
+    public boolean generatedProtosInVirtualImports;
+
+    @Option(
+        name = "protocopt",
+        allowMultiple = true,
+        defaultValue = "null",
+        documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+        effectTags = {OptionEffectTag.AFFECTS_OUTPUTS},
+        help = "Additional options to pass to the protobuf compiler.")
     public List<String> protocOpts;
 
     @Option(
@@ -61,67 +73,70 @@ public class ProtoConfiguration extends Fragment implements ProtoConfigurationAp
     public boolean experimentalProtoExtraActions;
 
     @Option(
-      name = "proto_compiler",
-      defaultValue = "@com_google_protobuf//:protoc",
-      converter = BuildConfiguration.LabelConverter.class,
-      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-      effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.LOADING_AND_ANALYSIS},
-      help = "The label of the proto-compiler."
-    )
+        name = "experimental_proto_descriptor_sets_include_source_info",
+        defaultValue = "false",
+        documentationCategory = OptionDocumentationCategory.OUTPUT_SELECTION,
+        effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.LOADING_AND_ANALYSIS},
+        metadataTags = {OptionMetadataTag.EXPERIMENTAL},
+        help = "Run extra actions for alternative Java api versions in a proto_library.")
+    public boolean experimentalProtoDescriptorSetsIncludeSourceInfo;
+
+    @Option(
+        name = "proto_compiler",
+        defaultValue = "@com_google_protobuf//:protoc",
+        converter = CoreOptionConverters.LabelConverter.class,
+        documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+        effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.LOADING_AND_ANALYSIS},
+        help = "The label of the proto-compiler.")
     public Label protoCompiler;
 
     @Option(
-      name = "proto_toolchain_for_javalite",
-      defaultValue = "@com_google_protobuf_javalite//:javalite_toolchain",
-      converter = BuildConfiguration.EmptyToNullLabelConverter.class,
-      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-      effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.LOADING_AND_ANALYSIS},
-      help = "Label of proto_lang_toolchain() which describes how to compile JavaLite protos"
-    )
+        name = "proto_toolchain_for_javalite",
+        defaultValue = "@com_google_protobuf//:javalite_toolchain",
+        converter = CoreOptionConverters.LabelConverter.class,
+        documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+        effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.LOADING_AND_ANALYSIS},
+        help = "Label of proto_lang_toolchain() which describes how to compile JavaLite protos")
     public Label protoToolchainForJavaLite;
 
     @Option(
-      name = "proto_toolchain_for_java",
-      defaultValue = "@com_google_protobuf//:java_toolchain",
-      converter = BuildConfiguration.EmptyToNullLabelConverter.class,
-      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-      effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.LOADING_AND_ANALYSIS},
-      help = "Label of proto_lang_toolchain() which describes how to compile Java protos"
-    )
+        name = "proto_toolchain_for_java",
+        defaultValue = "@com_google_protobuf//:java_toolchain",
+        converter = CoreOptionConverters.EmptyToNullLabelConverter.class,
+        documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+        effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.LOADING_AND_ANALYSIS},
+        help = "Label of proto_lang_toolchain() which describes how to compile Java protos")
     public Label protoToolchainForJava;
 
     @Option(
-      name = "proto_toolchain_for_j2objc",
-      defaultValue = "@bazel_tools//tools/j2objc:j2objc_proto_toolchain",
-      category = "flags",
-      converter = BuildConfiguration.EmptyToNullLabelConverter.class,
-      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-      effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.LOADING_AND_ANALYSIS},
-      help = "Label of proto_lang_toolchain() which describes how to compile j2objc protos"
-    )
+        name = "proto_toolchain_for_j2objc",
+        defaultValue = "@bazel_tools//tools/j2objc:j2objc_proto_toolchain",
+        category = "flags",
+        converter = CoreOptionConverters.EmptyToNullLabelConverter.class,
+        documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+        effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.LOADING_AND_ANALYSIS},
+        help = "Label of proto_lang_toolchain() which describes how to compile j2objc protos")
     public Label protoToolchainForJ2objc;
 
     @Option(
-      name = "proto_toolchain_for_cc",
-      defaultValue = "@com_google_protobuf//:cc_toolchain",
-      converter = BuildConfiguration.EmptyToNullLabelConverter.class,
-      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-      effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.LOADING_AND_ANALYSIS},
-      help = "Label of proto_lang_toolchain() which describes how to compile C++ protos"
-    )
+        name = "proto_toolchain_for_cc",
+        defaultValue = "@com_google_protobuf//:cc_toolchain",
+        converter = CoreOptionConverters.EmptyToNullLabelConverter.class,
+        documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+        effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.LOADING_AND_ANALYSIS},
+        help = "Label of proto_lang_toolchain() which describes how to compile C++ protos")
     public Label protoToolchainForCc;
 
     @Option(
-      name = "strict_proto_deps",
-      defaultValue = "strict",
-      converter = BuildConfiguration.StrictDepsConverter.class,
-      documentationCategory = OptionDocumentationCategory.INPUT_STRICTNESS,
-      effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS, OptionEffectTag.EAGERNESS_TO_EXIT},
-      metadataTags = {OptionMetadataTag.INCOMPATIBLE_CHANGE},
-      help =
-          "If true, checks that a proto_library target explicitly declares all directly "
-              + "used targets as dependencies."
-    )
+        name = "strict_proto_deps",
+        defaultValue = "error",
+        converter = CoreOptionConverters.StrictDepsConverter.class,
+        documentationCategory = OptionDocumentationCategory.INPUT_STRICTNESS,
+        effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS, OptionEffectTag.EAGERNESS_TO_EXIT},
+        metadataTags = {OptionMetadataTag.INCOMPATIBLE_CHANGE},
+        help =
+            "Unless OFF, checks that a proto_library target explicitly declares all directly "
+                + "used targets as dependencies.")
     public StrictDepsMode strictProtoDeps;
 
     @Option(
@@ -158,6 +173,8 @@ public class ProtoConfiguration extends Fragment implements ProtoConfigurationAp
       Options host = (Options) super.getHost();
       host.protoCompiler = protoCompiler;
       host.protocOpts = protocOpts;
+      host.experimentalProtoDescriptorSetsIncludeSourceInfo =
+          experimentalProtoDescriptorSetsIncludeSourceInfo;
       host.experimentalProtoExtraActions = experimentalProtoExtraActions;
       host.protoCompiler = protoCompiler;
       host.protoToolchainForJava = protoToolchainForJava;
@@ -169,28 +186,8 @@ public class ProtoConfiguration extends Fragment implements ProtoConfigurationAp
       host.ccProtoLibrarySourceSuffixes = ccProtoLibrarySourceSuffixes;
       host.experimentalJavaProtoAddAllowedPublicImports =
           experimentalJavaProtoAddAllowedPublicImports;
+      host.generatedProtosInVirtualImports = generatedProtosInVirtualImports;
       return host;
-    }
-  }
-
-  /**
-   * Loader class for proto.
-   */
-  public static class Loader implements ConfigurationFragmentFactory {
-    @Override
-    public Fragment create(BuildOptions buildOptions)
-        throws InvalidConfigurationException {
-      return new ProtoConfiguration(buildOptions.get(Options.class));
-    }
-
-    @Override
-    public Class<? extends Fragment> creates() {
-      return ProtoConfiguration.class;
-    }
-
-    @Override
-    public ImmutableSet<Class<? extends FragmentOptions>> requiredOptions() {
-      return ImmutableSet.<Class<? extends FragmentOptions>>of(Options.class);
     }
   }
 
@@ -199,7 +196,8 @@ public class ProtoConfiguration extends Fragment implements ProtoConfigurationAp
   private final ImmutableList<String> ccProtoLibrarySourceSuffixes;
   private final Options options;
 
-  private ProtoConfiguration(Options options) {
+  public ProtoConfiguration(BuildOptions buildOptions) {
+    Options options = buildOptions.get(Options.class);
     this.protocOpts = ImmutableList.copyOf(options.protocOpts);
     this.ccProtoLibraryHeaderSuffixes = ImmutableList.copyOf(options.ccProtoLibraryHeaderSuffixes);
     this.ccProtoLibrarySourceSuffixes = ImmutableList.copyOf(options.ccProtoLibrarySourceSuffixes);
@@ -208,6 +206,10 @@ public class ProtoConfiguration extends Fragment implements ProtoConfigurationAp
 
   public ImmutableList<String> protocOpts() {
     return protocOpts;
+  }
+
+  public boolean experimentalProtoDescriptorSetsIncludeSourceInfo() {
+    return options.experimentalProtoDescriptorSetsIncludeSourceInfo;
   }
 
   /**
@@ -253,5 +255,9 @@ public class ProtoConfiguration extends Fragment implements ProtoConfigurationAp
 
   public boolean strictPublicImports() {
     return options.experimentalJavaProtoAddAllowedPublicImports;
+  }
+
+  public boolean generatedProtosInVirtualImports() {
+    return options.generatedProtosInVirtualImports;
   }
 }

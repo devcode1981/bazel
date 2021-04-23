@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import os
+import re
+import time
 import unittest
 from src.test.py.bazel import test_base
 
@@ -37,23 +39,82 @@ class BazelCleanTest(test_base.TestBase):
     self.AssertExitCode(exit_code, 0, stderr)
     output_base = stdout[0]
 
-    exit_code, _, stderr = self.RunBazel(['build', '//foo:x'])
-    self.AssertExitCode(exit_code, 0, stderr)
-    self.assertTrue(os.path.exists(os.path.join(bazel_genfiles, 'foo/x.out')))
+    # Repeat 10 times to ensure flaky error like
+    # https://github.com/bazelbuild/bazel/issues/5907 are caught.
+    for _ in range(0, 10):
+      exit_code, _, stderr = self.RunBazel(['build', '//foo:x'])
+      self.AssertExitCode(exit_code, 0, stderr)
+      self.assertTrue(os.path.exists(
+          os.path.join(bazel_genfiles, 'foo/x.out')))
 
-    exit_code, _, stderr = self.RunBazel(['clean'])
-    self.AssertExitCode(exit_code, 0, stderr)
-    self.assertFalse(os.path.exists(os.path.join(bazel_genfiles, 'foo/x.out')))
-    self.assertTrue(os.path.exists(output_base))
+      exit_code, _, stderr = self.RunBazel(['clean'])
+      self.AssertExitCode(exit_code, 0, stderr)
+      self.assertFalse(os.path.exists(
+          os.path.join(bazel_genfiles, 'foo/x.out')))
+      self.assertTrue(os.path.exists(output_base))
 
-    exit_code, _, stderr = self.RunBazel(['build', '//foo:x'])
-    self.AssertExitCode(exit_code, 0, stderr)
-    self.assertTrue(os.path.exists(os.path.join(bazel_genfiles, 'foo/x.out')))
+      exit_code, _, stderr = self.RunBazel(['build', '//foo:x'])
+      self.AssertExitCode(exit_code, 0, stderr)
+      self.assertTrue(os.path.exists(os.path.join(bazel_genfiles, 'foo/x.out')))
 
-    exit_code, _, stderr = self.RunBazel(['clean', '--expunge'])
+      exit_code, _, stderr = self.RunBazel(['clean', '--expunge'])
+      self.AssertExitCode(exit_code, 0, stderr)
+      self.assertFalse(os.path.exists(
+          os.path.join(bazel_genfiles, 'foo/x.out')))
+      self.assertFalse(os.path.exists(output_base))
+
+  @unittest.skipIf(not test_base.TestBase.IsLinux(),
+                   'Async clean only supported on Linux')
+  def testBazelAsyncClean(self):
+    self.ScratchFile('WORKSPACE')
+    exit_code, _, stderr = self.RunBazel(['clean', '--async'])
     self.AssertExitCode(exit_code, 0, stderr)
-    self.assertFalse(os.path.exists(os.path.join(bazel_genfiles, 'foo/x.out')))
-    self.assertFalse(os.path.exists(output_base))
+    matcher = self._findMatch(' moved to (.*) for deletion', stderr)
+    self.assertTrue(matcher, stderr)
+    first_temp = matcher.group(1)
+    self.assertTrue(first_temp, stderr)
+    # Now do it again (we need to build to recreate exec root).
+    self.RunBazel(['build'])
+    exit_code, _, stderr = self.RunBazel(['clean', '--async'])
+    self.AssertExitCode(exit_code, 0, stderr)
+    matcher = self._findMatch(' moved to (.*) for deletion', stderr)
+    self.assertTrue(matcher, stderr)
+    second_temp = matcher.group(1)
+    self.assertTrue(second_temp, stderr)
+    # Two directories should be different.
+    self.assertNotEqual(second_temp, first_temp, stderr)
+
+  @unittest.skipIf(not test_base.TestBase.IsLinux(),
+                   'Async clean only supported on Linux')
+  def testBazelAsyncCleanWithReadonlyDirectories(self):
+    self.ScratchFile('WORKSPACE')
+    exit_code, _, stderr = self.RunBazel(['build'])
+    self.AssertExitCode(exit_code, 0, stderr)
+    exit_code, stdout, stderr = self.RunBazel(['info', 'execution_root'])
+    self.AssertExitCode(exit_code, 0, stderr)
+    execroot = stdout[0]
+    readonly_dir = os.path.join(execroot, 'readonly')
+    os.mkdir(readonly_dir)
+    open(os.path.join(readonly_dir, 'somefile'), 'wb').close()
+    os.chmod(readonly_dir, 0o555)
+    exit_code, _, stderr = self.RunBazel(['clean', '--async'])
+    matcher = self._findMatch(' moved to (.*) for deletion', stderr)
+    self.assertTrue(matcher, stderr)
+    temp = matcher.group(1)
+    for _ in range(50):
+      if not os.path.isdir(temp):
+        break
+      time.sleep(.1)
+    else:
+      self.fail('temporary directory not removed: {!r}'.format(stderr))
+
+  def _findMatch(self, pattern, items):
+    r = re.compile(pattern)
+    for line in items:
+      matcher = r.search(line)
+      if matcher:
+        return matcher
+    return None
 
 
 if __name__ == '__main__':

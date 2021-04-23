@@ -19,8 +19,9 @@ import static org.junit.Assert.fail;
 
 import com.google.common.base.Preconditions;
 import com.google.common.base.Stopwatch;
+import com.google.common.collect.ImmutableClassToInstanceMap;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
+import com.google.common.flogger.GoogleLogger;
 import com.google.devtools.build.lib.skyframe.serialization.DeserializationContext;
 import com.google.devtools.build.lib.skyframe.serialization.ObjectCodec;
 import com.google.devtools.build.lib.skyframe.serialization.SerializationContext;
@@ -28,12 +29,10 @@ import com.google.devtools.build.lib.skyframe.serialization.SerializationExcepti
 import com.google.protobuf.CodedInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 /** Utility for testing {@link ObjectCodec} instances. */
 public class ObjectCodecTester<T> {
-  private static final Logger logger = Logger.getLogger(ObjectCodecTester.class.getName());
+  private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
 
   /** Interface for testing successful deserialization of an object. */
   @FunctionalInterface
@@ -101,13 +100,9 @@ public class ObjectCodecTester<T> {
         verificationFunction.verifyDeserialized(subject, deserialized);
       }
     }
-    logger.log(
-        Level.INFO,
-        underTest.getEncodedClass().getSimpleName()
-            + " total serialized bytes = "
-            + totalBytes
-            + ", "
-            + timer);
+    logger.atInfo().log(
+        "%s total serialized bytes = %d, %s",
+        underTest.getEncodedClass().getSimpleName(), totalBytes, timer);
   }
 
   /** Runs serialized bytes stability tests. */
@@ -143,8 +138,8 @@ public class ObjectCodecTester<T> {
   public static class Builder<T> {
     private final ObjectCodec<T> underTest;
     private final ImmutableList.Builder<T> subjectsBuilder = ImmutableList.builder();
-    private final ImmutableMap.Builder<Class<?>, Object> dependenciesBuilder =
-        ImmutableMap.builder();
+    private final ImmutableClassToInstanceMap.Builder<Object> dependenciesBuilder =
+        ImmutableClassToInstanceMap.builder();
     private boolean skipBadDataTest = false;
     private VerificationFunction<T> verificationFunction =
         (original, deserialized) -> assertThat(deserialized).isEqualTo(original);
@@ -156,7 +151,7 @@ public class ObjectCodecTester<T> {
 
     /** Add subjects to be tested for serialization/deserialization. */
     @SafeVarargs
-    public final Builder<T> addSubjects(@SuppressWarnings("unchecked") T... subjects) {
+    public final Builder<T> addSubjects(T... subjects) {
       return addSubjects(ImmutableList.copyOf(subjects));
     }
 
@@ -206,7 +201,7 @@ public class ObjectCodecTester<T> {
      * individually.
      */
     ObjectCodecTester<T> build() {
-      ImmutableMap<Class<?>, Object> dependencies = dependenciesBuilder.build();
+      ImmutableClassToInstanceMap<Object> dependencies = dependenciesBuilder.build();
       return new ObjectCodecTester<>(
           underTest,
           subjectsBuilder.build(),

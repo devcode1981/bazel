@@ -16,6 +16,7 @@ package com.google.devtools.build.lib.server;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.flogger.GoogleLogger;
 import com.google.devtools.build.lib.server.CommandProtos.CancelRequest;
 import com.google.devtools.build.lib.util.ThreadUtils;
 import java.util.Collections;
@@ -23,12 +24,11 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.logging.Logger;
 import javax.annotation.concurrent.GuardedBy;
 
 /** Helper class for commands that are currently running on the server. */
 class CommandManager {
-  private static final Logger logger = Logger.getLogger(CommandManager.class.getName());
+  private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
 
   @GuardedBy("runningCommandsMap")
   private final Map<String, RunningCommand> runningCommandsMap = new HashMap<>();
@@ -43,6 +43,24 @@ class CommandManager {
     idle();
   }
 
+  void preemptEligibleCommands() {
+    synchronized (runningCommandsMap) {
+      ImmutableSet.Builder<String> commandsToInterruptBuilder = new ImmutableSet.Builder<>();
+
+      for (RunningCommand command : runningCommandsMap.values()) {
+        if (command.isPreemptible()) {
+          command.thread.interrupt();
+          commandsToInterruptBuilder.add(command.id);
+        }
+      }
+
+      ImmutableSet<String> commandsToInterrupt = commandsToInterruptBuilder.build();
+      if (!commandsToInterrupt.isEmpty()) {
+        startSlowInterruptWatcher(commandsToInterrupt);
+      }
+    }
+  }
+
   void interruptInflightCommands() {
     synchronized (runningCommandsMap) {
       for (RunningCommand command : runningCommandsMap.values()) {
@@ -54,18 +72,17 @@ class CommandManager {
   }
 
   void doCancel(CancelRequest request) {
-    try (RunningCommand cancelCommand = create()) {
+    try (RunningCommand cancelCommand = createCommand()) {
       synchronized (runningCommandsMap) {
         RunningCommand pendingCommand = runningCommandsMap.get(request.getCommandId());
         if (pendingCommand != null) {
-          logger.info(
-              String.format(
-                  "Interrupting command %s on thread %s",
-                  request.getCommandId(), pendingCommand.thread.getName()));
+          logger.atInfo().log(
+              "Interrupting command %s on thread %s",
+              request.getCommandId(), pendingCommand.thread.getName());
           pendingCommand.thread.interrupt();
           startSlowInterruptWatcher(ImmutableSet.of(request.getCommandId()));
         } else {
-          logger.info("Cannot find command " + request.getCommandId() + " to interrupt");
+          logger.atInfo().log("Cannot find command %s to interrupt", request.getCommandId());
         }
       }
     }
@@ -89,8 +106,19 @@ class CommandManager {
     }
   }
 
-  RunningCommand create() {
-    RunningCommand command = new RunningCommand();
+  RunningCommand createPreemptibleCommand() {
+    RunningCommand command = new RunningCommand(true);
+    registerCommand(command);
+    return command;
+  }
+
+  RunningCommand createCommand() {
+    RunningCommand command = new RunningCommand(false);
+    registerCommand(command);
+    return command;
+  }
+
+  private void registerCommand(RunningCommand command) {
     synchronized (runningCommandsMap) {
       if (runningCommandsMap.isEmpty()) {
         busy();
@@ -98,9 +126,7 @@ class CommandManager {
       runningCommandsMap.put(command.id, command);
       runningCommandsMap.notify();
     }
-    logger.info(
-        String.format("Starting command %s on thread %s", command.id, command.thread.getName()));
-    return command;
+    logger.atInfo().log("Starting command %s on thread %s", command.id, command.thread.getName());
   }
 
   private void idle() {
@@ -150,10 +176,12 @@ class CommandManager {
   class RunningCommand implements AutoCloseable {
     private final Thread thread;
     private final String id;
+    private final boolean preemptible;
 
-    private RunningCommand() {
+    private RunningCommand(boolean preemptible) {
       thread = Thread.currentThread();
       id = UUID.randomUUID().toString();
+      this.preemptible = preemptible;
     }
 
     @Override
@@ -166,11 +194,15 @@ class CommandManager {
         runningCommandsMap.notify();
       }
 
-      logger.info(String.format("Finished command %s on thread %s", id, thread.getName()));
+      logger.atInfo().log("Finished command %s on thread %s", id, thread.getName());
     }
 
     String getId() {
       return id;
+    }
+
+    boolean isPreemptible() {
+      return this.preemptible;
     }
   }
 }

@@ -33,7 +33,7 @@ import javax.annotation.Nullable;
 final class ExtraActionsVisitor extends ActionGraphVisitor {
   private final RuleContext ruleContext;
   private final Multimap<String, ExtraActionSpec> mnemonicToExtraActionMap;
-  private final List<Artifact> extraArtifacts;
+  private final List<Artifact.DerivedArtifact> extraArtifacts;
 
   /** Creates a new visitor for the extra actions associated with the given target. */
   public ExtraActionsVisitor(RuleContext ruleContext,
@@ -44,7 +44,7 @@ final class ExtraActionsVisitor extends ActionGraphVisitor {
     extraArtifacts = Lists.newArrayList();
   }
 
-  void maybeAddExtraAction(ActionAnalysisMetadata original) {
+  void maybeAddExtraAction(ActionAnalysisMetadata original) throws InterruptedException {
     if (original instanceof Action) {
       Action action = (Action) original;
       Collection<ExtraActionSpec> extraActions =
@@ -58,13 +58,13 @@ final class ExtraActionsVisitor extends ActionGraphVisitor {
   }
 
   @Override
-  protected void visitAction(ActionAnalysisMetadata action) {
+  protected void visitAction(ActionAnalysisMetadata action) throws InterruptedException {
     maybeAddExtraAction(action);
   }
 
   /** Retrieves the collected artifacts since this method was last called and clears the list. */
-  public ImmutableList<Artifact> getAndResetExtraArtifacts() {
-    ImmutableList<Artifact> collected = ImmutableList.copyOf(extraArtifacts);
+  ImmutableList<Artifact.DerivedArtifact> getAndResetExtraArtifacts() {
+    ImmutableList<Artifact.DerivedArtifact> collected = ImmutableList.copyOf(extraArtifacts);
     extraArtifacts.clear();
     return collected;
   }

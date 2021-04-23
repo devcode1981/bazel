@@ -14,6 +14,7 @@
 package com.google.devtools.build.android.desugar.io;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.devtools.build.android.ziputils.DosTime.EPOCHISH;
 
 import com.google.common.io.ByteStreams;
 import java.io.BufferedOutputStream;
@@ -35,9 +36,27 @@ class ZipOutputFileProvider implements OutputFileProvider {
   }
 
   @Override
-  public void copyFrom(String filename, InputFileProvider inputFileProvider) throws IOException {
+  public void copyFrom(String filename, InputFileProvider inputFileProvider, String outputFilename)
+      throws IOException {
+    if (filename.equals(outputFilename)) {
+      copyFrom(filename, inputFileProvider, inputFileProvider.getZipEntry(filename));
+    } else {
+      ZipEntry inputEntry = inputFileProvider.getZipEntry(filename);
+      // Clone inputEntry with new name, since there's no ZipEntry.setName()
+      ZipEntry result = new ZipEntry(outputFilename);
+      result.setTime(inputEntry.getTime());
+      result.setCrc(inputEntry.getCrc());
+      result.setSize(inputEntry.getSize());
+      result.setCompressedSize(inputEntry.getCompressedSize());
+      result.setMethod(inputEntry.getMethod());
+      copyFrom(filename, inputFileProvider, result);
+    }
+  }
+
+  private void copyFrom(String filename, InputFileProvider inputFileProvider, ZipEntry outputEntry)
+      throws IOException {
     // TODO(bazel-team): Avoid de- and re-compressing resource files
-    out.putNextEntry(inputFileProvider.getZipEntry(filename));
+    out.putNextEntry(outputEntry);
     try (InputStream is = inputFileProvider.getInputStream(filename)) {
       ByteStreams.copy(is, out);
     }
@@ -46,8 +65,10 @@ class ZipOutputFileProvider implements OutputFileProvider {
 
   @Override
   public void write(String filename, byte[] content) throws IOException {
-    checkArgument(filename.equals(DESUGAR_DEPS_FILENAME) || filename.endsWith(".class"),
-        "Expect file to be copied: %s", filename);
+    checkArgument(
+        filename.equals(DESUGAR_DEPS_FILENAME) || filename.endsWith(".class"),
+        "Expect file to be copied: %s",
+        filename);
     writeStoredEntry(out, filename, content);
   }
 
@@ -63,7 +84,7 @@ class ZipOutputFileProvider implements OutputFileProvider {
     checksum.update(content);
 
     ZipEntry result = new ZipEntry(filename);
-    result.setTime(0L); // Use stable timestamp Jan 1 1980
+    result.setTime(EPOCHISH.time); // Use stable timestamp Jan 1 1980
     result.setCrc(checksum.getValue());
     result.setSize(content.length);
     result.setCompressedSize(content.length);

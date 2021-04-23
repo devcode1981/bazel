@@ -25,7 +25,6 @@ import java.util.Objects;
  * Utility class for predefined filtering policies.
  */
 public final class FilteringPolicies {
-
   public static final FilteringPolicy NO_FILTER = new NoFilter();
   public static final FilteringPolicy FILTER_MANUAL = new FilterManual();
   public static final FilteringPolicy FILTER_TESTS = new FilterTests();
@@ -33,6 +32,12 @@ public final class FilteringPolicies {
 
   /** Returns the result of applying y, if target passes x. */
   public static FilteringPolicy and(final FilteringPolicy x, final FilteringPolicy y) {
+    if (x.equals(NO_FILTER)) {
+      return y;
+    }
+    if (y.equals(NO_FILTER)) {
+      return x;
+    }
     return new AndFilteringPolicy(x, y);
   }
 
@@ -69,6 +74,11 @@ public final class FilteringPolicies {
     public boolean shouldRetain(Target target, boolean explicit) {
       return true;
     }
+
+    @Override
+    public String toString() {
+      return "[]";
+    }
   }
 
   private static class FilterManual extends AbstractFilteringPolicy {
@@ -89,7 +99,10 @@ public final class FilteringPolicies {
   private static class RulesOnly extends AbstractFilteringPolicy {
     @Override
     public boolean shouldRetain(Target target, boolean explicit) {
-      return target instanceof Rule;
+      // With the sibling repository layout in effect, TargetPatternFunction tries to recurse into
+      // the special //external package even when there are no build rules. Prevent it by excluding
+      // WORKSPACE-only rules in addition to checking if target is a Rule object.
+      return target instanceof Rule && !((Rule) target).getRuleClassObject().getWorkspaceOnly();
     }
   }
 
@@ -156,6 +169,11 @@ public final class FilteringPolicies {
       }
       AndFilteringPolicy other = (AndFilteringPolicy) obj;
       return other.firstPolicy.equals(firstPolicy) && other.secondPolicy.equals(secondPolicy);
+    }
+
+    @Override
+    public String toString() {
+      return String.format("and_filter(%s, %s)", firstPolicy, secondPolicy);
     }
   }
 }

@@ -13,18 +13,24 @@
 // limitations under the License.
 package com.google.devtools.build.lib.exec;
 
+import com.google.devtools.build.lib.actions.ActionContext;
 import com.google.devtools.build.lib.actions.ActionInput;
 import com.google.devtools.build.lib.actions.Artifact.ArtifactExpander;
 import com.google.devtools.build.lib.actions.ArtifactPathResolver;
 import com.google.devtools.build.lib.actions.ExecException;
+import com.google.devtools.build.lib.actions.FutureSpawn;
+import com.google.devtools.build.lib.actions.LostInputsExecException;
 import com.google.devtools.build.lib.actions.MetadataProvider;
 import com.google.devtools.build.lib.actions.Spawn;
 import com.google.devtools.build.lib.actions.SpawnResult;
+import com.google.devtools.build.lib.actions.cache.MetadataInjector;
 import com.google.devtools.build.lib.util.io.FileOutErr;
+import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.SortedMap;
+import javax.annotation.Nullable;
 
 /**
  * A runner for spawns. Implementations can execute spawns on the local machine as a subprocess with
@@ -97,7 +103,7 @@ public interface SpawnRunner {
    * <p>{@link SpawnRunner} implementations should post a progress status before any potentially
    * long-running operation.
    */
-  public enum ProgressStatus {
+  enum ProgressStatus {
     /** Spawn is waiting for local or remote resources to become available. */
     SCHEDULING,
 
@@ -115,7 +121,7 @@ public interface SpawnRunner {
     EXECUTING,
 
     /** Downloading outputs from a remote machine. */
-    DOWNLOADING;
+    DOWNLOADING
   }
 
   /**
@@ -140,21 +146,20 @@ public interface SpawnRunner {
      * network file system, and prefetching the files in parallel is a significant performance win.
      * This should only be called by local strategies when local execution is imminent.
      *
-     * <p>Should be called with the equivalent of:
-     * <code>
+     * <p>Should be called with the equivalent of: <code>
      * policy.prefetchInputs(
      *      Iterables.filter(policy.getInputMapping().values(), Predicates.notNull()));
      * </code>
      *
-     * <p>Note in particular that {@link #getInputMapping} may return {@code null} values, but
-     * this method does not accept {@code null} values.
+     * <p>Note in particular that {@link #getInputMapping} may return {@code null} values, but this
+     * method does not accept {@code null} values.
      *
      * <p>The reason why this method requires passing in the inputs is that getInputMapping may be
      * slow to compute, so if the implementation already called it, we don't want to compute it
      * again. I suppose we could require implementations to memoize getInputMapping (but not compute
      * it eagerly), and that may change in the future.
      */
-    void prefetchInputs() throws IOException;
+    void prefetchInputs() throws IOException, InterruptedException;
 
     /**
      * The input file metadata cache for this specific spawn, which can be used to efficiently
@@ -176,8 +181,8 @@ public interface SpawnRunner {
 
     /**
      * All implementations must call this method before writing to the provided stdout / stderr or
-     * to any of the output file locations. This method is used to coordinate - implementations
-     * must throw an {@link InterruptedException} for all but one caller.
+     * to any of the output file locations. This method is used to coordinate - implementations must
+     * throw an {@link InterruptedException} for all but one caller.
      */
     void lockOutputFiles() throws InterruptedException;
 
@@ -193,11 +198,58 @@ public interface SpawnRunner {
     /** The files to which to write stdout and stderr. */
     FileOutErr getFileOutErr();
 
-    SortedMap<PathFragment, ActionInput> getInputMapping(boolean expandTreeArtifactsInRunfiles)
+    /**
+     * Returns a sorted map from input paths to action inputs.
+     *
+     * <p>Resolves cases where a single input of the {@link Spawn} gives rise to multiple files in
+     * the input tree, for example, tree artifacts, runfiles trees and {@code Fileset} input
+     * manifests.
+     *
+     * <p>{@code baseDirectory} is prepended to every path in the input key. This is useful if the
+     * mapping is used in a context where the directory relative to which the keys are interpreted
+     * is not the same as the execroot.
+     */
+    SortedMap<PathFragment, ActionInput> getInputMapping(PathFragment baseDirectory)
         throws IOException;
 
     /** Reports a progress update to the Spawn strategy. */
     void report(ProgressStatus state, String name);
+
+    /**
+     * Returns a {@link MetadataInjector} that allows a caller to inject metadata about spawn
+     * outputs that are stored remotely.
+     */
+    MetadataInjector getMetadataInjector();
+
+    /**
+     * Returns the context registered for the given identifying type or {@code null} if none was
+     * registered.
+     */
+    @Nullable
+    <T extends ActionContext> T getContext(Class<T> identifyingType);
+
+    /** Returns whether rewinding is enabled. */
+    boolean isRewindingEnabled();
+
+    /** Throws if rewinding is enabled and lost inputs have been detected. */
+    void checkForLostInputs() throws LostInputsExecException;
+  }
+
+  /**
+   * Run the given spawn asynchronously. The default implementation is synchronous for migration.
+   *
+   * @param spawn the spawn to run
+   * @param context the spawn execution context
+   * @return the result from running the spawn
+   * @throws InterruptedException if the calling thread was interrupted, or if the runner could not
+   *     lock the output files (see {@link SpawnExecutionContext#lockOutputFiles()})
+   * @throws IOException if something went wrong reading or writing to the local file system
+   * @throws ExecException if the request is malformed
+   */
+  default FutureSpawn execAsync(Spawn spawn, SpawnExecutionContext context)
+      throws InterruptedException, IOException, ExecException {
+    // TODO(ulfjack): Remove this default implementation. [exec-async]
+    return FutureSpawn.immediate(exec(spawn, context));
   }
 
   /**
@@ -214,6 +266,25 @@ public interface SpawnRunner {
   SpawnResult exec(Spawn spawn, SpawnExecutionContext context)
       throws InterruptedException, IOException, ExecException;
 
-  /* Name of the SpawnRunner. */
+  /** Returns whether this SpawnRunner supports executing the given Spawn. */
+  boolean canExec(Spawn spawn);
+
+  /** Returns whether this SpawnRunner handles caching of actions internally. */
+  boolean handlesCaching();
+
+  /** Returns the name of the SpawnRunner. */
   String getName();
+
+  /**
+   * Removes any files or directories that this spawn runner may have put in the sandbox base.
+   *
+   * <p>It is important that this function only removes entries that may have been generated by this
+   * build, not any possible entries that a future build may generate.
+   *
+   * @param sandboxBase path to the base of the sandbox tree where the spawn runner may have created
+   *     entries
+   * @param treeDeleter scheduler for tree deletions
+   * @throws IOException if there are problems deleting the entries
+   */
+  default void cleanupSandboxBase(Path sandboxBase, TreeDeleter treeDeleter) throws IOException {}
 }

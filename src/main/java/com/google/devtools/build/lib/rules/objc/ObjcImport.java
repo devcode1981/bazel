@@ -14,59 +14,71 @@
 
 package com.google.devtools.build.lib.rules.objc;
 
+import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.analysis.RuleContext;
-import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
-import com.google.devtools.build.lib.rules.cpp.CppModuleMap;
-import com.google.devtools.build.lib.rules.objc.ObjcCommon.ResourceAttributes;
-import com.google.devtools.build.lib.syntax.Type;
+import com.google.devtools.build.lib.packages.Type;
+import com.google.devtools.build.lib.rules.cpp.CcInfo;
+import com.google.devtools.build.lib.rules.cpp.CppSemantics;
+import java.util.Map;
+import java.util.TreeMap;
 
 /**
  * Implementation for {@code objc_import}.
  */
 public class ObjcImport implements RuleConfiguredTargetFactory {
+  private final CppSemantics cppSemantics;
+
+  protected ObjcImport(CppSemantics cppSemantics) {
+    this.cppSemantics = cppSemantics;
+  }
+
   @Override
   public ConfiguredTarget create(RuleContext ruleContext)
       throws InterruptedException, RuleErrorException, ActionConflictException {
-    ObjcCommon common =
-        new ObjcCommon.Builder(ruleContext)
-            .setCompilationAttributes(
-                CompilationAttributes.Builder.fromRuleContext(ruleContext).build())
-            .setResourceAttributes(new ResourceAttributes(ruleContext))
-            .setIntermediateArtifacts(ObjcRuleClasses.intermediateArtifacts(ruleContext))
-            .setAlwayslink(ruleContext.attributes().get("alwayslink", Type.BOOLEAN))
-            .setHasModuleMap()
-            .addExtraImportLibraries(
-                ruleContext.getPrerequisiteArtifacts("archives", Mode.TARGET).list())
-            .addDepObjcProviders(
-                ruleContext.getPrerequisites(
-                    "bundles", Mode.TARGET, ObjcProvider.SKYLARK_CONSTRUCTOR))
-            .build();
-
-    NestedSetBuilder<Artifact> filesToBuild = NestedSetBuilder.stableOrder();
 
     CompilationAttributes compilationAttributes =
         CompilationAttributes.Builder.fromRuleContext(ruleContext).build();
     IntermediateArtifacts intermediateArtifacts =
         ObjcRuleClasses.intermediateArtifacts(ruleContext);
+    CompilationArtifacts compilationArtifacts = new CompilationArtifacts.Builder().build();
 
-    Iterable<Artifact> publicHeaders = compilationAttributes.hdrs();
-    CppModuleMap moduleMap = intermediateArtifacts.moduleMap();
+    ObjcCommon common =
+        new ObjcCommon.Builder(ObjcCommon.Purpose.COMPILE_AND_LINK, ruleContext)
+            .setCompilationArtifacts(compilationArtifacts)
+            .setCompilationAttributes(compilationAttributes)
+            .addDeps(ruleContext.getPrerequisiteConfiguredTargets("deps"))
+            .setIntermediateArtifacts(intermediateArtifacts)
+            .setAlwayslink(ruleContext.attributes().get("alwayslink", Type.BOOLEAN))
+            .setHasModuleMap()
+            .addExtraImportLibraries(ruleContext.getPrerequisiteArtifacts("archives").list())
+            .build();
 
-    new CompilationSupport.Builder()
-        .setRuleContext(ruleContext)
-        .build()
-        .registerGenerateModuleMapAction(moduleMap, publicHeaders)
-        .validateAttributes();
+    NestedSetBuilder<Artifact> filesToBuild = NestedSetBuilder.stableOrder();
 
-    new ResourceSupport(ruleContext).validateAttributes();
+    Map<String, NestedSet<Artifact>> outputGroupCollector = new TreeMap<>();
+    ImmutableList.Builder<Artifact> objectFilesCollector = ImmutableList.builder();
+
+    CompilationSupport compilationSupport =
+        new CompilationSupport.Builder(ruleContext, cppSemantics)
+            .setOutputGroupCollector(outputGroupCollector)
+            .setObjectFilesCollector(objectFilesCollector)
+            .build();
+
+    compilationSupport.registerCompileAndArchiveActions(common).validateAttributes();
 
     return ObjcRuleClasses.ruleConfiguredTarget(ruleContext, filesToBuild.build())
         .addNativeDeclaredProvider(common.getObjcProvider())
+        .addNativeDeclaredProvider(
+            CcInfo.builder()
+                .setCcCompilationContext(compilationSupport.getCcCompilationContext())
+                .build())
+        .addStarlarkTransitiveInfo(ObjcProvider.STARLARK_NAME, common.getObjcProvider())
         .build();
   }
 }

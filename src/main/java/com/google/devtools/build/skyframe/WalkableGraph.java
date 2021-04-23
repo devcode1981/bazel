@@ -13,8 +13,9 @@
 // limitations under the License.
 package com.google.devtools.build.skyframe;
 
+import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
-import java.util.Collection;
+import com.google.devtools.build.lib.util.Pair;
 import java.util.Map;
 import java.util.Set;
 import javax.annotation.Nullable;
@@ -81,17 +82,32 @@ public interface WalkableGraph {
   Map<SkyKey, Iterable<SkyKey>> getDirectDeps(Iterable<SkyKey> keys) throws InterruptedException;
 
   /**
+   * Returns the direct dependencies of the node with the given key. A node for that key must exist
+   * in the graph and be done.
+   */
+  Iterable<SkyKey> getDirectDeps(SkyKey key) throws InterruptedException;
+
+  /**
    * Returns a map giving the reverse dependencies of the nodes with the given keys. A node for each
    * given key must be done in the graph if it exists.
    */
-  Map<SkyKey, Iterable<SkyKey>> getReverseDeps(Iterable<SkyKey> keys) throws InterruptedException;
+  Map<SkyKey, Iterable<SkyKey>> getReverseDeps(Iterable<? extends SkyKey> keys)
+      throws InterruptedException;
+
+  /**
+   * Returns a map giving the reverse dependencies of the nodes with the given keys as well as the
+   * value
+   */
+  Map<SkyKey, Pair<SkyValue, Iterable<SkyKey>>> getValueAndRdeps(Iterable<SkyKey> keys)
+      throws InterruptedException;
+
+  default ImmutableSet<SkyKey> getAllKeysForTesting() {
+    throw new UnsupportedOperationException();
+  }
 
   /** Provides a WalkableGraph on demand after preparing it. */
   interface WalkableGraphFactory {
     EvaluationResult<SkyValue> prepareAndGet(Set<SkyKey> roots, EvaluationContext evaluationContext)
         throws InterruptedException;
-
-    /** Returns the {@link SkyKey} that defines this universe. */
-    SkyKey getUniverseKey(Collection<String> roots, String offset);
   }
 }

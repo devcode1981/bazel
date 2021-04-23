@@ -14,8 +14,9 @@
 
 package com.google.devtools.build.lib.rules.java;
 
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.auto.value.AutoValue;
-import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
@@ -48,13 +49,8 @@ public abstract class JavaCompilationArtifacts {
 
   abstract ImmutableList<Artifact> getFullCompileTimeJars();
 
-  public abstract ImmutableList<Artifact> getInstrumentationMetadata();
-
   @Nullable
   public abstract Artifact getCompileTimeDependencyArtifact();
-
-  @Nullable
-  public abstract Artifact getInstrumentedJar();
 
   /** Returns a builder for a {@link JavaCompilationArtifacts}. */
   public static Builder builder() {
@@ -67,16 +63,12 @@ public abstract class JavaCompilationArtifacts {
       ImmutableList<Artifact> runtimeJars,
       ImmutableList<Artifact> compileTimeJars,
       ImmutableList<Artifact> fullCompileTimeJars,
-      ImmutableList<Artifact> instrumentationMetadata,
-      Artifact compileTimeDependencyArtifact,
-      Artifact instrumentedJar) {
+      Artifact compileTimeDependencyArtifact) {
     return new AutoValue_JavaCompilationArtifacts(
         ImmutableList.copyOf(runtimeJars),
         ImmutableList.copyOf(compileTimeJars),
         ImmutableList.copyOf(fullCompileTimeJars),
-        ImmutableList.copyOf(instrumentationMetadata),
-        compileTimeDependencyArtifact,
-        instrumentedJar);
+        compileTimeDependencyArtifact);
   }
 
   /** A builder for {@link JavaCompilationArtifacts}. */
@@ -84,19 +76,23 @@ public abstract class JavaCompilationArtifacts {
     private final Set<Artifact> runtimeJars = new LinkedHashSet<>();
     private final Set<Artifact> compileTimeJars = new LinkedHashSet<>();
     private final Set<Artifact> fullCompileTimeJars = new LinkedHashSet<>();
-    private final Set<Artifact> instrumentationMetadata = new LinkedHashSet<>();
     private Artifact compileTimeDependencies;
-    private Artifact instrumentedJar;
 
     public JavaCompilationArtifacts build() {
-      Preconditions.checkState(fullCompileTimeJars.size() == compileTimeJars.size());
+      validate();
       return create(
           ImmutableList.copyOf(runtimeJars),
           ImmutableList.copyOf(compileTimeJars),
           ImmutableList.copyOf(fullCompileTimeJars),
-          ImmutableList.copyOf(instrumentationMetadata),
-          compileTimeDependencies,
-          instrumentedJar);
+          compileTimeDependencies);
+    }
+
+    private void validate() {
+      checkState(
+          fullCompileTimeJars.size() == compileTimeJars.size(),
+          "Expected the same number of interface and implementation jars:\n%s\n%s\n",
+          compileTimeJars,
+          fullCompileTimeJars);
     }
 
     public Builder addRuntimeJar(Artifact jar) {
@@ -121,28 +117,16 @@ public abstract class JavaCompilationArtifacts {
       return this;
     }
 
-    public Builder addInterfaceJars(Iterable<Artifact> jars) {
-      Iterables.addAll(this.compileTimeJars, jars);
-      return this;
-    }
-
-    Builder addFullCompileTimeJars(Iterable<Artifact> jars) {
-      Iterables.addAll(this.fullCompileTimeJars, jars);
-      return this;
-    }
-
-    public Builder addInstrumentationMetadata(Artifact instrumentationMetadata) {
-      this.instrumentationMetadata.add(instrumentationMetadata);
+    Builder addInterfaceJarsWithFullJars(
+        Iterable<Artifact> compileTimeJars, Iterable<Artifact> fullCompileTimeJars) {
+      Iterables.addAll(this.compileTimeJars, compileTimeJars);
+      Iterables.addAll(this.fullCompileTimeJars, fullCompileTimeJars);
+      validate();
       return this;
     }
 
     public Builder setCompileTimeDependencies(@Nullable Artifact compileTimeDependencies) {
       this.compileTimeDependencies = compileTimeDependencies;
-      return this;
-    }
-
-    public Builder setInstrumentedJar(@Nullable Artifact instrumentedJar) {
-      this.instrumentedJar = instrumentedJar;
       return this;
     }
   }

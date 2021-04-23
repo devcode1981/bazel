@@ -31,9 +31,8 @@ class WindowsRemoteTest(test_base.TestBase):
             '--strategy=Closure=remote',
             '--genrule_strategy=remote',
             '--define=EXECUTOR=remote',
-            '--remote_executor=localhost:' + str(self._worker_port),
-            '--remote_cache=localhost:' + str(self._worker_port),
-            '--experimental_strict_action_env=true',
+            '--remote_executor=grpc://localhost:' + str(self._worker_port),
+            '--remote_cache=grpc://localhost:' + str(self._worker_port),
             '--remote_timeout=3600',
             '--auth_enabled=false',
             '--remote_accept_cached=false',
@@ -53,7 +52,7 @@ class WindowsRemoteTest(test_base.TestBase):
   # this means the runfiles manifest, which is not present remotely, must exist
   # locally.
   def testBinaryRunsLocally(self):
-    self.ScratchFile('WORKSPACE')
+    self.CreateWorkspaceWithDefaultRepos('WORKSPACE')
     self.ScratchFile('foo/BUILD', [
         'sh_binary(',
         '  name = "foo",',
@@ -85,7 +84,7 @@ class WindowsRemoteTest(test_base.TestBase):
     self.assertEqual(stdout, ['hello shell'])
 
   def testShTestRunsLocally(self):
-    self.ScratchFile('WORKSPACE')
+    self.CreateWorkspaceWithDefaultRepos('WORKSPACE')
     self.ScratchFile('foo/BUILD', [
         'sh_test(',
         '  name = "foo_test",',
@@ -115,7 +114,7 @@ class WindowsRemoteTest(test_base.TestBase):
 
   # Remotely, the runfiles manifest does not exist.
   def testShTestRunsRemotely(self):
-    self.ScratchFile('WORKSPACE')
+    self.CreateWorkspaceWithDefaultRepos('WORKSPACE')
     self.ScratchFile('foo/BUILD', [
         'sh_test(',
         '  name = "foo_test",',
@@ -142,7 +141,7 @@ class WindowsRemoteTest(test_base.TestBase):
   # The Java launcher uses Rlocation which has differing behavior for local and
   # remote.
   def testJavaTestRunsRemotely(self):
-    self.ScratchFile('WORKSPACE')
+    self.CreateWorkspaceWithDefaultRepos('WORKSPACE')
     self.ScratchFile('foo/BUILD', [
         'java_test(',
         '  name = "foo_test",',
@@ -174,8 +173,7 @@ class WindowsRemoteTest(test_base.TestBase):
   # it elsewhere, add --test_env=JAVA_HOME to your Bazel invocation to fix this
   # test.
   def testJavaTestWithRuntimeRunsRemotely(self):
-    java_home = os.getenv('JAVA_HOME', 'c:/openjdk')
-    self.ScratchFile('WORKSPACE')
+    self.CreateWorkspaceWithDefaultRepos('WORKSPACE')
     self.ScratchFile('foo/BUILD', [
         'package(default_visibility = ["//visibility:public"])',
         'java_test(',
@@ -184,11 +182,6 @@ class WindowsRemoteTest(test_base.TestBase):
         '  main_class = "TestFoo",',
         '  use_testrunner = 0,',
         '  data = ["//bar:bar.txt"],',
-        ')',
-        'java_runtime(',
-        '    name = "jdk8",',
-        '    srcs = [],',
-        '    java_home = "' + java_home + '",',
         ')',
     ])
     self.ScratchFile(
@@ -204,16 +197,15 @@ class WindowsRemoteTest(test_base.TestBase):
     self.ScratchFile('bar/bar.txt', ['hello'])
 
     # Test.
-    exit_code, stdout, stderr = self._RunRemoteBazel([
-        'test', '--test_output=all', '--javabase=//foo:jdk8', '//foo:foo_test'
-    ])
+    exit_code, stdout, stderr = self._RunRemoteBazel(
+        ['test', '--test_output=all', '//foo:foo_test'])
     self.AssertExitCode(exit_code, 0, stderr, stdout)
 
   # Genrules are notably different than tests because RUNFILES_DIR is not set
   # for genrule tool launchers, so the runfiles directory is discovered based on
   # the executable path.
   def testGenruleWithToolRunsRemotely(self):
-    self.ScratchFile('WORKSPACE')
+    self.CreateWorkspaceWithDefaultRepos('WORKSPACE')
     # TODO(jsharpe): Replace sh_binary with py_binary once
     # https://github.com/bazelbuild/bazel/issues/5087 resolved.
     self.ScratchFile('foo/BUILD', [

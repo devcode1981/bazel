@@ -1,4 +1,4 @@
-// Copyright 2018 The Bazel Authors. All rights reserved.
+// Copyright 2019 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -245,6 +245,21 @@ public class PathUtils {
   }
 
   /**
+   * Writes the file in the <code>directory/subPath</code> location using ISO_8859_1. Overrides the
+   * file if it exists, creates the file if it does not exist.
+   *
+   * @param directory root directory, under which the subtree with the file is created
+   * @param subPath path under <code>directory</code>, under which the file is created
+   * @param lines lines to be written
+   * @return Path to created file
+   * @throws IOException in case file can not be written
+   */
+  public static Path writeFileInDir(Path directory, String subPath, List<String> lines)
+      throws IOException {
+    return writeFile(resolve(directory, subPath), lines);
+  }
+
+  /**
    * Writes the file in the <code>path</code> location using ISO_8859_1. Overrides the file if it
    * exists, creates the file if it does not exist.
    *
@@ -255,6 +270,19 @@ public class PathUtils {
   public static Path writeFile(Path path, String... lines) throws IOException {
     Files.createDirectories(path.getParent());
     return Files.write(path, Lists.newArrayList(lines), StandardCharsets.ISO_8859_1);
+  }
+
+  /**
+   * Writes the file in the <code>path</code> location using ISO_8859_1. Overrides the file if it
+   * exists, creates the file if it does not exist.
+   *
+   * @param path location where to write the file
+   * @param lines lines to be written
+   * @throws IOException in case file can not be written
+   */
+  public static Path writeFile(Path path, List<String> lines) throws IOException {
+    Files.createDirectories(path.getParent());
+    return Files.write(path, lines, StandardCharsets.ISO_8859_1);
   }
 
   /**
@@ -332,5 +360,33 @@ public class PathUtils {
             return FileVisitResult.CONTINUE;
           }
         });
+  }
+
+  /**
+   * Returns the string to be used to refer to passed path in the Starlark file or directory. For
+   * Windows, we need to use forward slashes, so on ecan not use the standard Path#toString().
+   *
+   * @param path the path to file
+   * @return the string to use in Starlark file to point to passed path
+   */
+  public static String pathForStarlarkFile(Path path) {
+    if (OS.WINDOWS.equals(OS.getCurrent())) {
+      return path.toString().replace("\\", "/");
+    }
+    return path.toString();
+  }
+
+  /**
+   * Returns the file:///... URI to the passed path. Ensures the 'file:' is followed by three
+   * forward slahes on all platforms.
+   *
+   * @param path path to refer to
+   * @return file:///... URI to the passed path
+   */
+  public static String pathToFileURI(Path path) {
+    if (OS.WINDOWS.equals(OS.getCurrent())) {
+      return "file:///" + path.toString().replace("\\", "/");
+    }
+    return "file://" + path.toString();
   }
 }

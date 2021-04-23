@@ -1,61 +1,11 @@
-<a name="#<unknown name>"></a>
-## <unknown name>
+<!-- Generated with Stardoc: http://skydoc.bazel.build -->
 
-<pre>
-<unknown name>(name, first, fourth, second, third)
-</pre>
-
-
-
-### Attributes
-
-<table class="params-table">
-  <colgroup>
-    <col class="col-param" />
-    <col class="col-description" />
-  </colgroup>
-  <tbody>
-    <tr id="#<unknown name>_name">
-      <td><code>name</code></td>
-      <td>
-        String; required
-        <p>
-          A unique name for this target.
-        </p>
-      </td>
-    </tr>
-    <tr id="#<unknown name>_first">
-      <td><code>first</code></td>
-      <td>
-        Label; required
-      </td>
-    </tr>
-    <tr id="#<unknown name>_fourth">
-      <td><code>fourth</code></td>
-      <td>
-        Boolean; optional
-      </td>
-    </tr>
-    <tr id="#<unknown name>_second">
-      <td><code>second</code></td>
-      <td>
-        Dictionary: String -> String; required
-      </td>
-    </tr>
-    <tr id="#<unknown name>_third">
-      <td><code>third</code></td>
-      <td>
-        Label; required
-      </td>
-    </tr>
-  </tbody>
-</table>
-
+<a name="#my_rule_impl"></a>
 
 ## my_rule_impl
 
 <pre>
-my_rule_impl(ctx)
+my_rule_impl(<a href="#my_rule_impl-ctx">ctx</a>)
 </pre>
 
 
@@ -68,7 +18,7 @@ my_rule_impl(ctx)
     <col class="col-description" />
   </colgroup>
   <tbody>
-    <tr>
+    <tr id="my_rule_impl-ctx">
       <td><code>ctx</code></td>
       <td>
         required.

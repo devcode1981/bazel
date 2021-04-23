@@ -14,25 +14,30 @@
 
 package com.google.devtools.build.lib.rules.android;
 
+import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.packages.BuiltinProvider;
 import com.google.devtools.build.lib.packages.NativeInfo;
 import com.google.devtools.build.lib.rules.cpp.CcInfo;
-import com.google.devtools.build.lib.skylarkbuildapi.android.AndroidCcLinkParamsProviderApi;
-import com.google.devtools.build.lib.syntax.EvalException;
+import com.google.devtools.build.lib.starlarkbuildapi.android.AndroidCcLinkParamsProviderApi;
+import net.starlark.java.eval.EvalException;
 
 /** A target that provides C++ libraries to be linked into Android targets. */
 @Immutable
 public final class AndroidCcLinkParamsProvider extends NativeInfo
-    implements AndroidCcLinkParamsProviderApi<CcInfo> {
-  public static final String PROVIDER_NAME = "AndroidCcLinkParamsInfo";
+    implements AndroidCcLinkParamsProviderApi<Artifact, CcInfo> {
+
   public static final Provider PROVIDER = new Provider();
 
   private final CcInfo ccInfo;
 
   public AndroidCcLinkParamsProvider(CcInfo ccInfo) {
-    super(PROVIDER);
-    this.ccInfo = CcInfo.builder().setCcLinkingInfo(ccInfo.getCcLinkingInfo()).build();
+    this.ccInfo = CcInfo.builder().setCcLinkingContext(ccInfo.getCcLinkingContext()).build();
+  }
+
+  @Override
+  public Provider getProvider() {
+    return PROVIDER;
   }
 
   @Override
@@ -42,13 +47,14 @@ public final class AndroidCcLinkParamsProvider extends NativeInfo
 
   /** Provider class for {@link AndroidCcLinkParamsProvider} objects. */
   public static class Provider extends BuiltinProvider<AndroidCcLinkParamsProvider>
-      implements AndroidCcLinkParamsProviderApi.Provider<CcInfo> {
+      implements AndroidCcLinkParamsProviderApi.Provider<Artifact, CcInfo> {
     private Provider() {
-      super(PROVIDER_NAME, AndroidCcLinkParamsProvider.class);
+      super(NAME, AndroidCcLinkParamsProvider.class);
     }
 
     @Override
-    public AndroidCcLinkParamsProviderApi<CcInfo> createInfo(CcInfo ccInfo) throws EvalException {
+    public AndroidCcLinkParamsProviderApi<Artifact, CcInfo> createInfo(CcInfo ccInfo)
+        throws EvalException {
       return new AndroidCcLinkParamsProvider(ccInfo);
     }
   }

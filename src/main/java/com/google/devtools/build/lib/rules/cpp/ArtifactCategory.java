@@ -13,11 +13,7 @@
 // limitations under the License
 package com.google.devtools.build.lib.rules.cpp;
 
-import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.lib.events.Location;
-import com.google.devtools.build.lib.syntax.EvalException;
-import java.util.Arrays;
 
 /**
  * A category of artifacts that are candidate input/output to an action, for which the toolchain can
@@ -44,13 +40,9 @@ public enum ArtifactCategory {
   // the options passed to the clif_matcher.
   CLIF_OUTPUT_PROTO("", ".opb");
 
-  private static final ArtifactCategory[] ALLOWED_FROM_SKYLARK = {
-    STATIC_LIBRARY, ALWAYSLINK_STATIC_LIBRARY, DYNAMIC_LIBRARY, INTERFACE_LIBRARY
-  };
-
   private final String defaultPrefix;
   private final String defaultExtension;
-  private final String skylarkName;
+  private final String starlarkName;
   // The extensions allowed for this artifact name pattern, Bazel should recognized them as
   // corresponding file type in CppFileTypes.java
   final ImmutableList<String> allowedExtensions;
@@ -67,30 +59,11 @@ public enum ArtifactCategory {
             .add(extraAllowedExtensions)
             .build();
 
-    this.skylarkName = toString().toLowerCase();
+    this.starlarkName = toString().toLowerCase();
   }
 
-  public String getSkylarkName() {
-    return skylarkName;
-  }
-
-  public static ArtifactCategory fromString(
-      String skylarkName, Location location, String fieldForError) throws EvalException {
-    for (ArtifactCategory registerActions : ALLOWED_FROM_SKYLARK) {
-      if (registerActions.getSkylarkName().equals(skylarkName)) {
-        return registerActions;
-      }
-    }
-    throw new EvalException(
-        location,
-        String.format(
-            "Possible values for %s: %s",
-            fieldForError,
-            Joiner.on(", ")
-                .join(
-                    Arrays.stream(ALLOWED_FROM_SKYLARK)
-                        .map(ArtifactCategory::getSkylarkName)
-                        .collect(ImmutableList.toImmutableList()))));
+  public String getStarlarkName() {
+    return starlarkName;
   }
 
   /** Returns the name of the category. */

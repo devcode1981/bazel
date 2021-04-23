@@ -14,12 +14,12 @@
 package com.google.devtools.build.lib.pkgcache;
 
 import static com.google.common.truth.Truth.assertThat;
-import static com.google.devtools.build.lib.testutil.MoreAsserts.assertThrows;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.packages.NoSuchPackageException;
+import com.google.devtools.build.lib.server.FailureDetails.PackageLoading;
 import com.google.devtools.build.lib.skyframe.BazelSkyframeExecutorConstants;
 import com.google.devtools.build.lib.testutil.FoundationTestCase;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
@@ -30,7 +30,6 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.regex.Pattern;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -185,14 +184,13 @@ public class PathPackageLocatorTest extends FoundationTestCase {
 
   private static void checkFails(
       PathPackageLocator locator, String packageName, String expectedError) {
-    try {
-      locator.getPackageBuildFile(PackageIdentifier.createInMainRepo(packageName));
-      fail();
-    } catch (NoSuchPackageException e) {
-      String message = e.getMessage();
-      assertThat(message)
-          .containsMatch(Pattern.compile(Pattern.quote(expectedError), Pattern.CASE_INSENSITIVE));
-    }
+    NoSuchPackageException e =
+        assertThrows(
+            NoSuchPackageException.class,
+            () -> locator.getPackageBuildFile(PackageIdentifier.createInMainRepo(packageName)));
+    assertThat(e).hasMessageThat().ignoringCase().contains(expectedError);
+    assertThat(e.getDetailedExitCode().getFailureDetail().getPackageLoading().getCode())
+        .isEqualTo(PackageLoading.Code.BUILD_FILE_MISSING);
   }
 
   @Test
@@ -256,10 +254,10 @@ public class PathPackageLocatorTest extends FoundationTestCase {
     Path nonExistentRoot = scratch.resolve(root);
     this.locator =
         PathPackageLocator.create(
-            null,
+            /*outputBase=*/ null,
             Arrays.asList(root),
             reporter,
-            /*workspace=*/ FileSystemUtils.getWorkingDirectory(scratch.getFileSystem()),
+            /*workspace=*/ FileSystemUtils.getWorkingDirectory(),
             /* clientWorkingDirectory= */ FileSystemUtils.getWorkingDirectory(
                 scratch.getFileSystem()),
             BazelSkyframeExecutorConstants.BUILD_FILES_BY_PRIORITY);
@@ -301,10 +299,10 @@ public class PathPackageLocatorTest extends FoundationTestCase {
         clientPath.getRelative("below").getPathString());
     assertThat(
             PathPackageLocator.create(
-                    null,
+                    /*outputBase=*/ null,
                     pathElements,
                     reporter,
-                    workspace,
+                    workspace.asFragment(),
                     clientPath,
                     BazelSkyframeExecutorConstants.BUILD_FILES_BY_PRIORITY)
                 .getPathEntries())
@@ -322,22 +320,22 @@ public class PathPackageLocatorTest extends FoundationTestCase {
 
     // No warning if workspace == cwd.
     PathPackageLocator.create(
-        null,
+        /*outputBase=*/ null,
         ImmutableList.of("./foo"),
         reporter,
-        workspace,
+        workspace.asFragment(),
         workspace,
         BazelSkyframeExecutorConstants.BUILD_FILES_BY_PRIORITY);
-    assertThat(eventCollector.count()).isSameAs(0);
+    assertThat(eventCollector.count()).isSameInstanceAs(0);
 
     PathPackageLocator.create(
-        null,
+        /*outputBase=*/ null,
         ImmutableList.of("./foo"),
         reporter,
-        workspace,
+        workspace.asFragment(),
         workspace.getRelative("foo"),
         BazelSkyframeExecutorConstants.BUILD_FILES_BY_PRIORITY);
-    assertThat(eventCollector.count()).isSameAs(1);
+    assertThat(eventCollector.count()).isSameInstanceAs(1);
     assertContainsEvent("The package path element 'foo' will be taken relative");
   }
 
@@ -347,10 +345,10 @@ public class PathPackageLocatorTest extends FoundationTestCase {
     Path workspace = scratch.dir("/some/path/to/workspace$1");
 
     PathPackageLocator.create(
-        null,
+        /*outputBase=*/ null,
         ImmutableList.of("%workspace%/blabla"),
         reporter,
-        workspace,
+        workspace.asFragment(),
         workspace.getRelative("foo"),
         BazelSkyframeExecutorConstants.BUILD_FILES_BY_PRIORITY);
   }

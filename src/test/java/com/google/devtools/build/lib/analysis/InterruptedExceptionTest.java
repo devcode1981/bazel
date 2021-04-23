@@ -13,13 +13,13 @@
 // limitations under the License.
 package com.google.devtools.build.lib.analysis;
 
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
 import com.google.devtools.build.lib.analysis.util.AnalysisTestCase;
-import com.google.devtools.build.lib.clock.BlazeClock;
+import com.google.devtools.build.lib.vfs.DigestHashFunction;
 import com.google.devtools.build.lib.vfs.Dirent;
 import com.google.devtools.build.lib.vfs.FileSystem;
-import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
 import java.io.IOException;
 import java.util.Collection;
@@ -38,9 +38,10 @@ public class InterruptedExceptionTest extends AnalysisTestCase {
 
   @Override
   protected FileSystem createFileSystem() {
-    return new InMemoryFileSystem(BlazeClock.instance()) {
+    return new InMemoryFileSystem(DigestHashFunction.SHA256) {
       @Override
-      protected Collection<Dirent> readdir(Path path, boolean followSymlinks) throws IOException {
+      protected Collection<Dirent> readdir(PathFragment path, boolean followSymlinks)
+          throws IOException {
         if (path.toString().contains("causes_interrupt")) {
           mainThread.interrupt();
         }
@@ -56,15 +57,11 @@ public class InterruptedExceptionTest extends AnalysisTestCase {
     scratch.file("a/causes_interrupt/bar.sh", "testfile");
     reporter.removeHandler(failFastHandler);
 
-    try {
-      update("//a:a");
-      fail("Expected interrupted exception");
-    } catch (InterruptedException expected) {
-    }
+    assertThrows(InterruptedException.class, () -> update("//a:a"));
   }
 
   @Test
-  public void testSkylarkGlobInterruptedException() throws Exception {
+  public void testStarlarkGlobInterruptedException() throws Exception {
     scratch.file("a/gen.bzl",
         "def gen():",
         "  native.filegroup(name = 'a', srcs = native.glob(['**/*']))");
@@ -76,10 +73,6 @@ public class InterruptedExceptionTest extends AnalysisTestCase {
     scratch.file("a/causes_interrupt/bar.sh", "testfile");
     reporter.removeHandler(failFastHandler);
 
-    try {
-      update("//a:a");
-      fail("Expected interrupted exception");
-    } catch (InterruptedException expected) {
-    }
+    assertThrows(InterruptedException.class, () -> update("//a:a"));
   }
 }

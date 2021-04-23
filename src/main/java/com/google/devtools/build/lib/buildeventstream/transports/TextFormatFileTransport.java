@@ -14,15 +14,15 @@
 
 package com.google.devtools.build.lib.buildeventstream.transports;
 
-import com.google.common.base.Charsets;
+import static java.nio.charset.StandardCharsets.UTF_8;
+
+import com.google.devtools.build.lib.buildeventstream.ArtifactGroupNamer;
 import com.google.devtools.build.lib.buildeventstream.BuildEventArtifactUploader;
 import com.google.devtools.build.lib.buildeventstream.BuildEventProtocolOptions;
 import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos;
 import com.google.devtools.build.lib.buildeventstream.BuildEventTransport;
-import com.google.devtools.build.lib.util.AbruptExitException;
 import com.google.protobuf.TextFormat;
-import java.io.IOException;
-import java.util.function.Consumer;
+import java.io.BufferedOutputStream;
 
 /**
  * A simple {@link BuildEventTransport} that writes the text representation of the protocol-buffer
@@ -32,12 +32,11 @@ import java.util.function.Consumer;
  */
 public final class TextFormatFileTransport extends FileTransport {
   public TextFormatFileTransport(
-      String path,
+      BufferedOutputStream outputStream,
       BuildEventProtocolOptions options,
       BuildEventArtifactUploader uploader,
-      Consumer<AbruptExitException> exitFunc)
-      throws IOException {
-    super(path, options, uploader, exitFunc);
+      ArtifactGroupNamer namer) {
+    super(outputStream, options, uploader, namer);
   }
 
   @Override
@@ -48,6 +47,6 @@ public final class TextFormatFileTransport extends FileTransport {
   @Override
   protected byte[] serializeEvent(BuildEventStreamProtos.BuildEvent buildEvent) {
     String protoTextRepresentation = TextFormat.printToString(buildEvent);
-    return ("event {\n" + protoTextRepresentation + "}\n\n").getBytes(Charsets.UTF_8);
+    return ("event {\n" + protoTextRepresentation + "}\n\n").getBytes(UTF_8);
   }
 }

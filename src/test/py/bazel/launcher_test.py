@@ -15,8 +15,13 @@
 
 import os
 import stat
+import string
 import unittest
 from src.test.py.bazel import test_base
+
+# pylint: disable=g-import-not-at-top
+if os.name == 'nt':
+  import win32api
 
 
 class LauncherTest(test_base.TestBase):
@@ -167,11 +172,11 @@ class LauncherTest(test_base.TestBase):
     self.AssertExitCode(exit_code, 0, stderr)
     self.assertEqual(stdout[0], 'Hello World!')
 
-    # Try to use the py_binary as an executable in a Skylark rule.
+    # Try to use the py_binary as an executable in a Starlark rule.
     exit_code, stdout, stderr = self.RunBazel(['build', '//foo:hello'])
     self.AssertExitCode(exit_code, 0, stderr)
 
-    # Verify that the Skylark action generated the right output.
+    # Verify that the Starlark action generated the right output.
     hello_path = os.path.join(bazel_bin, 'foo', 'hello.txt')
     self.assertTrue(os.path.isfile(hello_path))
     with open(hello_path, 'r') as f:
@@ -204,7 +209,7 @@ class LauncherTest(test_base.TestBase):
     self.assertEqual(stdout, arguments)
 
   def testJavaBinaryLauncher(self):
-    self.ScratchFile('WORKSPACE')
+    self.CreateWorkspaceWithDefaultRepos('WORKSPACE')
     self.ScratchFile('foo/BUILD', [
         'java_binary(',
         '  name = "foo",',
@@ -235,7 +240,7 @@ class LauncherTest(test_base.TestBase):
     self._buildJavaTargets(bazel_bin, '.exe' if self.IsWindows() else '')
 
   def testJavaBinaryArgumentPassing(self):
-    self.ScratchFile('WORKSPACE')
+    self.CreateWorkspaceWithDefaultRepos('WORKSPACE')
     self.ScratchFile('foo/BUILD', [
         'java_binary(',
         '  name = "bin",',
@@ -256,7 +261,7 @@ class LauncherTest(test_base.TestBase):
     self._buildAndCheckArgumentPassing('foo', 'bin')
 
   def testShBinaryLauncher(self):
-    self.ScratchFile('WORKSPACE')
+    self.CreateWorkspaceWithDefaultRepos('WORKSPACE')
     self.ScratchFile(
         'foo/BUILD',
         [
@@ -300,7 +305,7 @@ class LauncherTest(test_base.TestBase):
     self._buildShBinaryTargets(bazel_bin, '.exe' if self.IsWindows() else '')
 
   def testShBinaryArgumentPassing(self):
-    self.ScratchFile('WORKSPACE')
+    self.CreateWorkspaceWithDefaultRepos('WORKSPACE')
     self.ScratchFile('foo/BUILD', [
         'sh_binary(',
         '  name = "bin",',
@@ -323,7 +328,7 @@ class LauncherTest(test_base.TestBase):
     self._buildAndCheckArgumentPassing('foo', 'bin')
 
   def testPyBinaryLauncher(self):
-    self.ScratchFile('WORKSPACE')
+    self.CreateWorkspaceWithDefaultRepos('WORKSPACE')
     self.ScratchFile('foo/foo.bzl', [
         'def _impl(ctx):',
         '  ctx.actions.run(',
@@ -378,7 +383,7 @@ class LauncherTest(test_base.TestBase):
     self._buildPyTargets(bazel_bin, '.exe' if self.IsWindows() else '')
 
   def testPyBinaryArgumentPassing(self):
-    self.ScratchFile('WORKSPACE')
+    self.CreateWorkspaceWithDefaultRepos('WORKSPACE')
     self.ScratchFile('foo/BUILD', [
         'py_binary(',
         '  name = "bin",',
@@ -397,7 +402,7 @@ class LauncherTest(test_base.TestBase):
     # Skip this test on non-Windows platforms
     if not self.IsWindows():
       return
-    self.ScratchFile('WORKSPACE')
+    self.CreateWorkspaceWithDefaultRepos('WORKSPACE')
     self.ScratchFile('foo/BUILD', [
         'java_binary(',
         '  name = "foo",',
@@ -517,7 +522,7 @@ class LauncherTest(test_base.TestBase):
   def testWindowsNativeLauncherInNonEnglishPath(self):
     if not self.IsWindows():
       return
-    self.ScratchFile('WORKSPACE')
+    self.CreateWorkspaceWithDefaultRepos('WORKSPACE')
     self.ScratchFile('bin/BUILD', [
         'java_binary(',
         '  name = "bin_java",',
@@ -548,8 +553,11 @@ class LauncherTest(test_base.TestBase):
     self.AssertExitCode(exit_code, 0, stderr)
 
     for f in [
-        'bin_java.exe', 'bin_java.exe.runfiles_manifest', 'bin_sh.exe',
-        'bin_sh', 'bin_sh.exe.runfiles_manifest'
+        'bin_java.exe',
+        'bin_java.exe.runfiles_manifest',
+        'bin_sh.exe',
+        'bin_sh',
+        'bin_sh.exe.runfiles_manifest',
     ]:
       self.CopyFile(os.path.join(bazel_bin, 'bin', f),
                     os.path.join(u'./\u6d4b\u8bd5', f))
@@ -561,6 +569,96 @@ class LauncherTest(test_base.TestBase):
 
     unicode_binary_path = u'./\u6d4b\u8bd5/bin_sh.exe'
     exit_code, stdout, stderr = self.RunProgram([unicode_binary_path])
+    self.AssertExitCode(exit_code, 0, stderr)
+    self.assertEqual('helloworld', ''.join(stdout))
+
+  def testWindowsNativeLauncherInLongPath(self):
+    if not self.IsWindows():
+      return
+    self.CreateWorkspaceWithDefaultRepos('WORKSPACE')
+    self.ScratchFile('bin/BUILD', [
+        'java_binary(',
+        '  name = "bin_java",',
+        '  srcs = ["Main.java"],',
+        '  main_class = "Main",',
+        ')',
+        'sh_binary(',
+        '  name = "bin_sh",',
+        '  srcs = ["main.sh"],',
+        ')',
+        'py_binary(',
+        '  name = "bin_py",',
+        '  srcs = ["bin_py.py"],',
+        ')',
+    ])
+    self.ScratchFile('bin/Main.java', [
+        'public class Main {',
+        '  public static void main(String[] args) {'
+        '    System.out.println("helloworld");',
+        '  }',
+        '}',
+    ])
+    self.ScratchFile('bin/main.sh', [
+        'echo "helloworld"',
+    ])
+    self.ScratchFile('bin/bin_py.py', [
+        'print("helloworld")',
+    ])
+
+    exit_code, stdout, stderr = self.RunBazel(['info', 'bazel-bin'])
+    self.AssertExitCode(exit_code, 0, stderr)
+    bazel_bin = stdout[0]
+
+    exit_code, _, stderr = self.RunBazel(['build', '//bin/...'])
+    self.AssertExitCode(exit_code, 0, stderr)
+
+    # Create a directory with a path longer than 260
+    long_dir_path = './' + '/'.join(
+        [(c * 8 + '.' + c * 3) for c in string.ascii_lowercase])
+
+    for f in [
+        'bin_java.exe',
+        'bin_java.exe.runfiles_manifest',
+        'bin_sh.exe',
+        'bin_sh',
+        'bin_sh.exe.runfiles_manifest',
+        'bin_py.exe',
+        'bin_py.zip',
+        'bin_py.exe.runfiles_manifest',
+    ]:
+      self.CopyFile(
+          os.path.join(bazel_bin, 'bin', f), os.path.join(long_dir_path, f))
+
+    long_binary_path = os.path.abspath(long_dir_path + '/bin_java.exe')
+    # subprocess doesn't support long path without shell=True
+    exit_code, stdout, stderr = self.RunProgram([long_binary_path], shell=True)
+    self.AssertExitCode(exit_code, 0, stderr)
+    self.assertEqual('helloworld', ''.join(stdout))
+    # Make sure we can launch the binary with a shortened Windows 8dot3 path
+    short_binary_path = win32api.GetShortPathName(long_binary_path)
+    exit_code, stdout, stderr = self.RunProgram([short_binary_path], shell=True)
+    self.AssertExitCode(exit_code, 0, stderr)
+    self.assertEqual('helloworld', ''.join(stdout))
+
+    long_binary_path = os.path.abspath(long_dir_path + '/bin_sh.exe')
+    # subprocess doesn't support long path without shell=True
+    exit_code, stdout, stderr = self.RunProgram([long_binary_path], shell=True)
+    self.AssertExitCode(exit_code, 0, stderr)
+    self.assertEqual('helloworld', ''.join(stdout))
+    # Make sure we can launch the binary with a shortened Windows 8dot3 path
+    short_binary_path = win32api.GetShortPathName(long_binary_path)
+    exit_code, stdout, stderr = self.RunProgram([short_binary_path], shell=True)
+    self.AssertExitCode(exit_code, 0, stderr)
+    self.assertEqual('helloworld', ''.join(stdout))
+
+    long_binary_path = os.path.abspath(long_dir_path + '/bin_py.exe')
+    # subprocess doesn't support long path without shell=True
+    exit_code, stdout, stderr = self.RunProgram([long_binary_path], shell=True)
+    self.AssertExitCode(exit_code, 0, stderr)
+    self.assertEqual('helloworld', ''.join(stdout))
+    # Make sure we can launch the binary with a shortened Windows 8dot3 path
+    short_binary_path = win32api.GetShortPathName(long_binary_path)
+    exit_code, stdout, stderr = self.RunProgram([short_binary_path], shell=True)
     self.AssertExitCode(exit_code, 0, stderr)
     self.assertEqual('helloworld', ''.join(stdout))
 

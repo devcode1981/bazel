@@ -1,4 +1,15 @@
+# -*- coding: utf-8 -*-
+load("//tools/build_defs/pkg:pkg.bzl", "pkg_tar")
+load("//tools/config:common_settings.bzl", "bool_flag")
+load("//tools/python:private/defs.bzl", "py_binary", "py_library", "py_test")
+
 licenses(["notice"])  # Apache 2.0
+
+bool_flag(
+    name = "incompatible_no_build_defs_pkg",
+    build_setting_default = False,
+    visibility = ["//visibility:public"],
+)
 
 filegroup(
     name = "srcs",
@@ -11,7 +22,6 @@ exports_files(
     visibility = ["//site:__pkg__"],
 )
 
-# Used by pkg_deb
 py_library(
     name = "archive",
     srcs = ["archive.py"],
@@ -31,6 +41,7 @@ py_test(
         "testenv.py",
     ],
     data = [":archive_testdata"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     tags = [
         # archive.py requires xzcat, which is not available by default on Mac
@@ -51,45 +62,16 @@ py_test(
 py_binary(
     name = "build_tar",
     srcs = ["build_tar.py"],
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     visibility = ["//visibility:public"],
     deps = [
         ":archive",
-        "//third_party/py/gflags",
-    ],
-)
-
-py_binary(
-    name = "make_deb",
-    srcs = ["make_deb.py"],
-    srcs_version = "PY2AND3",
-    visibility = ["//visibility:public"],
-    deps = [
-        ":archive",
-        "//third_party/py/gflags",
-    ],
-)
-
-# Used by pkg_rpm in rpm.bzl.
-py_binary(
-    name = "make_rpm",
-    srcs = ["make_rpm.py"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//third_party/py/gflags",
-    ],
-)
-
-py_test(
-    name = "make_rpm_test",
-    srcs = ["make_rpm_test.py"],
-    deps = [
-        ":make_rpm",
+        "//third_party/py/abseil",
     ],
 )
 
 # tests
-load("//tools/build_defs/pkg:pkg.bzl", "pkg_deb", "pkg_tar")
 
 genrule(
     name = "generate_files",
@@ -198,24 +180,14 @@ pkg_tar(
     mode = "0o777",
 )
 
-pkg_deb(
-    name = "test-deb",
-    conffiles = [
-        "/etc/nsswitch.conf",
-        "/etc/other",
+pkg_tar(
+    name = "test-tar-mtime",
+    srcs = [
+        ":etc/nsswitch.conf",
     ],
-    data = ":test-tar-gz.tar.gz",
-    depends = [
-        "dep1",
-        "dep2",
-    ],
-    description = "toto",
-    distribution = "trusty",
-    maintainer = "someone@somewhere.com",
-    make_deb = ":make_deb",
-    package = "titi",
-    urgency = "low",
-    version = "test",
+    build_tar = ":build_tar",
+    mtime = 946684740,  # 1999-12-31, 23:59
+    portable_mtime = False,
 )
 
 sh_test(
@@ -226,7 +198,6 @@ sh_test(
     ],
     data = [
         "testenv.sh",
-        ":test-deb.deb",
         ":test-tar-.tar",
         ":test-tar-bz2.tar.bz2",
         ":test-tar-empty_dirs.tar",
@@ -237,6 +208,7 @@ sh_test(
         ":test-tar-inclusion-bz2.tar",
         ":test-tar-inclusion-gz.tar",
         ":test-tar-inclusion-xz.tar",
+        ":test-tar-mtime.tar",
         ":test-tar-strip_prefix-dot.tar",
         ":test-tar-strip_prefix-empty.tar",
         ":test-tar-strip_prefix-etc.tar",
@@ -267,5 +239,11 @@ test_suite(
 test_suite(
     name = "all_windows_tests",
     tests = [":windows_tests"],
+    visibility = ["//tools/build_defs:__pkg__"],
+)
+
+filegroup(
+    name = "bzl_srcs",
+    srcs = glob(["*.bzl"]),
     visibility = ["//tools/build_defs:__pkg__"],
 )

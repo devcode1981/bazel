@@ -58,7 +58,10 @@ public class DepsCheckerClassVisitor extends ClassVisitor {
       String[] interfaces) {
     checkState(internalName == null, "Cannot reuse this class visitor %s", getClass());
     this.internalName = name;
-    checkInternalName(superName);
+    if (superName != null) {
+      // module-info and java.lang.Object have null superName
+      checkInternalName(superName);
+    }
     checkInternalNameArray(interfaces);
     super.visit(version, access, name, signature, superName, interfaces);
   }
@@ -362,6 +365,18 @@ public class DepsCheckerClassVisitor extends ClassVisitor {
 
     private void checkHandle(Handle handle) {
       checkMember(handle.getOwner(), handle.getName(), handle.getDesc());
+    }
+
+    @Override
+    public void visitLdcInsn(Object value) {
+      if (value instanceof Type) {
+        checkType((Type) value); // Class literals
+      } else if (value instanceof Handle) {
+        checkHandle((Handle) value);
+      } else {
+        checkState(PRIMITIVE_TYPES.contains(value.getClass()));
+      }
+      super.visitLdcInsn(value);
     }
 
     @Override

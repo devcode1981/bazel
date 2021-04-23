@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.skyframe;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Iterables;
 import java.util.Collection;
 import java.util.Comparator;
@@ -69,14 +70,19 @@ public class DeterministicHelper extends NotifyingHelper {
 
   @Nullable
   @Override
-  protected DeterministicValueEntry wrapEntry(SkyKey key, @Nullable ThinNodeEntry entry) {
-    return entry == null ? null : new DeterministicValueEntry(key, entry);
+  protected DeterministicNodeEntry wrapEntry(SkyKey key, @Nullable ThinNodeEntry entry) {
+    return entry == null ? null : new DeterministicNodeEntry(key, entry);
   }
 
   private static Map<SkyKey, ? extends NodeEntry> makeDeterministic(
       Map<SkyKey, ? extends NodeEntry> map) {
     Map<SkyKey, NodeEntry> result = new TreeMap<>(ALPHABETICAL_SKYKEY_COMPARATOR);
     result.putAll(map);
+    Preconditions.checkState(
+        map.size() == result.size(),
+        "Different sky keys with identical toString results! Before=%s After=%s",
+        result,
+        map);
     return result;
   }
 
@@ -126,8 +132,8 @@ public class DeterministicHelper extends NotifyingHelper {
    * This class uses TreeSet to store reverse dependencies of NodeEntry. As a result all values are
    * lexicographically sorted.
    */
-  private class DeterministicValueEntry extends NotifyingNodeEntry {
-    private DeterministicValueEntry(SkyKey myKey, ThinNodeEntry delegate) {
+  private class DeterministicNodeEntry extends NotifyingNodeEntry {
+    private DeterministicNodeEntry(SkyKey myKey, ThinNodeEntry delegate) {
       super(myKey, delegate);
     }
 
@@ -151,6 +157,14 @@ public class DeterministicHelper extends NotifyingHelper {
       TreeSet<SkyKey> result = new TreeSet<>(ALPHABETICAL_SKYKEY_COMPARATOR);
       result.addAll(super.setValue(value, version));
       return result;
+    }
+
+    @Override
+    public NodeValueAndRdepsToSignal markClean() throws InterruptedException {
+      TreeSet<SkyKey> result = new TreeSet<>(ALPHABETICAL_SKYKEY_COMPARATOR);
+      NodeValueAndRdepsToSignal nodeValueAndRdepsToSignal = super.markClean();
+      result.addAll(nodeValueAndRdepsToSignal.getRdepsToSignal());
+      return new NodeValueAndRdepsToSignal(nodeValueAndRdepsToSignal.getValue(), result);
     }
   }
 }

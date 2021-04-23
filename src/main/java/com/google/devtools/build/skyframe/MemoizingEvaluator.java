@@ -14,13 +14,14 @@
 package com.google.devtools.build.skyframe;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetVisitor;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadHostile;
+import com.google.devtools.build.lib.events.ExtendedEventHandler;
 import com.google.devtools.build.lib.events.ExtendedEventHandler.Postable;
 import java.io.PrintStream;
 import java.util.Map;
+import java.util.function.Predicate;
 import javax.annotation.Nullable;
 
 /**
@@ -88,10 +89,10 @@ public interface MemoizingEvaluator {
 
   /**
    * Returns the node entries in the graph. Should only be called between evaluations. The returned
-   * map is mutable, but do not mutate it unless you know what you are doing! Naively deleting an
-   * entry will break graph invariants and cause a crash.
+   * iterable is mutable, but do not mutate it unless you know what you are doing! Naively deleting
+   * an entry will break graph invariants and cause a crash.
    */
-  Map<SkyKey, ? extends NodeEntry> getGraphMap();
+  Iterable<? extends Map.Entry<SkyKey, ? extends NodeEntry>> getGraphEntries();
 
   /**
    * Informs the evaluator that a sequence of evaluations at the same version has finished.
@@ -99,7 +100,17 @@ public interface MemoizingEvaluator {
    * the same version. A call of this method tells the evaluator that the next evaluation is not
    * guaranteed to be at the same version.
    */
-  default void noteEvaluationsAtSameVersionMayBeFinished() throws InterruptedException {}
+  default void noteEvaluationsAtSameVersionMayBeFinished(ExtendedEventHandler eventHandler)
+      throws InterruptedException {
+    postLoggingStats(eventHandler);
+  }
+
+  /**
+   * Tells the evaluator to post any logging statistics that it may have accumulated over the last
+   * sequence of evaluations. Normally called internally by {@link
+   * #noteEvaluationsAtSameVersionMayBeFinished}.
+   */
+  default void postLoggingStats(ExtendedEventHandler eventHandler) {}
 
   /**
    * Returns the done (without error) values in the graph.
@@ -114,12 +125,11 @@ public interface MemoizingEvaluator {
    * <p>This method should mainly be used by tests that need to verify the presence of a value in
    * the graph after an {@link #evaluate} call.
    */
-  @VisibleForTesting
   @Nullable
   SkyValue getExistingValue(SkyKey key) throws InterruptedException;
 
   @Nullable
-  NodeEntry getExistingEntryAtLatestVersion(SkyKey key) throws InterruptedException;
+  NodeEntry getExistingEntryAtCurrentlyEvaluatingVersion(SkyKey key) throws InterruptedException;
 
   /**
    * Returns an error if and only if an earlier call to {@link #evaluate} created it; null
@@ -128,6 +138,7 @@ public interface MemoizingEvaluator {
    * <p>This method should only be used by tests that need to verify the presence of an error in the
    * graph after an {@link #evaluate} call.
    */
+  @SuppressWarnings("VisibleForTestingMisused") // Only exists for testing.
   @VisibleForTesting
   @Nullable
   ErrorInfo getExistingErrorForTesting(SkyKey key) throws InterruptedException;
@@ -145,6 +156,24 @@ public interface MemoizingEvaluator {
     QueryableGraph transform(QueryableGraph graph);
 
     ProcessableGraph transform(ProcessableGraph graph);
+
+    GraphTransformerForTesting NO_OP =
+        new GraphTransformerForTesting() {
+          @Override
+          public InMemoryGraph transform(InMemoryGraph graph) {
+            return graph;
+          }
+
+          @Override
+          public QueryableGraph transform(QueryableGraph graph) {
+            return graph;
+          }
+
+          @Override
+          public ProcessableGraph transform(ProcessableGraph graph) {
+            return graph;
+          }
+        };
   }
 
   /**
@@ -157,7 +186,7 @@ public interface MemoizingEvaluator {
   /** A supplier for creating instances of a particular evaluator implementation. */
   interface EvaluatorSupplier {
     MemoizingEvaluator create(
-        ImmutableMap<SkyFunctionName, ? extends SkyFunction> skyFunctions,
+        ImmutableMap<SkyFunctionName, SkyFunction> skyFunctions,
         Differencer differencer,
         EvaluationProgressReceiver progressReceiver,
         GraphInconsistencyReceiver graphInconsistencyReceiver,

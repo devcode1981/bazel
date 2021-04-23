@@ -58,12 +58,18 @@ fi
 
 #### HELPER FUNCTIONS ##################################################
 
+if ! type try_with_timeout >&/dev/null; then
+  # Bazel's testenv.sh defines try_with_timeout but the Google-internal version
+  # uses a different testenv.sh.
+  function try_with_timeout() { $* ; }
+fi
+
 function set_up() {
     cd ${WORKSPACE_DIR}
 }
 
 function tear_down() {
-    bazel shutdown
+  try_with_timeout bazel shutdown
 }
 
 #### TESTS #############################################################
@@ -147,18 +153,36 @@ function test_modify_execution_info_various_types() {
   if [[ "$PRODUCT_NAME" = "bazel" ]]; then
     # proto_library requires this external workspace.
     cat >> WORKSPACE << EOF
+# TODO(#9029): May require some adjustment if/when we depend on the real
+# @rules_python in the real source tree, since this third_party/ package won't
+# be available.
 new_local_repository(
-    name = "com_google_protobuf",
-    path = "$(dirname $(rlocation io_bazel/third_party/protobuf/3.6.1/BUILD))",
-    build_file = "$(rlocation io_bazel/third_party/protobuf/3.6.1/BUILD)",
+    name = "rules_python",
+    path = "$(dirname $(rlocation io_bazel/third_party/rules_python/rules_python.WORKSPACE))",
+    build_file = "$(rlocation io_bazel/third_party/rules_python/BUILD)",
+    workspace_file = "$(rlocation io_bazel/third_party/rules_python/rules_python.WORKSPACE)",
+)
+EOF
+    cat "$(rlocation "io_bazel/src/test/shell/integration/rules_proto_stanza.txt")" >>WORKSPACE
+    cat >> WORKSPACE << EOF
+load("@rules_proto//proto:repositories.bzl", "rules_proto_dependencies", "rules_proto_toolchains")
+rules_proto_dependencies()
+rules_proto_toolchains()
+
+# @com_google_protobuf//:protoc depends on @io_bazel//third_party/zlib.
+new_local_repository(
+    name = "io_bazel",
+    path = "$(dirname $(rlocation io_bazel/third_party/rules_python/rules_python.WORKSPACE))/../..",
+    build_file_content = "# Intentionally left empty.",
+    workspace_file_content = "workspace(name = 'io_bazel')",
 )
 EOF
   fi
   local pkg="${FUNCNAME[0]}"
   mkdir -p "$pkg" || fail "mkdir -p $pkg"
-  echo "load('//$pkg:shell.bzl', 'skylark_shell')" > "$pkg/BUILD"
+  echo "load('//$pkg:shell.bzl', 'starlark_shell')" > "$pkg/BUILD"
   cat >> "$pkg/BUILD" <<'EOF'
-skylark_shell(
+starlark_shell(
   name = "shelly",
   output = "ok.txt",
 )
@@ -176,7 +200,7 @@ action_listener(
   visibility = ["//visibility:public"],
 )
 
-extra_action(name = "echo-filename", cmd = "echo Hi \$(EXTRA_ACTION_FILE)")
+extra_action(name = "echo-filename", cmd = "echo Hi \\$(EXTRA_ACTION_FILE)")
 
 py_binary(name = "pybar", srcs=["pybar.py"],)
 
@@ -189,7 +213,7 @@ def _impl(ctx):
     command = "touch %s" % ctx.outputs.output.path,
   )
 
-skylark_shell = rule(
+starlark_shell = rule(
   _impl,
   attrs = {
     "output": attr.output(mandatory=True),
@@ -218,7 +242,7 @@ Turbine=+requires-turbine,\
 JavaSourceJar=+requires-java-source-jar,\
 Javac=+requires-javac,\
 PyTinypar=+requires-py-tinypar,\
-SkylarkAction=+requires-skylark-action \
+Action=+requires-action \
    > output 2> "$TEST_log" || fail "Expected success"
 
   # There are sometimes other elements in ExecutionInfo, e.g. requires-darwin
@@ -226,7 +250,7 @@ SkylarkAction=+requires-skylark-action \
   # would be brittle, irrelevant to the operation of the flag, and in some
   # cases platform-dependent, we just search for the key itself, not the whole
   # ExecutionInfo: {...} line.
-  assert_contains "requires-skylark-action: ''" output
+  assert_contains "requires-action: ''" output
   assert_contains "requires-cpp-compile: ''" output
   assert_contains "requires-cpp-link: ''" output
   assert_contains "requires-extra-action: ''" output
@@ -240,6 +264,74 @@ SkylarkAction=+requires-skylark-action \
     # is the main unique-to-python rule which runs remotely for a py_binary.
     assert_contains "requires-py-tinypar: ''" output
   fi
+}
+
+# Regression test for b/127874955. We use --output=textproto since --output=text
+# sorts the execution info.
+function test_modify_execution_info_deterministic_order() {
+  local pkg="${FUNCNAME[0]}"
+  mkdir -p "$pkg/x" "$pkg/y" || fail "mkdir failed"
+  touch "$pkg/BUILD"
+  cat > "$pkg/build_defs.bzl" <<'EOF' || fail "Couldn't cat"
+def _rule_x_impl(ctx):
+    output = ctx.outputs.out
+    ctx.actions.run_shell(
+        outputs = [output],
+        command = "touch %s" % output.path,
+        mnemonic = "RuleX",
+        execution_requirements = {"requires-x": ""},
+    )
+
+rule_x = rule(outputs = {"out": "%{name}.out"}, implementation = _rule_x_impl)
+
+def _rule_y_impl(ctx):
+    output = ctx.outputs.out
+    ctx.actions.run_shell(
+        outputs = [output],
+        command = "touch %s" % output.path,
+        mnemonic = "RuleY",
+        execution_requirements = {"requires-y": ""},
+    )
+
+rule_y = rule(outputs = {"out": "%{name}.out"}, implementation = _rule_y_impl)
+EOF
+  echo "load('//$pkg:build_defs.bzl', 'rule_x')" > "$pkg/x/BUILD"
+  echo 'rule_x(name = "x")' >> "$pkg/x/BUILD"
+  echo "load('//$pkg:build_defs.bzl', 'rule_y')" > "$pkg/y/BUILD"
+  echo 'rule_y(name = "y")' >> "$pkg/y/BUILD"
+
+  mod='Rule(X|Y)=+requires-x,Rule(X|Y)=+requires-y'
+
+  bazel aquery "//$pkg/x" --output=textproto --modify_execution_info="$mod" \
+    > output1 2> "$TEST_log" || fail "Expected success"
+
+  bazel shutdown >& "$TEST_log" || fail "Couldn't shutdown"
+
+  bazel aquery "//$pkg/y" --modify_execution_info="$mod" \
+    >& "$TEST_log" || fail "Expected success"
+
+  bazel aquery "//$pkg/x" --output=textproto --modify_execution_info="$mod" \
+    > output2 2> "$TEST_log" || fail "Expected success"
+
+  assert_equals "$(cat output1)" "$(cat output2)"
+}
+
+# Regression test for b/130762259.
+function test_modify_execution_info_changes_test_runner_cache_key() {
+  local pkg="${FUNCNAME[0]}"
+  mkdir -p "$pkg"
+  echo "sh_test(name = 'test', srcs = ['test.sh'])" > "$pkg/BUILD"
+  touch "$pkg/test.sh"
+
+  bazel aquery "mnemonic(TestRunner,//$pkg:test)" --output=text \
+    --modify_execution_info= \
+    2> "$TEST_log" | grep ActionKey > key1 || fail "Expected success"
+
+  bazel aquery "mnemonic(TestRunner,//$pkg:test)" --output=text \
+    --modify_execution_info=TestRunner=+requires-x \
+    2> "$TEST_log" | grep ActionKey > key2 || fail "Expected success"
+
+  assert_not_equals "$(cat key1)" "$(cat key2)"
 }
 
 run_suite "Integration tests of the --modify_execution_info option."

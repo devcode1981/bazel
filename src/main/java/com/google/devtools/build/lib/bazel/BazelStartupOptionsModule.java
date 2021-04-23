@@ -13,13 +13,8 @@
 // limitations under the License.
 package com.google.devtools.build.lib.bazel;
 
-import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.runtime.BlazeModule;
-import com.google.devtools.build.lib.runtime.BlazeServerStartupOptions;
-import com.google.devtools.build.lib.runtime.CommandEnvironment;
-import com.google.devtools.build.lib.util.AbruptExitException;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
@@ -38,10 +33,19 @@ public class BazelStartupOptionsModule extends BlazeModule {
         valueHelp = "<path>",
         help =
             "The location of the user .bazelrc file containing default values of "
-                + "Bazel options. If unspecified, Bazel uses the first .bazelrc file it finds in "
+                + "Bazel options. "
+                + "/dev/null indicates that all further `--bazelrc`s will be ignored, "
+                + "which is useful to disable the search for a user rc file, "
+                + "e.g. in release builds.\n"
+                + "This option can also be specified multiple times.\n"
+                + "E.g. with "
+                + "`--bazelrc=x.rc --bazelrc=y.rc --bazelrc=/dev/null --bazelrc=z.rc`,\n"
+                + "  1) x.rc and y.rc are read.\n"
+                + "  2) z.rc is ignored due to the prior /dev/null.\n"
+                + "If unspecified, Bazel uses the first .bazelrc file it finds in "
                 + "the following two locations: the workspace directory, then the user's home "
-                + "directory. Use /dev/null to disable the search for a user rc file, e.g. in "
-                + "release builds.")
+                + "directory.\n"
+                + "Note: command line options will always supersede any option in bazelrc.")
     public String blazerc;
 
     // TODO(b/36168162): Remove this after the transition period is ower. This now only serves to
@@ -90,25 +94,5 @@ public class BazelStartupOptionsModule extends BlazeModule {
   @Override
   public Iterable<Class<? extends OptionsBase>> getStartupOptions() {
     return ImmutableList.of(Options.class);
-  }
-
-  /**
-   * Post a deprecation warning about batch mode. This is in beforeCommand, and not earlier, so that
-   * we can post the warning event to the correctly set up channels.
-   */
-  @Override
-  public void beforeCommand(CommandEnvironment env) throws AbruptExitException {
-    BlazeServerStartupOptions startupOptions =
-        Preconditions.checkNotNull(
-            env.getRuntime()
-                .getStartupOptionsProvider()
-                .getOptions(BlazeServerStartupOptions.class));
-    if (startupOptions.batch) {
-      env.getReporter()
-          .handle(
-              Event.warn(
-                  "--batch mode is deprecated. Please instead explicitly shut down your Bazel "
-                      + "server using the command \"bazel shutdown\"."));
-    }
   }
 }

@@ -27,7 +27,8 @@ import com.google.devtools.build.lib.buildtool.BuildRequest;
 import com.google.devtools.build.lib.buildtool.BuildResult;
 import com.google.devtools.build.lib.buildtool.BuildTool;
 import com.google.devtools.build.lib.events.Event;
-import com.google.devtools.build.lib.rules.AliasConfiguredTarget;
+import com.google.devtools.build.lib.profiler.Profiler;
+import com.google.devtools.build.lib.profiler.SilentCloseable;
 import com.google.devtools.build.lib.rules.android.WriteAdbArgsAction;
 import com.google.devtools.build.lib.rules.android.WriteAdbArgsAction.StartType;
 import com.google.devtools.build.lib.runtime.BlazeCommand;
@@ -35,15 +36,19 @@ import com.google.devtools.build.lib.runtime.BlazeCommandResult;
 import com.google.devtools.build.lib.runtime.Command;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
 import com.google.devtools.build.lib.runtime.CommonCommandOptions;
+import com.google.devtools.build.lib.runtime.ProjectFileSupport;
 import com.google.devtools.build.lib.runtime.commands.BuildCommand;
-import com.google.devtools.build.lib.runtime.commands.ProjectFileSupport;
-import com.google.devtools.build.lib.shell.AbnormalTerminationException;
+import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
+import com.google.devtools.build.lib.server.FailureDetails.MobileInstall;
+import com.google.devtools.build.lib.server.FailureDetails.MobileInstall.Code;
 import com.google.devtools.build.lib.shell.BadExitStatusException;
 import com.google.devtools.build.lib.shell.CommandException;
 import com.google.devtools.build.lib.util.CommandBuilder;
-import com.google.devtools.build.lib.util.ExitCode;
+import com.google.devtools.build.lib.util.DetailedExitCode;
+import com.google.devtools.build.lib.util.InterruptedFailureDetails;
 import com.google.devtools.build.lib.util.io.OutErr;
 import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.common.options.Converters;
 import com.google.devtools.common.options.EnumConverter;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
@@ -57,6 +62,7 @@ import com.google.devtools.common.options.OptionsParsingResult;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import javax.annotation.Nullable;
 
 /** Implementation of the 'mobile-install' command. */
 @Command(
@@ -71,10 +77,12 @@ import java.util.List;
 )
 public class MobileInstallCommand implements BlazeCommand {
 
-  /**
-   * An enumeration of all the modes that mobile-install supports.
-   */
-  public enum Mode { CLASSIC, CLASSIC_INTERNAL_TEST_DO_NOT_USE, SKYLARK }
+  /** An enumeration of all the modes that mobile-install supports. */
+  public enum Mode {
+    CLASSIC,
+    CLASSIC_INTERNAL_TEST_DO_NOT_USE,
+    SKYLARK
+  }
 
   /**
    * Converter for the --mode option.
@@ -115,17 +123,16 @@ public class MobileInstallCommand implements BlazeCommand {
     public boolean incremental;
 
     @Option(
-      name = "mode",
-      defaultValue = "classic",
-      converter = ModeConverter.class,
-      documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
-      effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS, OptionEffectTag.EXECUTION},
-      metadataTags = {OptionMetadataTag.INCOMPATIBLE_CHANGE},
-      help =
-          "Select how to run mobile-install. \"classic\" runs the current version of "
-              + "mobile-install. \"skylark\" uses the new skylark version, which has support for "
-              + "android_test."
-    )
+        name = "mode",
+        defaultValue = "classic",
+        converter = ModeConverter.class,
+        documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
+        effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS, OptionEffectTag.EXECUTION},
+        metadataTags = {OptionMetadataTag.INCOMPATIBLE_CHANGE},
+        help =
+            "Select how to run mobile-install. \"classic\" runs the current version of"
+                + " mobile-install. \"skylark\" uses the new Starlark version, which has support"
+                + " for android_test.")
     public Mode mode;
 
     @Option(
@@ -136,6 +143,15 @@ public class MobileInstallCommand implements BlazeCommand {
       help = "The aspect to use for mobile-install."
     )
     public String mobileInstallAspect;
+
+    @Option(
+        name = "mobile_install_supported_rules",
+        defaultValue = "",
+        converter = Converters.CommaSeparatedOptionListConverter.class,
+        documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+        effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
+        help = "The supported rules for mobile-install.")
+    public List<String> mobileInstallSupportedRules;
   }
 
   private static final String SINGLE_TARGET_MESSAGE =
@@ -152,9 +168,9 @@ public class MobileInstallCommand implements BlazeCommand {
       // Notify internal users that classic mode is no longer supported.
       if (mobileInstallOptions.mode == Mode.CLASSIC
           && !mobileInstallOptions.mobileInstallAspect.startsWith("@")) {
-        env.getReporter().handle(Event.error(
-            "mobile-install --mode=classic is no longer supported"));
-        return BlazeCommandResult.exitCode(ExitCode.COMMAND_LINE_ERROR);
+        String message = "mobile-install --mode=classic is no longer supported";
+        env.getReporter().handle(Event.error(message));
+        return createFailureResult(message, Code.CLASSIC_UNSUPPORTED);
       }
       if (adbOptions.start == StartType.WARM && !mobileInstallOptions.incremental) {
         env.getReporter().handle(Event.warn(
@@ -162,17 +178,20 @@ public class MobileInstallCommand implements BlazeCommand {
       }
       List<String> targets =
           ProjectFileSupport.getTargets(env.getRuntime().getProjectFileProvider(), options);
+
       BuildRequest request =
-          BuildRequest.create(
-              this.getClass().getAnnotation(Command.class).name(),
-              options,
-              env.getRuntime().getStartupOptionsProvider(),
-              targets,
-              env.getReporter().getOutErr(),
-              env.getCommandId(),
-              env.getCommandStartTime());
-      ExitCode exitCode = new BuildTool(env).processRequest(request, null).getExitCondition();
-      return BlazeCommandResult.exitCode(exitCode);
+          BuildRequest.builder()
+              .setCommandName(this.getClass().getAnnotation(Command.class).name())
+              .setId(env.getCommandId())
+              .setOptions(options)
+              .setStartupOptions(env.getRuntime().getStartupOptionsProvider())
+              .setOutErr(env.getReporter().getOutErr())
+              .setTargets(targets)
+              .setStartTimeMillis(env.getCommandStartTime())
+              .build();
+      DetailedExitCode detailedExitCode =
+          new BuildTool(env).processRequest(request, null).getDetailedExitCode();
+      return BlazeCommandResult.detailedExitCode(detailedExitCode);
     }
 
     // This list should look like: ["//executable:target", "arg1", "arg2"]
@@ -180,41 +199,52 @@ public class MobileInstallCommand implements BlazeCommand {
 
     // The user must at least specify an executable target.
     if (targetAndArgs.isEmpty()) {
-      env.getReporter().handle(Event.error("Must specify a target to run"));
-      return BlazeCommandResult.exitCode(ExitCode.COMMAND_LINE_ERROR);
+      String message = "Must specify a target to run";
+      env.getReporter().handle(Event.error(message));
+      return createFailureResult(message, Code.NO_TARGET_SPECIFIED);
     }
 
     List<String> targets = ImmutableList.of(targetAndArgs.get(0));
     List<String> runTargetArgs = targetAndArgs.subList(1, targetAndArgs.size());
 
     OutErr outErr = env.getReporter().getOutErr();
+
     BuildRequest request =
-        BuildRequest.create(
-            this.getClass().getAnnotation(Command.class).name(),
-            options,
-            env.getRuntime().getStartupOptionsProvider(),
-            targets,
-            outErr,
-            env.getCommandId(),
-            env.getCommandStartTime());
+        BuildRequest.builder()
+            .setCommandName(this.getClass().getAnnotation(Command.class).name())
+            .setId(env.getCommandId())
+            .setOptions(options)
+            .setStartupOptions(env.getRuntime().getStartupOptionsProvider())
+            .setOutErr(outErr)
+            .setTargets(targets)
+            .setStartTimeMillis(env.getCommandStartTime())
+            .build();
     BuildResult result = new BuildTool(env).processRequest(request, null);
 
     if (!result.getSuccess()) {
       env.getReporter().handle(Event.error("Build failed. Not running target"));
-      return BlazeCommandResult.exitCode(result.getExitCondition());
+      return BlazeCommandResult.detailedExitCode(result.getDetailedExitCode());
     }
 
     Collection<ConfiguredTarget> targetsBuilt = result.getSuccessfulTargets();
     if (targetsBuilt == null) {
       env.getReporter().handle(Event.warn(NO_TARGET_MESSAGE));
-      return BlazeCommandResult.exitCode(ExitCode.SUCCESS);
+      return BlazeCommandResult.success();
     }
     if (targetsBuilt.size() != 1) {
       env.getReporter().handle(Event.error(SINGLE_TARGET_MESSAGE));
-      return BlazeCommandResult.exitCode(ExitCode.COMMAND_LINE_ERROR);
+      return createFailureResult(SINGLE_TARGET_MESSAGE, Code.MULTIPLE_TARGETS_SPECIFIED);
     }
     ConfiguredTarget targetToRun = Iterables.getOnlyElement(targetsBuilt);
-    validateTargetType(env, targetToRun);
+
+    if (!mobileInstallOptions.mobileInstallSupportedRules.isEmpty()) {
+      String message =
+          errorMessageIfNotSupported(targetToRun, mobileInstallOptions.mobileInstallSupportedRules);
+      if (message != null) {
+        env.getReporter().handle(Event.error(message));
+        return createFailureResult(message, Code.TARGET_TYPE_INVALID);
+      }
+    }
 
     List<String> cmdLine = new ArrayList<>();
     // TODO(bazel-team): Get the executable path from the filesToRun provider from the aspect.
@@ -222,7 +252,7 @@ public class MobileInstallCommand implements BlazeCommand {
         env.getSkyframeExecutor()
             .getConfiguration(env.getReporter(), targetToRun.getConfigurationKey());
     cmdLine.add(
-        configuration.getBinFragment().getPathString()
+        configuration.getBinFragment(targetToRun.getLabel().getRepository()).getPathString()
             + "/"
             + targetToRun.getLabel().toPathFragment().getPathString()
             + "_mi/launcher");
@@ -262,7 +292,8 @@ public class MobileInstallCommand implements BlazeCommand {
       }
     }
 
-    Path workingDir = env.getBlazeWorkspace().getOutputPath().getParentDirectory();
+    Path workingDir =
+        env.getDirectories().getOutputPath(env.getWorkspaceName()).getParentDirectory();
     com.google.devtools.build.lib.shell.Command command =
         new CommandBuilder()
             .addArgs(cmdLine)
@@ -270,7 +301,7 @@ public class MobileInstallCommand implements BlazeCommand {
             .setWorkingDir(workingDir)
             .build();
 
-    try {
+    try (SilentCloseable c = Profiler.instance().profile("mobile install")) {
       // Restore a raw EventHandler if it is registered. This allows for blaze run to produce the
       // actual output of the command being run even if --color=no is specified.
       env.getReporter().switchToAnsiAllowingHandler();
@@ -282,7 +313,7 @@ public class MobileInstallCommand implements BlazeCommand {
           .execute(outErr.getOutputStream(), outErr.getErrorStream())
           .getTerminationStatus()
           .getExitCode();
-      return BlazeCommandResult.exitCode(ExitCode.SUCCESS);
+      return BlazeCommandResult.success();
     } catch (BadExitStatusException e) {
       String message =
           "Non-zero return code '"
@@ -290,13 +321,14 @@ public class MobileInstallCommand implements BlazeCommand {
               + "' from command: "
               + e.getMessage();
       env.getReporter().handle(Event.error(message));
-      return BlazeCommandResult.exitCode(ExitCode.RUN_FAILURE);
-    } catch (AbnormalTerminationException e) {
-      // The process was likely terminated by a signal in this case.
-      return BlazeCommandResult.exitCode(ExitCode.INTERRUPTED);
+      return createFailureResult(message, Code.NON_ZERO_EXIT);
     } catch (CommandException e) {
-      env.getReporter().handle(Event.error("Error running program: " + e.getMessage()));
-      return BlazeCommandResult.exitCode(ExitCode.RUN_FAILURE);
+      String message = "Error running program: " + e.getMessage();
+      env.getReporter().handle(Event.error(message));
+      return createFailureResult(message, Code.ERROR_RUNNING_PROGRAM);
+    } catch (InterruptedException e) {
+      return BlazeCommandResult.detailedExitCode(
+          InterruptedFailureDetails.detailedExitCode("mobile install interrupted"));
     }
   }
 
@@ -318,10 +350,9 @@ public class MobileInstallCommand implements BlazeCommand {
       } else {
         optionsParser.parse(
             PriorityCategory.COMMAND_LINE,
-            "Options required by the skylark implementation of mobile-install command",
+            "Options required by the Starlark implementation of mobile-install command",
             ImmutableList.of(
                 "--aspects=" + options.mobileInstallAspect + "%MIASPECT",
-                "--output_groups=android_incremental_deploy_info",
                 "--output_groups=mobile_install" + INTERNAL_SUFFIX,
                 "--output_groups=mobile_install_launcher" + INTERNAL_SUFFIX));
       }
@@ -330,20 +361,30 @@ public class MobileInstallCommand implements BlazeCommand {
     }
   }
 
-  private void validateTargetType(CommandEnvironment env, ConfiguredTarget target) {
-    while (target instanceof AliasConfiguredTarget) {
-      target = ((AliasConfiguredTarget) target).getActual();
-    }
-    // This should always be the case, but check to ensure future ConfiguredTarget types won't cause
-    // exceptions
+  @Nullable
+  private static String errorMessageIfNotSupported(
+      ConfiguredTarget target, List<String> mobileInstallSupportedRules) {
+    // Dereference any aliases that might be present.
+    target = target.getActual();
+
     if (target instanceof AbstractConfiguredTarget) {
       String ruleType = ((AbstractConfiguredTarget) target).getRuleClassString();
-      if (!ruleType.equals("android_binary")) {
-        env.getReporter()
-            .handle(
-                Event.error(
-                    "mobile-install can only be run on android_binary targets. Got: " + ruleType));
+      if (!mobileInstallSupportedRules.contains(ruleType)) {
+        return String.format(
+            "mobile-install can only be run on %s targets. Got: %s",
+            mobileInstallSupportedRules, ruleType);
+      } else {
+        return null;
       }
     }
+    return "Invalid target";
+  }
+
+  private static BlazeCommandResult createFailureResult(String message, Code detailedCode) {
+    return BlazeCommandResult.failureDetail(
+        FailureDetail.newBuilder()
+            .setMessage(message)
+            .setMobileInstall(MobileInstall.newBuilder().setCode(detailedCode))
+            .build());
   }
 }

@@ -16,7 +16,9 @@ package com.google.devtools.build.lib.vfs;
 import com.google.common.base.Preconditions;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import java.io.Serializable;
+import java.util.Comparator;
 import java.util.Objects;
+import javax.annotation.Nullable;
 
 /**
  * A {@link PathFragment} relative to a {@link Root}. Typically the root will be a package path
@@ -29,7 +31,7 @@ import java.util.Objects;
  * clients via #asPath or #getRoot.
  */
 @AutoCodec
-public class RootedPath implements Serializable {
+public class RootedPath implements Serializable, Comparable<RootedPath> {
   private final Root root;
   private final PathFragment rootRelativePath;
 
@@ -96,6 +98,15 @@ public class RootedPath implements Serializable {
     return rootRelativePath;
   }
 
+  @Nullable
+  public RootedPath getParentDirectory() {
+    PathFragment rootRelativeParentDirectory = getRootRelativePath().getParentDirectory();
+    if (rootRelativeParentDirectory == null) {
+      return null;
+    }
+    return new RootedPath(root, rootRelativeParentDirectory);
+  }
+
   @Override
   public boolean equals(Object obj) {
     if (this == obj) {
@@ -118,9 +129,16 @@ public class RootedPath implements Serializable {
     return result;
   }
 
-
   @Override
   public String toString() {
     return "[" + root + "]/[" + rootRelativePath + "]";
   }
+
+  @Override
+  public int compareTo(RootedPath o) {
+    return COMPARATOR.compare(this, o);
+  }
+
+  private static final Comparator<RootedPath> COMPARATOR =
+      Comparator.comparing(RootedPath::getRoot).thenComparing(RootedPath::getRootRelativePath);
 }

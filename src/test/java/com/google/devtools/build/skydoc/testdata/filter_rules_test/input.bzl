@@ -4,9 +4,6 @@ load(
     dep_rule = "my_rule",
 )
 
-def my_rule_impl(ctx):
-    return struct()
-
 my_rule = rule(
     implementation = my_rule_impl,
     doc = "This is my rule. It does stuff.",
@@ -14,8 +11,7 @@ my_rule = rule(
         "first": attr.label(
             mandatory = True,
             doc = "first my_rule doc string",
-            allow_files = True,
-            single_file = True,
+            allow_single_file = True,
         ),
         "second": attr.string_dict(mandatory = True),
     },
@@ -29,7 +25,7 @@ other_rule = rule(
     },
 )
 
-whitelisted_dep_rule = dep_rule
+allowlisted_dep_rule = dep_rule
 
 yet_another_rule = rule(
     implementation = my_rule_impl,

@@ -14,7 +14,7 @@
 package com.google.devtools.build.lib.analysis;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget;
@@ -59,7 +59,9 @@ public class AspectAwareAttributeMapperTest extends BuildViewTestCase {
     aspectAttributes = ImmutableMap.<String, Attribute>of(aspectAttr.getName(), aspectAttr);
     mapper =
         new AspectAwareAttributeMapper(
-            ConfiguredAttributeMapper.of(rule, ct.getConfigConditions()), aspectAttributes);
+            ConfiguredAttributeMapper.of(
+                rule, ct.getConfigConditions(), ct.getConfigurationChecksum()),
+            aspectAttributes);
   }
 
   @Test
@@ -80,36 +82,27 @@ public class AspectAwareAttributeMapperTest extends BuildViewTestCase {
 
   @Test
   public void getAspectAttributeValue() throws Exception {
-    try {
-      mapper.get("fromaspect", BuildType.LABEL);
-      fail("Expected failure because value queries aren't supported for aspect attributes");
-    } catch (UnsupportedOperationException e) {
-      // Expected.
-    }
+    assertThrows(
+        UnsupportedOperationException.class, () -> mapper.get("fromaspect", BuildType.LABEL));
   }
 
   @Test
   public void getAspectValueWrongType() throws Exception {
-    try {
-      mapper.get("fromaspect", BuildType.LABEL_LIST);
-      fail("Expected failure on wrong-typed attribute");
-    } catch (IllegalArgumentException e) {
-      assertThat(e)
-          .hasMessageThat()
-          .isEqualTo("attribute fromaspect has type label, not expected type list(label)");
-    }
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class, () -> mapper.get("fromaspect", BuildType.LABEL_LIST));
+    assertThat(e)
+        .hasMessageThat()
+        .isEqualTo("attribute fromaspect has type label, not expected type list(label)");
   }
 
   @Test
   public void getMissingAttributeValue() throws Exception {
-    try {
-      mapper.get("noexist", BuildType.LABEL);
-      fail("Expected failure on non-existent attribute");
-    } catch (IllegalArgumentException e) {
-      assertThat(e)
-          .hasMessageThat()
-          .isEqualTo("no attribute 'noexist' in either //foo:myrule or its aspects");
-    }
+    IllegalArgumentException e =
+        assertThrows(IllegalArgumentException.class, () -> mapper.get("noexist", BuildType.LABEL));
+    assertThat(e)
+        .hasMessageThat()
+        .isEqualTo("no attribute 'noexist' in either //foo:myrule or its aspects");
   }
 
   @Test
@@ -120,7 +113,7 @@ public class AspectAwareAttributeMapperTest extends BuildViewTestCase {
 
   @Test
   public void getAttributeNames() throws Exception {
-    assertThat(mapper.getAttributeNames()).containsAllOf("srcs", "linkstatic", "fromaspect");
+    assertThat(mapper.getAttributeNames()).containsAtLeast("srcs", "linkstatic", "fromaspect");
   }
 
   @Test

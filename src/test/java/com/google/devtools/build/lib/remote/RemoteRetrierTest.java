@@ -15,7 +15,7 @@
 package com.google.devtools.build.lib.remote;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 import static org.mockito.Mockito.when;
 
 import com.google.common.collect.Range;
@@ -23,18 +23,18 @@ import com.google.common.util.concurrent.ListeningScheduledExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.devtools.build.lib.remote.RemoteRetrier.ExponentialBackoff;
 import com.google.devtools.build.lib.remote.Retrier.Backoff;
-import com.google.devtools.build.lib.remote.Retrier.RetryException;
 import com.google.devtools.build.lib.remote.Retrier.Sleeper;
+import com.google.devtools.build.lib.remote.options.RemoteOptions;
+import com.google.devtools.build.lib.testutil.TestUtils;
 import com.google.devtools.common.options.Options;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import java.time.Duration;
 import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
-import org.junit.AfterClass;
+import org.junit.After;
 import org.junit.Before;
-import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -51,62 +51,52 @@ public class RemoteRetrierTest {
   }
 
   private RemoteRetrierTest.Foo fooMock;
-  private static ListeningScheduledExecutorService retryService;
-
-  @BeforeClass
-  public static void beforeEverything() {
-    retryService = MoreExecutors.listeningDecorator(Executors.newScheduledThreadPool(1));
-  }
+  private ListeningScheduledExecutorService retryService;
 
   @Before
   public void setUp() {
+    retryService = MoreExecutors.listeningDecorator(Executors.newScheduledThreadPool(1));
     fooMock = Mockito.mock(RemoteRetrierTest.Foo.class);
   }
 
-  @AfterClass
-  public static void afterEverything() {
+  @After
+  public void tearDown() throws InterruptedException {
     retryService.shutdownNow();
+    retryService.awaitTermination(TestUtils.WAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
   }
 
   @Test
   public void testExponentialBackoff() throws Exception {
+    Exception e = new Exception();
     Retrier.Backoff backoff =
         new ExponentialBackoff(Duration.ofSeconds(1), Duration.ofSeconds(10), 2, 0, 6);
-    assertThat(backoff.nextDelayMillis()).isEqualTo(1000);
-    assertThat(backoff.nextDelayMillis()).isEqualTo(2000);
-    assertThat(backoff.nextDelayMillis()).isEqualTo(4000);
-    assertThat(backoff.nextDelayMillis()).isEqualTo(8000);
-    assertThat(backoff.nextDelayMillis()).isEqualTo(10000);
-    assertThat(backoff.nextDelayMillis()).isEqualTo(10000);
-    assertThat(backoff.nextDelayMillis()).isLessThan(0L);
+    assertThat(backoff.nextDelayMillis(e)).isEqualTo(1000);
+    assertThat(backoff.nextDelayMillis(e)).isEqualTo(2000);
+    assertThat(backoff.nextDelayMillis(e)).isEqualTo(4000);
+    assertThat(backoff.nextDelayMillis(e)).isEqualTo(8000);
+    assertThat(backoff.nextDelayMillis(e)).isEqualTo(10000);
+    assertThat(backoff.nextDelayMillis(e)).isEqualTo(10000);
+    assertThat(backoff.nextDelayMillis(e)).isLessThan(0L);
   }
 
   @Test
   public void testExponentialBackoffJittered() throws Exception {
+    Exception e = new Exception();
     Retrier.Backoff backoff =
         new ExponentialBackoff(Duration.ofSeconds(1), Duration.ofSeconds(10), 2, 0.1, 6);
-    assertThat(backoff.nextDelayMillis()).isIn(Range.closedOpen(900L, 1100L));
-    assertThat(backoff.nextDelayMillis()).isIn(Range.closedOpen(1800L, 2200L));
-    assertThat(backoff.nextDelayMillis()).isIn(Range.closedOpen(3600L, 4400L));
-    assertThat(backoff.nextDelayMillis()).isIn(Range.closedOpen(7200L, 8800L));
-    assertThat(backoff.nextDelayMillis()).isIn(Range.closedOpen(9000L, 11000L));
-    assertThat(backoff.nextDelayMillis()).isIn(Range.closedOpen(9000L, 11000L));
-    assertThat(backoff.nextDelayMillis()).isLessThan(0L);
-  }
-
-  private void assertThrows(RemoteRetrier retrier, int attempts) throws Exception {
-    try {
-      retrier.execute(() -> fooMock.foo());
-      fail();
-    } catch (RetryException e) {
-      assertThat(e.getAttempts()).isEqualTo(attempts);
-    }
+    assertThat(backoff.nextDelayMillis(e)).isIn(Range.closedOpen(900L, 1100L));
+    assertThat(backoff.nextDelayMillis(e)).isIn(Range.closedOpen(1800L, 2200L));
+    assertThat(backoff.nextDelayMillis(e)).isIn(Range.closedOpen(3600L, 4400L));
+    assertThat(backoff.nextDelayMillis(e)).isIn(Range.closedOpen(7200L, 8800L));
+    assertThat(backoff.nextDelayMillis(e)).isIn(Range.closedOpen(9000L, 11000L));
+    assertThat(backoff.nextDelayMillis(e)).isIn(Range.closedOpen(9000L, 11000L));
+    assertThat(backoff.nextDelayMillis(e)).isLessThan(0L);
   }
 
   @Test
   public void testNoRetries() throws Exception {
     RemoteOptions options = Options.getDefaults(RemoteOptions.class);
-    options.experimentalRemoteRetry = false;
+    options.remoteMaxRetryAttempts = 0;
 
     RemoteRetrier retrier =
         Mockito.spy(new RemoteRetrier(options, (e) -> true, retryService, Retrier.ALLOW_ALL_CALLS));
@@ -114,7 +104,7 @@ public class RemoteRetrierTest {
         .thenReturn("bla")
         .thenThrow(Status.Code.UNKNOWN.toStatus().asRuntimeException());
     assertThat(retrier.execute(() -> fooMock.foo())).isEqualTo("bla");
-    assertThrows(retrier, 1);
+    assertThrows(StatusRuntimeException.class, () -> retrier.execute(fooMock::foo));
     Mockito.verify(fooMock, Mockito.times(2)).foo();
   }
 
@@ -131,7 +121,7 @@ public class RemoteRetrierTest {
                 Retrier.ALLOW_ALL_CALLS,
                 Mockito.mock(Sleeper.class)));
     when(fooMock.foo()).thenThrow(Status.Code.UNKNOWN.toStatus().asRuntimeException());
-    assertThrows(retrier, 1);
+    assertThrows(StatusRuntimeException.class, () -> retrier.execute(fooMock::foo));
     Mockito.verify(fooMock, Mockito.times(1)).foo();
   }
 
@@ -145,8 +135,8 @@ public class RemoteRetrierTest {
             new RemoteRetrier(s, (e) -> true, retryService, Retrier.ALLOW_ALL_CALLS, sleeper));
 
     when(fooMock.foo()).thenThrow(Status.Code.UNKNOWN.toStatus().asRuntimeException());
-    assertThrows(retrier, 3);
-    assertThrows(retrier, 3);
+    assertThrows(StatusRuntimeException.class, () -> retrier.execute(fooMock::foo));
+    assertThrows(StatusRuntimeException.class, () -> retrier.execute(fooMock::foo));
     Mockito.verify(sleeper, Mockito.times(2)).sleep(1000);
     Mockito.verify(sleeper, Mockito.times(2)).sleep(2000);
     Mockito.verify(fooMock, Mockito.times(6)).foo();
@@ -157,38 +147,17 @@ public class RemoteRetrierTest {
     InterruptedException thrown = new InterruptedException();
 
     RemoteOptions options = Options.getDefaults(RemoteOptions.class);
-    options.experimentalRemoteRetry = false;
+    options.remoteMaxRetryAttempts = 0;
     RemoteRetrier retrier =
         new RemoteRetrier(options, (e) -> true, retryService, Retrier.ALLOW_ALL_CALLS);
-    try {
-      retrier.execute(() -> {
-        throw thrown;
-      });
-      fail();
-    } catch (InterruptedException expected) {
-      assertThat(expected).isSameAs(thrown);
-    }
-  }
-
-  @Test
-  public void testPassThroughException() throws Exception {
-    StatusRuntimeException thrown = Status.Code.UNKNOWN.toStatus().asRuntimeException();
-
-    RemoteOptions options = Options.getDefaults(RemoteOptions.class);
-    RemoteRetrier retrier =
-        new RemoteRetrier(options, (e) -> true, retryService, Retrier.ALLOW_ALL_CALLS);
-
-    AtomicInteger numCalls = new AtomicInteger();
-    try {
-      retrier.execute(() -> {
-        numCalls.incrementAndGet();
-        throw new RemoteRetrier.PassThroughException(thrown);
-      });
-      fail();
-    } catch (RetryException expected) {
-      assertThat(expected).hasCauseThat().isSameAs(thrown);
-    }
-
-    assertThat(numCalls.get()).isEqualTo(1);
+    InterruptedException expected =
+        assertThrows(
+            InterruptedException.class,
+            () ->
+                retrier.execute(
+                    () -> {
+                      throw thrown;
+                    }));
+    assertThat(expected).isSameInstanceAs(thrown);
   }
 }

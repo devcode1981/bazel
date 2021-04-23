@@ -22,6 +22,7 @@
 #include "gtest/gtest.h"
 #include "src/main/cpp/util/path_platform.h"
 #include "src/main/native/windows/file.h"
+#include "src/main/native/windows/util.h"
 #include "src/test/cpp/util/windows_test_util.h"
 #include "third_party/ijar/common.h"
 #include "third_party/ijar/zip.h"
@@ -34,8 +35,14 @@
 namespace {
 
 using bazel::tools::test_wrapper::FileInfo;
+using bazel::tools::test_wrapper::IFStream;
 using bazel::tools::test_wrapper::ZipEntryPaths;
 using bazel::tools::test_wrapper::testing::TestOnly_AsMixedPath;
+using bazel::tools::test_wrapper::testing::TestOnly_CdataEncode;
+using bazel::tools::test_wrapper::testing::TestOnly_CreateIFStream;
+using bazel::tools::test_wrapper::testing::TestOnly_CreateTee;
+using bazel::tools::test_wrapper::testing::
+    TestOnly_CreateUndeclaredOutputsAnnotations;
 using bazel::tools::test_wrapper::testing::
     TestOnly_CreateUndeclaredOutputsManifest;
 using bazel::tools::test_wrapper::testing::TestOnly_CreateZip;
@@ -129,15 +136,33 @@ void CompareZipEntryPaths(char const* const* actual,
 #define TOWSTRING(x) TOWSTRING1(x)
 #define WLINE TOWSTRING(TOSTRING(__LINE__))
 
+HANDLE FopenRead(const std::wstring& unc_path) {
+  return CreateFileW(unc_path.c_str(), GENERIC_READ,
+                     FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
+                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+}
+
+HANDLE FopenContents(const wchar_t* wline, const char* contents, DWORD size) {
+  std::wstring tmpdir;
+  GET_TEST_TMPDIR(&tmpdir);
+  std::wstring filename = tmpdir + L"\\tmp" + wline;
+  EXPECT_TRUE(blaze_util::CreateDummyFile(filename, contents, size));
+  return FopenRead(filename);
+}
+
+HANDLE FopenContents(const wchar_t* wline, const char* contents) {
+  return FopenContents(wline, contents, strlen(contents));
+}
+
 TEST_F(TestWrapperWindowsTest, TestGetFileListRelativeTo) {
   std::wstring tmpdir;
   GET_TEST_TMPDIR(&tmpdir);
 
   // Create a directory structure to parse.
   std::wstring root = tmpdir + L"\\tmp" + WLINE;
-  EXPECT_TRUE(CreateDirectoryW(root.c_str(), NULL));
-  EXPECT_TRUE(CreateDirectoryW((root + L"\\foo").c_str(), NULL));
-  EXPECT_TRUE(CreateDirectoryW((root + L"\\foo\\sub").c_str(), NULL));
+  EXPECT_TRUE(CreateDirectoryW(root.c_str(), nullptr));
+  EXPECT_TRUE(CreateDirectoryW((root + L"\\foo").c_str(), nullptr));
+  EXPECT_TRUE(CreateDirectoryW((root + L"\\foo\\sub").c_str(), nullptr));
   EXPECT_TRUE(blaze_util::CreateDummyFile(root + L"\\foo\\sub\\file1", ""));
   EXPECT_TRUE(
       blaze_util::CreateDummyFile(root + L"\\foo\\sub\\file2", "hello"));
@@ -175,6 +200,20 @@ TEST_F(TestWrapperWindowsTest, TestGetFileListRelativeTo) {
               FileInfo(L"junc"),
               FileInfo(L"junc\\file1", 0),
               FileInfo(L"junc\\file2", 5)};
+  COMPARE_FILE_INFOS(actual, expected);
+
+  // Assert traversal limited to the current directory (depth of 0).
+  actual.clear();
+  ASSERT_TRUE(TestOnly_GetFileListRelativeTo(root, &actual, 0));
+  expected = {FileInfo(L"foo")};
+  COMPARE_FILE_INFOS(actual, expected);
+
+  // Assert traversal limited to depth of 1.
+  actual.clear();
+  ASSERT_TRUE(TestOnly_GetFileListRelativeTo(root, &actual, 1));
+  expected = {FileInfo(L"foo"), FileInfo(L"foo\\sub"),
+              FileInfo(L"foo\\file1", 3), FileInfo(L"foo\\file2", 6),
+              FileInfo(L"foo\\junc")};
   COMPARE_FILE_INFOS(actual, expected);
 }
 
@@ -278,9 +317,9 @@ TEST_F(TestWrapperWindowsTest, TestCreateZip) {
 
   // Create a directory structure to archive.
   std::wstring root = tmpdir + L"\\tmp" + WLINE;
-  EXPECT_TRUE(CreateDirectoryW(root.c_str(), NULL));
-  EXPECT_TRUE(CreateDirectoryW((root + L"\\foo").c_str(), NULL));
-  EXPECT_TRUE(CreateDirectoryW((root + L"\\foo\\sub").c_str(), NULL));
+  EXPECT_TRUE(CreateDirectoryW(root.c_str(), nullptr));
+  EXPECT_TRUE(CreateDirectoryW((root + L"\\foo").c_str(), nullptr));
+  EXPECT_TRUE(CreateDirectoryW((root + L"\\foo\\sub").c_str(), nullptr));
   EXPECT_TRUE(blaze_util::CreateDummyFile(root + L"\\foo\\sub\\file1", ""));
   EXPECT_TRUE(
       blaze_util::CreateDummyFile(root + L"\\foo\\sub\\file2", "hello"));
@@ -367,6 +406,338 @@ TEST_F(TestWrapperWindowsTest, TestUndeclaredOutputsManifest) {
   ASSERT_EQ(content, std::string("foo/sub/file1.ico\t0\timage/x-icon\n"
                                  "foo/sub/file2.bmp\t5\timage/bmp\n"
                                  "foo/file2\t6\tapplication/octet-stream\n"));
+}
+
+TEST_F(TestWrapperWindowsTest, TestCreateUndeclaredOutputsAnnotations) {
+  std::wstring tmpdir;
+  GET_TEST_TMPDIR(&tmpdir);
+
+  // Create a directory structure to parse.
+  std::wstring root = tmpdir + L"\\tmp" + WLINE;
+  EXPECT_TRUE(CreateDirectoryW(root.c_str(), nullptr));
+  EXPECT_TRUE(CreateDirectoryW((root + L"\\foo").c_str(), nullptr));
+  EXPECT_TRUE(CreateDirectoryW((root + L"\\bar.part").c_str(), nullptr));
+  EXPECT_TRUE(blaze_util::CreateDummyFile(root + L"\\a.part", "Hello a"));
+  EXPECT_TRUE(blaze_util::CreateDummyFile(root + L"\\b.txt", "Hello b"));
+  EXPECT_TRUE(blaze_util::CreateDummyFile(root + L"\\c.part", "Hello c"));
+  EXPECT_TRUE(blaze_util::CreateDummyFile(root + L"\\foo\\d.part", "Hello d"));
+  EXPECT_TRUE(
+      blaze_util::CreateDummyFile(root + L"\\bar.part\\e.part", "Hello e"));
+
+  std::wstring annot = root + L"\\x.annot";
+  ASSERT_TRUE(TestOnly_CreateUndeclaredOutputsAnnotations(root, annot));
+
+  HANDLE h = FopenRead(annot);
+  ASSERT_NE(h, INVALID_HANDLE_VALUE);
+  char content[100];
+  DWORD read;
+  bool success = ReadFile(h, content, 100, &read, nullptr) != FALSE;
+  CloseHandle(h);
+  EXPECT_TRUE(success);
+  ASSERT_EQ(std::string(content, read), std::string("Hello aHello c"));
+}
+
+TEST_F(TestWrapperWindowsTest, TestTee) {
+  HANDLE read1_h, write1_h;
+  EXPECT_TRUE(CreatePipe(&read1_h, &write1_h, nullptr, 0));
+  bazel::windows::AutoHandle read1(read1_h), write1(write1_h);
+  HANDLE read2_h, write2_h;
+  EXPECT_TRUE(CreatePipe(&read2_h, &write2_h, nullptr, 0));
+  bazel::windows::AutoHandle read2(read2_h), write2(write2_h);
+  HANDLE read3_h, write3_h;
+  EXPECT_TRUE(CreatePipe(&read3_h, &write3_h, nullptr, 0));
+  bazel::windows::AutoHandle read3(read3_h), write3(write3_h);
+
+  std::unique_ptr<bazel::tools::test_wrapper::Tee> tee;
+  EXPECT_TRUE(TestOnly_CreateTee(&read1, &write2, &write3, &tee));
+
+  DWORD written, read;
+  char content[100];
+
+  EXPECT_TRUE(WriteFile(write1, "hello", 5, &written, nullptr));
+  EXPECT_EQ(written, 5);
+  EXPECT_TRUE(ReadFile(read2, content, 100, &read, nullptr));
+  EXPECT_EQ(read, 5);
+  EXPECT_EQ(std::string(content, read), "hello");
+  EXPECT_TRUE(ReadFile(read3, content, 100, &read, nullptr));
+  EXPECT_EQ(read, 5);
+  EXPECT_EQ(std::string(content, read), "hello");
+
+  EXPECT_TRUE(WriteFile(write1, "foo", 3, &written, nullptr));
+  EXPECT_EQ(written, 3);
+  EXPECT_TRUE(ReadFile(read2, content, 100, &read, nullptr));
+  EXPECT_EQ(read, 3);
+  EXPECT_EQ(std::string(content, read), "foo");
+  EXPECT_TRUE(ReadFile(read3, content, 100, &read, nullptr));
+  EXPECT_EQ(read, 3);
+  EXPECT_EQ(std::string(content, read), "foo");
+
+  write1 = INVALID_HANDLE_VALUE;  // closes handle so the Tee thread can exit
+}
+
+void AssertCdataEncodeBuffer(const wchar_t* wline, const char* input,
+                             DWORD size, const char* expected_output) {
+  bazel::windows::AutoHandle h(FopenContents(wline, input, size));
+  std::unique_ptr<IFStream> istm(TestOnly_CreateIFStream(h, /* page_size */ 4));
+  std::stringstream out_stm;
+  ASSERT_TRUE(TestOnly_CdataEncode(istm.get(), &out_stm));
+  ASSERT_EQ(expected_output, out_stm.str());
+}
+
+void AssertCdataEncodeBuffer(const wchar_t* wline, const char* input,
+                             const char* expected_output) {
+  AssertCdataEncodeBuffer(wline, input, strlen(input), expected_output);
+}
+
+TEST_F(TestWrapperWindowsTest, TestCdataEscapeNullTerminator) {
+  AssertCdataEncodeBuffer(WLINE, "x\0y", 3, "x?y");
+}
+
+TEST_F(TestWrapperWindowsTest, TestCdataEscapeCdataEndings) {
+  AssertCdataEncodeBuffer(
+      WLINE,
+      // === Input ===
+      // CDATA end sequence, followed by some arbitrary octet.
+      "]]>x"
+      // CDATA end sequence twice.
+      "]]>]]>x"
+      // CDATA end sequence at the end of the string.
+      "]]>",
+
+      // === Expected output ===
+      "]]>]]<![CDATA[>x"
+      "]]>]]<![CDATA[>]]>]]<![CDATA[>x"
+      "]]>]]<![CDATA[>");
+}
+
+TEST_F(TestWrapperWindowsTest, TestCdataEscapeSingleOctets) {
+  AssertCdataEncodeBuffer(WLINE,
+                          // === Input ===
+                          // Legal single-octets.
+                          "AB\x9\xA\xD\x20\x7F"
+                          // Illegal single-octets.
+                          "\x8\xB\xC\x1F\x80\xFF"
+                          "x",
+
+                          // === Expected output ===
+                          // Legal single-octets.
+                          "AB\x9\xA\xD\x20\x7F"
+                          // Illegal single-octets.
+                          "??????"
+                          "x");
+}
+
+TEST_F(TestWrapperWindowsTest, TestCdataEscapeDoubleOctets) {
+  // Legal range: [\xc0-\xdf][\x80-\xbf]
+  AssertCdataEncodeBuffer(
+      WLINE,
+      "x"
+      // Legal double-octet sequences.
+      "\xC0\x80"
+      "\xDE\xB0"
+      "\xDF\xBF"
+      // Illegal double-octet sequences, first octet is bad, second is good.
+      "\xBF\x80"  // each are matched as single bad octets
+      "\xE0\x80"
+      // Illegal double-octet sequences, first octet is good, second is bad.
+      "\xC0\x7F"  // 0x7F is legal as a single-octet, retained
+      "\xDF\xC0"  // 0xC0 starts a legal two-octet sequence...
+      // Illegal double-octet sequences, both octets bad.
+      "\xBF\xFF"  // ...and 0xBF finishes that sequence
+      "x",
+
+      // === Expected output ===
+      "x"
+      // Legal double-octet sequences.
+      "\xC0\x80"
+      "\xDE\xB0"
+      "\xDF\xBF"
+      // Illegal double-octet sequences, first octet is bad, second is good.
+      "??"
+      "??"
+      // Illegal double-octet sequences, first octet is good, second is bad.
+      "?\x7F"  // 0x7F is legal as a single-octet, retained
+      "?\xC0"  // 0xC0 starts a legal two-octet sequence...
+      // Illegal double-octet sequences, both octets bad.
+      "\xBF?"  // ...and 0xBF finishes that sequence
+      "x");
+}
+
+TEST_F(TestWrapperWindowsTest, TestCdataEscapeAndAppend) {
+  std::wstring tmpdir;
+  GET_TEST_TMPDIR(&tmpdir);
+
+  AssertCdataEncodeBuffer(WLINE,
+                          // === Input ===
+                          "AB\xA\xC\xD"
+                          "]]>"
+                          "]]]>"
+                          "\xC0\x80"
+                          "a"
+                          "\xED\x9F\xBF"
+                          "b"
+                          "\xEF\xBF\xB0"
+                          "c"
+                          "\xF7\xB0\x80\x81"
+                          "d"
+                          "]]>",
+
+                          // === Output ===
+                          "AB\xA?\xD"
+                          "]]>]]<![CDATA[>"
+                          "]]]>]]<![CDATA[>"
+                          "\xC0\x80"
+                          "a"
+                          "\xED\x9F\xBF"
+                          "b"
+                          "\xEF\xBF\xB0"
+                          "c"
+                          "\xF7\xB0\x80\x81"
+                          "d"
+                          "]]>]]<![CDATA[>");
+}
+
+TEST_F(TestWrapperWindowsTest, TestIFStreamNoData) {
+  bazel::windows::AutoHandle h(FopenContents(WLINE, ""));
+  std::unique_ptr<IFStream> s(TestOnly_CreateIFStream(h, 6));
+  uint8_t buf[3] = {0, 0, 0};
+
+  ASSERT_EQ(s->Get(), IFStream::kIFStreamErrorEOF);
+  ASSERT_EQ(s->Peek(0, buf), 0);
+  ASSERT_EQ(s->Peek(1, buf), 0);
+  ASSERT_EQ(s->Peek(2, buf), 0);
+  ASSERT_EQ(s->Peek(100, buf), 0);
+}
+
+TEST_F(TestWrapperWindowsTest, TestIFStreamLessDataThanPageSize) {
+  // The data is "abc" (3 bytes), page size is 6 bytes.
+  bazel::windows::AutoHandle h(FopenContents(WLINE, "abc"));
+  std::unique_ptr<IFStream> s(TestOnly_CreateIFStream(h, 6));
+  uint8_t buf[3] = {0, 0, 0};
+
+  // Read position is at "a".
+  ASSERT_EQ(s->Get(), 'a');
+  ASSERT_EQ(s->Peek(1, buf), 1);
+  ASSERT_EQ(buf[0], 'b');
+  ASSERT_EQ(s->Peek(2, buf), 2);
+  ASSERT_EQ(buf[0], 'b');
+  ASSERT_EQ(buf[1], 'c');
+  ASSERT_EQ(s->Peek(100, buf), 2);
+  ASSERT_EQ(buf[0], 'b');
+  ASSERT_EQ(buf[1], 'c');
+
+  // Read position is at "b".
+  ASSERT_EQ(s->Get(), 'b');
+  ASSERT_EQ(s->Peek(1, buf), 1);
+  ASSERT_EQ(buf[0], 'c');
+  ASSERT_EQ(s->Peek(2, buf), 1);
+  ASSERT_EQ(buf[0], 'c');
+  ASSERT_EQ(s->Peek(100, buf), 1);
+  ASSERT_EQ(buf[0], 'c');
+
+  // Read position is at "c".
+  ASSERT_EQ(s->Get(), 'c');
+  ASSERT_EQ(s->Peek(1, buf), 0);
+  ASSERT_EQ(s->Peek(2, buf), 0);
+  ASSERT_EQ(s->Peek(100, buf), 0);
+}
+
+TEST_F(TestWrapperWindowsTest, TestIFStreamExactlySinglePageSize) {
+  // The data is "abcdef" (6 bytes), page size is 6 bytes.
+  bazel::windows::AutoHandle h(FopenContents(WLINE, "abcdef"));
+  std::unique_ptr<IFStream> s(TestOnly_CreateIFStream(h, 6));
+  uint8_t buf[6] = {0, 0, 0};
+
+  // Read position is at "a".
+  ASSERT_EQ(s->Get(), 'a');
+  ASSERT_EQ(s->Peek(1, buf), 1);
+  ASSERT_EQ(buf[0], 'b');
+  ASSERT_EQ(s->Peek(5, buf), 5);
+  ASSERT_EQ(buf[0], 'b');
+  ASSERT_EQ(buf[1], 'c');
+  ASSERT_EQ(buf[2], 'd');
+  ASSERT_EQ(buf[3], 'e');
+  ASSERT_EQ(buf[4], 'f');
+
+  ASSERT_EQ(s->Get(), 'b');
+  ASSERT_EQ(s->Get(), 'c');
+  ASSERT_EQ(s->Get(), 'd');
+  ASSERT_EQ(s->Get(), 'e');
+  ASSERT_EQ(s->Peek(1, buf), 1);
+  ASSERT_EQ(buf[0], 'f');
+  ASSERT_EQ(s->Peek(5, buf), 1);
+
+  // Read position is at "f". No more peeking or moving.
+  ASSERT_EQ(s->Get(), 'f');
+  ASSERT_EQ(s->Peek(1, buf), 0);
+}
+
+TEST_F(TestWrapperWindowsTest, TestIFStreamLessDataThanDoublePageSize) {
+  bazel::windows::AutoHandle h(FopenContents(WLINE, "abcdefghi"));
+  std::unique_ptr<IFStream> s(TestOnly_CreateIFStream(h, 6));
+  uint8_t buf[3] = {0, 0, 0};
+
+  // Move near the page boundary.
+  for (int c = s->Get(); c != 'e'; c = s->Get()) {
+  }
+
+  // Read position is at "e". Peek2 and Peek3 will need to read from next page.
+  ASSERT_EQ(s->Peek(1, buf), 1);
+  ASSERT_EQ(buf[0], 'f');
+  ASSERT_EQ(s->Peek(2, buf), 2);
+  ASSERT_EQ(buf[0], 'f');
+  ASSERT_EQ(buf[1], 'g');
+  ASSERT_EQ(s->Peek(3, buf), 3);
+  ASSERT_EQ(buf[0], 'f');
+  ASSERT_EQ(buf[1], 'g');
+  ASSERT_EQ(buf[2], 'h');
+
+  for (int c = s->Get(); c != 'h'; c = s->Get()) {
+  }
+  ASSERT_EQ(s->Peek(1, buf), 1);
+  ASSERT_EQ(buf[0], 'i');
+  ASSERT_EQ(s->Peek(5, buf), 1);
+  ASSERT_EQ(buf[0], 'i');
+}
+
+TEST_F(TestWrapperWindowsTest, TestIFStreamLessDataThanTriplePageSize) {
+  // Data is 15 bytes, page size is 6 bytes, we'll cross 2 page boundaries.
+  bazel::windows::AutoHandle h(FopenContents(WLINE, "abcdefghijklmno"));
+  std::unique_ptr<IFStream> s(TestOnly_CreateIFStream(h, 6));
+  uint8_t buf[12];
+
+  // Move near the first page boundary.
+  for (int c = s->Get(); c != 'e'; c = s->Get()) {
+  }
+  ASSERT_EQ(s->Peek(100, buf), 7);
+  ASSERT_EQ(buf[0], 'f');
+  ASSERT_EQ(buf[1], 'g');
+  ASSERT_EQ(buf[2], 'h');
+  ASSERT_EQ(buf[3], 'i');
+  ASSERT_EQ(buf[4], 'j');
+  ASSERT_EQ(buf[5], 'k');
+  ASSERT_EQ(buf[6], 'l');
+
+  // Last read character is "k".
+  // Peek(2) and Peek(3) will need to read from last page.
+  for (int c = s->Get(); c != 'k'; c = s->Get()) {
+  }
+  ASSERT_EQ(s->Peek(1, buf), 1);
+  ASSERT_EQ(buf[0], 'l');
+  ASSERT_EQ(s->Peek(100, buf), 4);
+  ASSERT_EQ(buf[0], 'l');
+  ASSERT_EQ(buf[1], 'm');
+  ASSERT_EQ(buf[2], 'n');
+  ASSERT_EQ(buf[3], 'o');
+
+  // Move near the end of the last page.
+  for (int c = s->Get(); c != 'm'; c = s->Get()) {
+  }
+  ASSERT_EQ(s->Peek(1, buf), 1);
+  ASSERT_EQ(buf[0], 'n');
+  ASSERT_EQ(s->Peek(100, buf), 2);
+  ASSERT_EQ(buf[0], 'n');
+  ASSERT_EQ(buf[1], 'o');
 }
 
 }  // namespace

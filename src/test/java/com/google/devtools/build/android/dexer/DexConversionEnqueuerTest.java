@@ -88,7 +88,7 @@ public class DexConversionEnqueuerTest {
   @Test
   public void testDirectory_copyEmptyBuffer() throws Exception {
     ZipEntry entry = newZipEntry("dir/", 0);
-    assertThat(entry.isDirectory()).isTrue(); // test sanity
+    assertThat(entry.isDirectory()).isTrue();
     mockEntries(entry);
 
     stuffer.call();
@@ -132,7 +132,7 @@ public class DexConversionEnqueuerTest {
     assertThat(f.isDone()).isTrue();
     assertThat(f.get().getEntry().getName()).isEqualTo(filename + ".dex");
     assertThat(f.get().getEntry().getTime()).isEqualTo(FILE_TIME);
-    assertThat(f.get().getContent()).isSameAs(dexcode);
+    assertThat(f.get().getContent()).isSameInstanceAs(dexcode);
   }
 
   private byte[] testConvertClassToDex() throws Exception {
@@ -150,15 +150,15 @@ public class DexConversionEnqueuerTest {
 
     Dex dex = new Dex(dexcode);
     assertThat(dex.classDefs()).hasSize(1);
-    assertThat(cache.getIfPresent(DexingKey.create(false, false, PositionList.LINES, bytecode)))
-        .isSameAs(dexcode);
-    assertThat(cache.getIfPresent(DexingKey.create(false, false, PositionList.NONE, bytecode)))
+    assertThat(cache.getIfPresent(DexingKey.create(false, false, PositionList.LINES, 13, bytecode)))
+        .isSameInstanceAs(dexcode);
+    assertThat(cache.getIfPresent(DexingKey.create(false, false, PositionList.NONE, 13, bytecode)))
         .isNull();
-    assertThat(cache.getIfPresent(DexingKey.create(true, false, PositionList.LINES, bytecode)))
+    assertThat(cache.getIfPresent(DexingKey.create(true, false, PositionList.LINES, 13, bytecode)))
         .isNull();
-    assertThat(cache.getIfPresent(DexingKey.create(false, true, PositionList.LINES, bytecode)))
+    assertThat(cache.getIfPresent(DexingKey.create(false, true, PositionList.LINES, 13, bytecode)))
         .isNull();
-    assertThat(cache.getIfPresent(DexingKey.create(true, true, PositionList.LINES, bytecode)))
+    assertThat(cache.getIfPresent(DexingKey.create(true, true, PositionList.LINES, 13, bytecode)))
         .isNull();
     return dexcode;
   }
@@ -167,7 +167,7 @@ public class DexConversionEnqueuerTest {
     byte[] bytecode = ByteStreams.toByteArray(
         Thread.currentThread().getContextClassLoader().getResourceAsStream(filename));
     ZipEntry entry = newZipEntry(filename, bytecode.length);
-    assertThat(entry.isDirectory()).isFalse(); // test sanity
+    assertThat(entry.isDirectory()).isFalse();
     mockEntries(entry);
     when(zip.getInputStream(entry)).thenReturn(new ByteArrayInputStream(bytecode));
     return bytecode;

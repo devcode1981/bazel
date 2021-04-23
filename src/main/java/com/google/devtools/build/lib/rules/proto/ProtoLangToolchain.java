@@ -14,14 +14,11 @@
 
 package com.google.devtools.build.lib.rules.proto;
 
-import static com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode.HOST;
-import static com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode.TARGET;
 import static com.google.devtools.build.lib.collect.nestedset.Order.STABLE_ORDER;
 
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
-import com.google.devtools.build.lib.analysis.FileProvider;
 import com.google.devtools.build.lib.analysis.FilesToRunProvider;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
@@ -29,7 +26,7 @@ import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
-import com.google.devtools.build.lib.syntax.Type;
+import com.google.devtools.build.lib.packages.Type;
 
 /** Implements {code proto_lang_toolchain}. */
 public class ProtoLangToolchain implements RuleConfiguredTargetFactory {
@@ -37,17 +34,17 @@ public class ProtoLangToolchain implements RuleConfiguredTargetFactory {
   public ConfiguredTarget create(RuleContext ruleContext)
       throws InterruptedException, RuleErrorException, ActionConflictException {
     NestedSetBuilder<Artifact> blacklistedProtos = NestedSetBuilder.stableOrder();
-    for (FileProvider protos :
-        ruleContext.getPrerequisites("blacklisted_protos", TARGET, FileProvider.class)) {
-      blacklistedProtos.addTransitive(protos.getFilesToBuild());
+    for (ProtoInfo protoInfo :
+        ruleContext.getPrerequisites("blacklisted_protos", ProtoInfo.PROVIDER)) {
+      blacklistedProtos.addTransitive(protoInfo.getOriginalTransitiveProtoSources());
     }
 
     return new RuleConfiguredTargetBuilder(ruleContext)
         .addProvider(
             ProtoLangToolchainProvider.create(
                 ruleContext.attributes().get("command_line", Type.STRING),
-                ruleContext.getPrerequisite("plugin", HOST, FilesToRunProvider.class),
-                ruleContext.getPrerequisite("runtime", TARGET),
+                ruleContext.getPrerequisite("plugin", FilesToRunProvider.class),
+                ruleContext.getPrerequisite("runtime"),
                 blacklistedProtos.build()))
         .setFilesToBuild(NestedSetBuilder.<Artifact>emptySet(STABLE_ORDER))
         .addProvider(RunfilesProvider.simple(Runfiles.EMPTY))

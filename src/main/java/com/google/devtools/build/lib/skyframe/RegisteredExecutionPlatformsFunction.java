@@ -16,18 +16,27 @@ package com.google.devtools.build.lib.skyframe;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 
+import com.google.auto.value.AutoValue;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
+import com.google.devtools.build.lib.analysis.ConfiguredTargetValue;
 import com.google.devtools.build.lib.analysis.PlatformConfiguration;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.platform.PlatformInfo;
 import com.google.devtools.build.lib.analysis.platform.PlatformProviderUtils;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.cmdline.LabelConstants;
 import com.google.devtools.build.lib.cmdline.TargetParsingException;
 import com.google.devtools.build.lib.packages.Package;
-import com.google.devtools.build.lib.skyframe.ConfiguredTargetFunction.ConfiguredValueCreationException;
+import com.google.devtools.build.lib.packages.Target;
+import com.google.devtools.build.lib.pkgcache.FilteringPolicy;
+import com.google.devtools.build.lib.server.FailureDetails.Analysis;
+import com.google.devtools.build.lib.server.FailureDetails.Analysis.Code;
+import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
 import com.google.devtools.build.lib.skyframe.PlatformLookupUtil.InvalidPlatformException;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.util.DetailedExitCode;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunctionException;
 import com.google.devtools.build.skyframe.SkyFunctionException.Transience;
@@ -44,7 +53,7 @@ public class RegisteredExecutionPlatformsFunction implements SkyFunction {
   @Nullable
   @Override
   public SkyValue compute(SkyKey skyKey, Environment env)
-      throws SkyFunctionException, InterruptedException {
+      throws RegisteredExecutionPlatformsFunctionException, InterruptedException {
 
     BuildConfigurationValue buildConfigurationValue =
         (BuildConfigurationValue)
@@ -74,7 +83,8 @@ public class RegisteredExecutionPlatformsFunction implements SkyFunction {
     // Expand target patterns.
     ImmutableList<Label> platformLabels;
     try {
-      platformLabels = TargetPatternUtil.expandTargetPatterns(env, targetPatterns);
+      platformLabels =
+          TargetPatternUtil.expandTargetPatterns(env, targetPatterns, HasPlatformInfo.create());
       if (env.valuesMissing()) {
         return null;
       }
@@ -85,7 +95,7 @@ public class RegisteredExecutionPlatformsFunction implements SkyFunction {
 
     // Load the configured target for each, and get the declared execution platforms providers.
     ImmutableList<ConfiguredTargetKey> registeredExecutionPlatformKeys =
-        configureRegisteredExecutionPlatforms(env, configuration, targetPatterns, platformLabels);
+        configureRegisteredExecutionPlatforms(env, configuration, platformLabels);
     if (env.valuesMissing()) {
       return null;
     }
@@ -103,7 +113,7 @@ public class RegisteredExecutionPlatformsFunction implements SkyFunction {
   public static List<String> getWorkspaceExecutionPlatforms(Environment env)
       throws InterruptedException {
     PackageValue externalPackageValue =
-        (PackageValue) env.getValue(PackageValue.key(Label.EXTERNAL_PACKAGE_IDENTIFIER));
+        (PackageValue) env.getValue(PackageValue.key(LabelConstants.EXTERNAL_PACKAGE_IDENTIFIER));
     if (externalPackageValue == null) {
       return null;
     }
@@ -112,16 +122,17 @@ public class RegisteredExecutionPlatformsFunction implements SkyFunction {
     return externalPackage.getRegisteredExecutionPlatforms();
   }
 
-  private ImmutableList<ConfiguredTargetKey> configureRegisteredExecutionPlatforms(
-      Environment env,
-      BuildConfiguration configuration,
-      ImmutableList<String> targetPatterns,
-      List<Label> labels)
+  private static ImmutableList<ConfiguredTargetKey> configureRegisteredExecutionPlatforms(
+      Environment env, BuildConfiguration configuration, List<Label> labels)
       throws InterruptedException, RegisteredExecutionPlatformsFunctionException {
-
     ImmutableList<ConfiguredTargetKey> keys =
         labels.stream()
-            .map(label -> ConfiguredTargetKey.of(label, configuration))
+            .map(
+                label ->
+                    ConfiguredTargetKey.builder()
+                        .setLabel(label)
+                        .setConfiguration(configuration)
+                        .build())
             .collect(toImmutableList());
 
     Map<SkyKey, ValueOrException<ConfiguredValueCreationException>> values =
@@ -141,20 +152,13 @@ public class RegisteredExecutionPlatformsFunction implements SkyFunction {
             ((ConfiguredTargetValue) valueOrException.get()).getConfiguredTarget();
         PlatformInfo platformInfo = PlatformProviderUtils.platform(target);
         if (platformInfo == null) {
-          if (TargetPatternUtil.isTargetExplicit(targetPatterns, platformLabel)) {
-            // Only report an error if the label was explicitly requested.
-            throw new RegisteredExecutionPlatformsFunctionException(
-                new InvalidPlatformException(platformLabel), Transience.PERSISTENT);
-          }
-          continue;
+          throw new RegisteredExecutionPlatformsFunctionException(
+              new InvalidPlatformException(platformLabel), Transience.PERSISTENT);
         }
         validPlatformKeys.add(platformKey);
       } catch (ConfiguredValueCreationException e) {
-        if (TargetPatternUtil.isTargetExplicit(targetPatterns, platformLabel)) {
-          // Only report an error if the label was explicitly requested.
-          throw new RegisteredExecutionPlatformsFunctionException(
-              new InvalidPlatformException(platformLabel, e), Transience.PERSISTENT);
-        }
+        throw new RegisteredExecutionPlatformsFunctionException(
+            new InvalidPlatformException(platformLabel, e), Transience.PERSISTENT);
       }
     }
 
@@ -174,18 +178,27 @@ public class RegisteredExecutionPlatformsFunction implements SkyFunction {
    * Used to indicate that the given {@link Label} represents a {@link ConfiguredTarget} which is
    * not a valid {@link PlatformInfo} provider.
    */
-  static final class InvalidExecutionPlatformLabelException extends Exception {
+  private static final class InvalidExecutionPlatformLabelException extends Exception
+      implements SaneAnalysisException {
 
-    public InvalidExecutionPlatformLabelException(
-        TargetPatternUtil.InvalidTargetPatternException e) {
+    InvalidExecutionPlatformLabelException(TargetPatternUtil.InvalidTargetPatternException e) {
       this(e.getInvalidPattern(), e.getTpe());
     }
 
-    public InvalidExecutionPlatformLabelException(String invalidPattern, TargetParsingException e) {
+    InvalidExecutionPlatformLabelException(String invalidPattern, TargetParsingException e) {
       super(
           String.format(
               "invalid registered execution platform '%s': %s", invalidPattern, e.getMessage()),
           e);
+    }
+
+    @Override
+    public DetailedExitCode getDetailedExitCode() {
+      return DetailedExitCode.of(
+          FailureDetail.newBuilder()
+              .setMessage(getMessage())
+              .setAnalysis(Analysis.newBuilder().setCode(Code.INVALID_EXECUTION_PLATFORM))
+              .build());
     }
   }
 
@@ -203,6 +216,26 @@ public class RegisteredExecutionPlatformsFunction implements SkyFunction {
     private RegisteredExecutionPlatformsFunctionException(
         InvalidPlatformException cause, Transience transience) {
       super(cause, transience);
+    }
+  }
+
+  // This class uses AutoValue solely to get default equals/hashCode behavior, which is needed to
+  // make skyframe serialization work properly.
+  @AutoValue
+  @AutoCodec
+  abstract static class HasPlatformInfo extends FilteringPolicy {
+
+    @Override
+    public boolean shouldRetain(Target target, boolean explicit) {
+      if (explicit) {
+        return true;
+      }
+      return PlatformLookupUtil.hasPlatformInfo(target);
+    }
+
+    @AutoCodec.Instantiator
+    static HasPlatformInfo create() {
+      return new AutoValue_RegisteredExecutionPlatformsFunction_HasPlatformInfo();
     }
   }
 }

@@ -23,6 +23,17 @@ import java.util.regex.Pattern;
 
 /**
  * Strings used to express requirements on action execution environments.
+ *
+ * <ol>
+ *   If you are adding a new execution requirement, pay attention to the following:
+ *   <li>If its name starts with one of the supported prefixes, then it can be also used as a tag on
+ *       a target and will be propagated to the execution requirements, see for prefixes {@link
+ *       com.google.devtools.build.lib.packages.TargetUtils#getExecutionInfo}
+ *   <li>If this is a potentially conflicting execution requirements, e.g. you are adding a pair
+ *       'requires-x' and 'block-x', you MUST take care of a potential conflict in the Executor that
+ *       is using new execution requirements. As an example, see {@link
+ *       Spawns#requiresNetwork(com.google.devtools.build.lib.actions.Spawn, boolean)}.
+ * </ol>
  */
 public class ExecutionRequirements {
 
@@ -144,6 +155,22 @@ public class ExecutionRequirements {
   /** If an action supports running in persistent worker mode. */
   public static final String SUPPORTS_WORKERS = "supports-workers";
 
+  public static final String SUPPORTS_MULTIPLEX_WORKERS = "supports-multiplex-workers";
+
+  /** Specify the type of worker protocol the worker uses. */
+  public static final String REQUIRES_WORKER_PROTOCOL = "requires-worker-protocol";
+
+  public static final String SUPPORTS_WORKER_CANCELLATION = "supports-worker-cancellation";
+
+  /** Denotes what the type of worker protocol the worker uses. */
+  public enum WorkerProtocolFormat {
+    JSON,
+    PROTO,
+  }
+
+  /** Override for the action's mnemonic to allow for better worker process reuse. */
+  public static final String WORKER_KEY_MNEMONIC = "worker-key-mnemonic";
+
   public static final ImmutableMap<String, String> WORKER_MODE_ENABLED =
       ImmutableMap.of(SUPPORTS_WORKERS, "1");
 
@@ -164,14 +191,36 @@ public class ExecutionRequirements {
    */
   public static final String NO_CACHE = "no-cache";
 
+  /** Disables remote caching of a spawn. Note: does not disable remote execution */
+  public static final String NO_REMOTE_CACHE = "no-remote-cache";
+
+  /** Disables remote execution of a spawn. Note: does not disable remote caching */
+  public static final String NO_REMOTE_EXEC = "no-remote-exec";
+
+  /** Tag for Google internal use. Requires local execution with correct permissions. */
+  public static final String NO_TESTLOASD = "no-testloasd";
+
+  /**
+   * Disables both remote execution and remote caching of a spawn. This is the equivalent of using
+   * no-remote-cache and no-remote-exec together.
+   */
+  public static final String NO_REMOTE = "no-remote";
+
+  /** Disables local execution of a spawn. */
+  public static final String NO_LOCAL = "no-local";
+
   /** Disables local sandboxing of a spawn. */
   public static final String LEGACY_NOSANDBOX = "nosandbox";
 
   /** Disables local sandboxing of a spawn. */
   public static final String NO_SANDBOX = "no-sandbox";
 
-  /** Disables remote execution of a spawn. */
-  public static final String NO_REMOTE = "no-remote";
+  /**
+   * Set for Xcode-related rules. Used for quality control to make sure that all Xcode-dependent
+   * rules propagate the necessary configurations. Begins with "supports" so as not to be filtered
+   * out for Bazel by {@code TargetUtils}.
+   */
+  public static final String REQUIREMENTS_SET = "supports-xcode-requirements-set";
 
   /**
    * Enables networking for a spawn if possible (only if sandboxing is enabled and if the sandbox
@@ -196,4 +245,25 @@ public class ExecutionRequirements {
 
   /** Use this to request eager fetching of a single remote output into local memory. */
   public static final String REMOTE_EXECUTION_INLINE_OUTPUTS = "internal-inline-outputs";
+
+  /**
+   * Request graceful termination of subprocesses on interrupt (that is, an initial {@code SIGTERM}
+   * followed by a {@code SIGKILL} after a grace period).
+   */
+  public static final String GRACEFUL_TERMINATION = "supports-graceful-termination";
+
+  /** Requires the execution service to support a given xcode version e.g. "xcode_version:1.0". */
+  public static final String REQUIRES_XCODE = "requires-xcode";
+
+  /**
+   * Requires the execution service to support a "label" in addition to the xcode version. The user
+   * specifies the label as a hyphenated extension to their requested version. For example, if the
+   * user requests "--xcode_version=1.0-unstable", the action request will include
+   * "requires-xcode-label:unstable" and "requires-xcode:1.0".
+   */
+  public static final String REQUIRES_XCODE_LABEL = "requires-xcode-label";
+
+  /** Requires the execution service do NOT share caches across different workspace. */
+  public static final String DIFFERENTIATE_WORKSPACE_CACHE =
+      "internal-differentiate-workspace-cache";
 }

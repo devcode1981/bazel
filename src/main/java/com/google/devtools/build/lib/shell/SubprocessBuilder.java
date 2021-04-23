@@ -19,7 +19,6 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import java.io.File;
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.Map;
 import javax.annotation.Nullable;
 
@@ -41,6 +40,7 @@ public class SubprocessBuilder {
     STREAM
   }
 
+  private final SubprocessFactory factory;
   private ImmutableList<String> argv;
   private ImmutableMap<String, String> env;
   private StreamAction stdoutAction;
@@ -51,15 +51,24 @@ public class SubprocessBuilder {
   private long timeoutMillis;
   private boolean redirectErrorStream;
 
-  static SubprocessFactory factory = JavaSubprocessFactory.INSTANCE;
+  static SubprocessFactory defaultFactory = JavaSubprocessFactory.INSTANCE;
 
-  public static void setSubprocessFactory(SubprocessFactory factory) {
-    SubprocessBuilder.factory = factory;
+  /**
+   * Sets the default factory class for creating subprocesses. Passing {@code null} resets it to the
+   * initial state.
+   */
+  public static void setDefaultSubprocessFactory(SubprocessFactory factory) {
+    SubprocessBuilder.defaultFactory = factory != null ? factory : JavaSubprocessFactory.INSTANCE;
   }
 
   public SubprocessBuilder() {
+    this(defaultFactory);
+  }
+
+  public SubprocessBuilder(SubprocessFactory factory) {
     stdoutAction = StreamAction.STREAM;
     stderrAction = StreamAction.STREAM;
+    this.factory = factory;
   }
 
   /**
@@ -83,8 +92,8 @@ public class SubprocessBuilder {
    * @throws IllegalArgumentException if argv is empty, or its first element (which becomes
    *     this.argv[0]) is neither an absolute path nor just a single file name
    */
-  public SubprocessBuilder setArgv(Iterable<String> argv) {
-    this.argv = ImmutableList.copyOf(argv);
+  public SubprocessBuilder setArgv(ImmutableList<String> argv) {
+    this.argv = Preconditions.checkNotNull(argv);
     Preconditions.checkArgument(!this.argv.isEmpty());
     File argv0 = new File(this.argv.get(0));
     Preconditions.checkArgument(
@@ -92,11 +101,6 @@ public class SubprocessBuilder {
         "argv[0] = '%s'; it should be either absolute or just a single file name"
             + " (no directory component)",
         this.argv.get(0));
-    return this;
-  }
-
-  public SubprocessBuilder setArgv(String... argv) {
-    this.setArgv(Arrays.asList(argv));
     return this;
   }
 

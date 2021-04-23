@@ -20,7 +20,6 @@ import com.google.common.escape.CharEscaperBuilder;
 import com.google.common.escape.Escaper;
 import com.google.devtools.build.docgen.DocgenConsts.RuleType;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
-
 import java.util.List;
 
 /**
@@ -37,42 +36,33 @@ public class RuleFamily {
       .addEscapes(new char[] {' ', '/'}, "-")
       .toEscaper();
 
+  private final String summary;
   private final String name;
   private final String id;
 
   private final ImmutableList<RuleDocumentation> binaryRules;
   private final ImmutableList<RuleDocumentation> libraryRules;
   private final ImmutableList<RuleDocumentation> testRules;
-  private final ImmutableList<RuleDocumentation> otherRules1;
-  private final ImmutableList<RuleDocumentation> otherRules2;
+  private final ImmutableList<RuleDocumentation> otherRules;
 
   private final ImmutableList<RuleDocumentation> rules;
 
-  RuleFamily(ListMultimap<RuleType, RuleDocumentation> ruleTypeMap, String name) {
+  RuleFamily(ListMultimap<RuleType, RuleDocumentation> ruleTypeMap, String name, String summary) {
     this.name = name;
     this.id = normalize(name);
+    this.summary = summary;
     this.binaryRules = ImmutableList.copyOf(ruleTypeMap.get(RuleType.BINARY));
     this.libraryRules = ImmutableList.copyOf(ruleTypeMap.get(RuleType.LIBRARY));
     this.testRules = ImmutableList.copyOf(ruleTypeMap.get(RuleType.TEST));
+    this.otherRules = ImmutableList.copyOf(ruleTypeMap.get(RuleType.OTHER));
 
-    final ImmutableList<RuleDocumentation> otherRules =
-        ImmutableList.copyOf(ruleTypeMap.get(RuleType.OTHER));
-    if (otherRules.size() >= 4) {
-      this.otherRules1 = ImmutableList.copyOf(otherRules.subList(0, otherRules.size() / 2));
-      this.otherRules2 =
-          ImmutableList.copyOf(otherRules.subList(otherRules.size() / 2, otherRules.size()));
-    } else {
-      this.otherRules1 = otherRules;
-      this.otherRules2 = ImmutableList.of();
-    }
-
-    rules = ImmutableList.<RuleDocumentation>builder()
-        .addAll(binaryRules)
-        .addAll(libraryRules)
-        .addAll(testRules)
-        .addAll(otherRules1)
-        .addAll(otherRules2)
-        .build();
+    rules =
+        ImmutableList.<RuleDocumentation>builder()
+            .addAll(binaryRules)
+            .addAll(libraryRules)
+            .addAll(testRules)
+            .addAll(otherRules)
+            .build();
   }
 
   /*
@@ -92,6 +82,10 @@ public class RuleFamily {
     return name;
   }
 
+  public String getSummary() {
+    return summary;
+  }
+
   public String getId() {
     return id;
   }
@@ -108,12 +102,8 @@ public class RuleFamily {
     return testRules;
   }
 
-  public List<RuleDocumentation> getOtherRules1() {
-    return otherRules1;
-  }
-
-  public List<RuleDocumentation> getOtherRules2() {
-    return otherRules2;
+  public List<RuleDocumentation> getOtherRules() {
+    return otherRules;
   }
 
   public List<RuleDocumentation> getRules() {

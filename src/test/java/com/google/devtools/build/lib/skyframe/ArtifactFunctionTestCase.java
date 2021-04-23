@@ -17,23 +17,28 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.actions.ActionAnalysisMetadata;
 import com.google.devtools.build.lib.actions.ActionKeyContext;
-import com.google.devtools.build.lib.actions.ActionLookupValue.ActionLookupKey;
+import com.google.devtools.build.lib.actions.ActionLookupKey;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.FileStateValue;
 import com.google.devtools.build.lib.actions.FileValue;
 import com.google.devtools.build.lib.actions.util.InjectedActionLookupKey;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.ServerDirectories;
+import com.google.devtools.build.lib.packages.WorkspaceFileValue;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
 import com.google.devtools.build.lib.skyframe.ExternalFilesHelper.ExternalFileAction;
 import com.google.devtools.build.lib.skyframe.PackageLookupFunction.CrossRepositoryLabelViolationStrategy;
 import com.google.devtools.build.lib.testutil.TestConstants;
+import com.google.devtools.build.lib.testutil.TestPackageFactoryBuilderFactory;
 import com.google.devtools.build.lib.testutil.TestRuleClassProvider;
 import com.google.devtools.build.lib.testutil.TestUtils;
 import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
+import com.google.devtools.build.lib.vfs.DigestHashFunction;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
+import com.google.devtools.build.lib.vfs.UnixGlob;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
 import com.google.devtools.build.skyframe.InMemoryMemoizingEvaluator;
 import com.google.devtools.build.skyframe.MemoizingEvaluator;
@@ -70,8 +75,9 @@ abstract class ArtifactFunctionTestCase {
   protected SkyFunction delegateActionExecutionFunction;
 
   @Before
-  public void baseSetUp() throws Exception  {
-    setupRoot(new CustomInMemoryFs());
+  public void baseSetUp() throws Exception {
+    CustomInMemoryFs fs = new CustomInMemoryFs();
+    setupRoot(fs);
     AtomicReference<PathPackageLocator> pkgLocator =
         new AtomicReference<>(
             new PathPackageLocator(
@@ -84,10 +90,12 @@ abstract class ArtifactFunctionTestCase {
             root,
             /* defaultSystemJavabase= */ null,
             TestConstants.PRODUCT_NAME);
-    ExternalFilesHelper externalFilesHelper = ExternalFilesHelper.createForTesting(
-        pkgLocator,
-        ExternalFileAction.DEPEND_ON_EXTERNAL_PKG_FOR_EXTERNAL_REPO_PATHS,
-        directories);
+    ExternalFilesHelper externalFilesHelper =
+        ExternalFilesHelper.createForTesting(
+            pkgLocator,
+            ExternalFileAction.DEPEND_ON_EXTERNAL_PKG_FOR_EXTERNAL_REPO_PATHS,
+            directories,
+            BazelSkyframeExecutorConstants.EXTERNAL_PACKAGE_HELPER);
     differencer = new SequencedRecordingDifferencer();
     evaluator =
         new InMemoryMemoizingEvaluator(
@@ -95,9 +103,13 @@ abstract class ArtifactFunctionTestCase {
                 .put(
                     FileStateValue.FILE_STATE,
                     new FileStateFunction(
-                        new AtomicReference<TimestampGranularityMonitor>(), externalFilesHelper))
+                        new AtomicReference<TimestampGranularityMonitor>(),
+                        new AtomicReference<>(UnixGlob.DEFAULT_SYSCALLS),
+                        externalFilesHelper))
                 .put(FileValue.FILE, new FileFunction(pkgLocator))
-                .put(Artifact.ARTIFACT, new ArtifactFunction(() -> true))
+                .put(
+                    Artifact.ARTIFACT,
+                    new ArtifactFunction(() -> true, MetadataConsumerForMetrics.NO_OP))
                 .put(SkyFunctions.ACTION_EXECUTION, new SimpleActionExecutionFunction())
                 .put(
                     SkyFunctions.PACKAGE,
@@ -107,19 +119,21 @@ abstract class ArtifactFunctionTestCase {
                     new PackageLookupFunction(
                         null,
                         CrossRepositoryLabelViolationStrategy.ERROR,
-                        BazelSkyframeExecutorConstants.BUILD_FILES_BY_PRIORITY))
+                        BazelSkyframeExecutorConstants.BUILD_FILES_BY_PRIORITY,
+                        BazelSkyframeExecutorConstants.EXTERNAL_PACKAGE_HELPER))
                 .put(
-                    SkyFunctions.WORKSPACE_AST,
-                    new WorkspaceASTFunction(TestRuleClassProvider.getRuleClassProvider()))
-                .put(
-                    SkyFunctions.WORKSPACE_FILE,
+                    WorkspaceFileValue.WORKSPACE_FILE,
                     new WorkspaceFileFunction(
                         TestRuleClassProvider.getRuleClassProvider(),
-                        TestConstants.PACKAGE_FACTORY_BUILDER_FACTORY_FOR_TESTING
+                        TestPackageFactoryBuilderFactory.getInstance()
                             .builder(directories)
-                            .build(TestRuleClassProvider.getRuleClassProvider()),
-                        directories))
-                .put(SkyFunctions.EXTERNAL_PACKAGE, new ExternalPackageFunction())
+                            .build(TestRuleClassProvider.getRuleClassProvider(), fs),
+                        directories,
+                        /*bzlLoadFunctionForInlining=*/ null))
+                .put(
+                    SkyFunctions.EXTERNAL_PACKAGE,
+                    new ExternalPackageFunction(
+                        BazelSkyframeExecutorConstants.EXTERNAL_PACKAGE_HELPER))
                 .put(
                     SkyFunctions.ACTION_TEMPLATE_EXPANSION,
                     new ActionTemplateExpansionFunction(actionKeyContext))
@@ -161,8 +175,12 @@ abstract class ArtifactFunctionTestCase {
 
   /** InMemoryFileSystem that can pretend to do a fast digest. */
   protected class CustomInMemoryFs extends InMemoryFileSystem {
+    CustomInMemoryFs() {
+      super(DigestHashFunction.SHA256);
+    }
+
     @Override
-    protected byte[] getFastDigest(Path path) throws IOException {
+    protected byte[] getFastDigest(PathFragment path) throws IOException {
       return fastDigest ? getDigest(path) : null;
     }
   }

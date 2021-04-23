@@ -17,22 +17,25 @@ import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.packages.BuiltinProvider;
 import com.google.devtools.build.lib.packages.NativeInfo;
-import com.google.devtools.build.lib.skylarkbuildapi.android.ProguardMappingProviderApi;
-import com.google.devtools.build.lib.syntax.EvalException;
+import com.google.devtools.build.lib.starlarkbuildapi.android.ProguardMappingProviderApi;
+import net.starlark.java.eval.EvalException;
 
 /** A target that can provide a proguard obfuscation mapping to Android binaries or tests. */
 @Immutable
 public final class ProguardMappingProvider extends NativeInfo
     implements ProguardMappingProviderApi<Artifact> {
 
-  public static final String PROVIDER_NAME = "ProguardMappingInfo";
   public static final Provider PROVIDER = new Provider();
 
   private final Artifact proguardMapping;
 
   public ProguardMappingProvider(Artifact proguardMapping) {
-    super(PROVIDER);
     this.proguardMapping = proguardMapping;
+  }
+
+  @Override
+  public Provider getProvider() {
+    return PROVIDER;
   }
 
   @Override
@@ -45,7 +48,7 @@ public final class ProguardMappingProvider extends NativeInfo
       implements ProguardMappingProviderApi.Provider<Artifact> {
 
     private Provider() {
-      super(PROVIDER_NAME, ProguardMappingProvider.class);
+      super(NAME, ProguardMappingProvider.class);
     }
 
     @Override

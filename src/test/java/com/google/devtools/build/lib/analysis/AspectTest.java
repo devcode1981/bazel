@@ -15,11 +15,10 @@ package com.google.devtools.build.lib.analysis;
 
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.devtools.build.lib.analysis.BaseRuleClasses.ACTION_LISTENER;
-import static com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode.TARGET;
 import static com.google.devtools.build.lib.packages.Attribute.attr;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL_LIST;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
@@ -44,7 +43,6 @@ import com.google.devtools.build.lib.packages.AspectDefinition;
 import com.google.devtools.build.lib.packages.AspectParameters;
 import com.google.devtools.build.lib.packages.Attribute.LateBoundDefault;
 import com.google.devtools.build.lib.packages.NativeAspectClass;
-import com.google.devtools.build.lib.skyframe.AspectValue;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetAndData;
 import com.google.devtools.build.lib.testutil.TestConstants;
 import com.google.devtools.build.lib.vfs.ModifiedFileSet;
@@ -77,7 +75,7 @@ public class AspectTest extends AnalysisTestCase {
         "alias(name='b', actual=select({'//conditions:default': ':c'}))",
         "base(name='c')");
     ConfiguredTarget a = getConfiguredTarget("//a:a");
-    assertThat(a.getProvider(RuleInfo.class).getData())
+    assertThat(a.getProvider(RuleInfo.class).getData().toList())
         .containsExactly("aspect //a:c", "rule //a:a");
   }
 
@@ -92,7 +90,7 @@ public class AspectTest extends AnalysisTestCase {
         "base(name='e')");
 
     ConfiguredTarget a = getConfiguredTarget("//a:a");
-    assertThat(a.getProvider(RuleInfo.class).getData())
+    assertThat(a.getProvider(RuleInfo.class).getData().toList())
         .containsExactly("aspect //a:e", "rule //a:a");
   }
 
@@ -105,7 +103,7 @@ public class AspectTest extends AnalysisTestCase {
         "alias(name='c', actual=select({'//conditions:default': ':d'}))",
         "base(name='d')");
     ConfiguredTarget a = getConfiguredTarget("//a:a");
-    assertThat(a.getProvider(RuleInfo.class).getData())
+    assertThat(a.getProvider(RuleInfo.class).getData().toList())
         .containsExactly("aspect //a:d", "rule //a:a");
   }
 
@@ -117,7 +115,7 @@ public class AspectTest extends AnalysisTestCase {
         "aspect(name='b', foo=[])");
 
     ConfiguredTarget a = getConfiguredTarget("//a:a");
-    assertThat(a.getProvider(RuleInfo.class).getData())
+    assertThat(a.getProvider(RuleInfo.class).getData().toList())
         .containsExactly("aspect //a:b", "rule //a:a");
   }
 
@@ -131,7 +129,7 @@ public class AspectTest extends AnalysisTestCase {
         "liar(name='b', foo=[])");
 
     ConfiguredTarget a = getConfiguredTarget("//a:a");
-    assertThat(a.getProvider(RuleInfo.class).getData()).containsExactly("rule //a:a");
+    assertThat(a.getProvider(RuleInfo.class).getData().toList()).containsExactly("rule //a:a");
   }
 
   @Test
@@ -145,7 +143,7 @@ public class AspectTest extends AnalysisTestCase {
         "liar(name='b', foo=[])");
 
     ConfiguredTarget a = getConfiguredTarget("//a:a");
-    assertThat(a.getProvider(RuleInfo.class).getData()).containsExactly("rule //a:a");
+    assertThat(a.getProvider(RuleInfo.class).getData().toList()).containsExactly("rule //a:a");
   }
 
   @Test
@@ -161,7 +159,7 @@ public class AspectTest extends AnalysisTestCase {
     );
 
     ConfiguredTarget a = getConfiguredTarget("//a:a");
-    assertThat(a.getProvider(RuleInfo.class).getData()).containsExactly("rule //a:a");
+    assertThat(a.getProvider(RuleInfo.class).getData().toList()).containsExactly("rule //a:a");
   }
 
   @Test
@@ -175,8 +173,8 @@ public class AspectTest extends AnalysisTestCase {
         "honest(name='b', foo=[])");
 
     ConfiguredTarget a = getConfiguredTarget("//a:a");
-    assertThat(a.getProvider(RuleInfo.class).getData()).containsExactly(
-        "rule //a:a", "aspect //a:b");
+    assertThat(a.getProvider(RuleInfo.class).getData().toList())
+        .containsExactly("rule //a:a", "aspect //a:b");
   }
 
   @Test
@@ -192,8 +190,8 @@ public class AspectTest extends AnalysisTestCase {
     );
 
     ConfiguredTarget a = getConfiguredTarget("//a:a");
-    assertThat(a.getProvider(RuleInfo.class).getData()).containsExactly(
-        "rule //a:a", "aspect //a:b", "aspect //a:c");
+    assertThat(a.getProvider(RuleInfo.class).getData().toList())
+        .containsExactly("rule //a:a", "aspect //a:b", "aspect //a:c");
   }
 
 
@@ -222,7 +220,7 @@ public class AspectTest extends AnalysisTestCase {
         reporter, ModifiedFileSet.EVERYTHING_MODIFIED, Root.fromPath(rootDirectory));
 
     ConfiguredTarget a = getConfiguredTarget("//a:a");
-    assertThat(a.getProvider(RuleInfo.class).getData())
+    assertThat(a.getProvider(RuleInfo.class).getData().toList())
         .containsExactly("rule //a:a", "aspect //a:b");
   }
 
@@ -237,7 +235,7 @@ public class AspectTest extends AnalysisTestCase {
         "honest(name='b', foo=[])");
 
     ConfiguredTarget a = getConfiguredTarget("//a:a");
-    assertThat(a.getProvider(RuleInfo.class).getData())
+    assertThat(a.getProvider(RuleInfo.class).getData().toList())
         .containsExactly("rule //a:a", "aspect //a:b");
   }
 
@@ -252,7 +250,7 @@ public class AspectTest extends AnalysisTestCase {
         "honest2(name='c', foo=[])");
 
     ConfiguredTarget a = getConfiguredTarget("//a:a");
-    assertThat(a.getProvider(RuleInfo.class).getData())
+    assertThat(a.getProvider(RuleInfo.class).getData().toList())
         .containsExactly("rule //a:a", "aspect //a:b", "aspect //a:c");
   }
 
@@ -271,7 +269,7 @@ public class AspectTest extends AnalysisTestCase {
         "honest(name='b', foo=[':c'])");
 
     ConfiguredTarget a = getConfiguredTarget("//a:a");
-    assertThat(a.getProvider(TestAspects.RuleInfo.class).getData())
+    assertThat(a.getProvider(TestAspects.RuleInfo.class).getData().toList())
         .containsExactly(
             "rule //a:a",
             "aspect //a:b data //a:q $dep:[ //a:q]",
@@ -291,12 +289,7 @@ public class AspectTest extends AnalysisTestCase {
     reporter.removeHandler(failFastHandler);
     // getConfiguredTarget() uses a separate code path that does not hit
     // SkyframeBuildView#configureTargets
-    try {
-      update("//a:a");
-      fail();
-    } catch (ViewCreationFailedException e) {
-      // expected
-    }
+    assertThrows(ViewCreationFailedException.class, () -> update("//a:a"));
     assertContainsEvent("Aspect error");
   }
 
@@ -314,12 +307,7 @@ public class AspectTest extends AnalysisTestCase {
     reporter.removeHandler(failFastHandler);
     // getConfiguredTarget() uses a separate code path that does not hit
     // SkyframeBuildView#configureTargets
-    try {
-      update("//a:a");
-      fail();
-    } catch (ViewCreationFailedException e) {
-      // expected
-    }
+    assertThrows(ViewCreationFailedException.class, () -> update("//a:a"));
     assertContainsEvent("Aspect error");
   }
 
@@ -335,6 +323,26 @@ public class AspectTest extends AnalysisTestCase {
 
     getConfiguredTarget("//a:a");
     assertContainsEventWithFrequency("bad aspect", 0);
+  }
+
+  @Test
+  public void aspectDependsOnPackageGroup() throws Exception {
+    setRulesAvailableInTests(
+        TestAspects.BASE_RULE, TestAspects.PACKAGE_GROUP_ATTRIBUTE_ASPECT_RULE);
+    pkg("extra", "package_group(name='extra')");
+    pkg("a", "rule_with_package_group_deps_aspect(name='a', foo=[':b'])", "base(name='b')");
+
+    getConfiguredTarget("//a:a");
+    assertContainsEventWithFrequency("bad aspect", 0);
+  }
+
+  @Test
+  public void aspectWithComputedAttribute() throws Exception {
+    setRulesAvailableInTests(TestAspects.BASE_RULE, TestAspects.COMPUTED_ATTRIBUTE_ASPECT_RULE);
+
+    pkg("a", "rule_with_computed_deps_aspect(name='a', foo=[':b'])", "base(name='b')");
+
+    getConfiguredTarget("//a:a");
   }
 
   @Test
@@ -376,7 +384,7 @@ public class AspectTest extends AnalysisTestCase {
         "aspect(name='b', foo=[])");
 
     ConfiguredTarget a = getConfiguredTarget("//a:a");
-    assertThat(a.getProvider(RuleInfo.class).getData())
+    assertThat(a.getProvider(RuleInfo.class).getData().toList())
         .containsExactly("aspect //a:b", "rule //a:a");
   }
 
@@ -389,7 +397,7 @@ public class AspectTest extends AnalysisTestCase {
         "simple(name='b')");
 
     ConfiguredTarget a = getConfiguredTarget("//a:a");
-    assertThat(a.getProvider(RuleInfo.class).getData()).containsExactly("foo", "bar");
+    assertThat(a.getProvider(RuleInfo.class).getData().toList()).containsExactly("foo", "bar");
   }
 
   @Test
@@ -401,7 +409,7 @@ public class AspectTest extends AnalysisTestCase {
         "honest(name='b', foo=[])");
 
     ConfiguredTarget a = getConfiguredTarget("//a:a");
-    assertThat(a.getProvider(RuleInfo.class).getData())
+    assertThat(a.getProvider(RuleInfo.class).getData().toList())
         .containsExactly("rule //a:a", "aspect //a:b data hello");
   }
 
@@ -437,10 +445,13 @@ public class AspectTest extends AnalysisTestCase {
 
       @Override
       public ConfiguredAspect create(
-          ConfiguredTargetAndData ctadBase, RuleContext ruleContext, AspectParameters parameters)
+          ConfiguredTargetAndData ctadBase,
+          RuleContext ruleContext,
+          AspectParameters parameters,
+          String toolsRepository)
           throws InterruptedException, ActionConflictException {
-        Object lateBoundPrereq = ruleContext.getPrerequisite(":late", TARGET);
-        return new ConfiguredAspect.Builder(this, parameters, ruleContext)
+        Object lateBoundPrereq = ruleContext.getPrerequisite(":late");
+        return new ConfiguredAspect.Builder(ruleContext)
             .addProvider(
                 AspectInfo.class,
                 new AspectInfo(
@@ -469,7 +480,7 @@ public class AspectTest extends AnalysisTestCase {
         "testrule(name='a', foo=[':b'])",
         "testrule(name='b')");
     ConfiguredTarget a = getConfiguredTarget("//a:a");
-    assertThat(a.getProvider(RuleInfo.class).getData()).contains("empty");
+    assertThat(a.getProvider(RuleInfo.class).getData().toList()).contains("empty");
   }
 
   /**
@@ -490,7 +501,7 @@ public class AspectTest extends AnalysisTestCase {
                                     .aspect(AspectThatRegistersAction.INSTANCE))
                             .add(
                                 attr(":action_listener", LABEL_LIST)
-                                    .cfg(HostTransition.INSTANCE)
+                                    .cfg(HostTransition.createFactory())
                                     .value(ACTION_LISTENER)));
 
     public static class AspectThatRegistersAction extends NativeAspectClass
@@ -507,10 +518,13 @@ public class AspectTest extends AnalysisTestCase {
 
       @Override
       public ConfiguredAspect create(
-          ConfiguredTargetAndData ctadBase, RuleContext ruleContext, AspectParameters parameters)
+          ConfiguredTargetAndData ctadBase,
+          RuleContext ruleContext,
+          AspectParameters parameters,
+          String toolsRepository)
           throws InterruptedException, ActionConflictException {
         ruleContext.registerAction(new NullAction(ruleContext.createOutputArtifact()));
-        return new ConfiguredAspect.Builder(this, parameters, ruleContext).build();
+        return new ConfiguredAspect.Builder(ruleContext).build();
       }
     }
   }
@@ -540,9 +554,9 @@ public class AspectTest extends AnalysisTestCase {
     update();
 
     ConfiguredTarget a = getConfiguredTarget("//a:a");
-    NestedSet<Artifact> extraActionArtifacts =
+    NestedSet<Artifact.DerivedArtifact> extraActionArtifacts =
         a.getProvider(ExtraActionArtifactsProvider.class).getTransitiveExtraActionArtifacts();
-    for (Artifact artifact : extraActionArtifacts) {
+    for (Artifact artifact : extraActionArtifacts.toList()) {
       assertThat(artifact.getOwnerLabel()).isEqualTo(Label.create("@//a", "b"));
     }
   }
@@ -558,8 +572,8 @@ public class AspectTest extends AnalysisTestCase {
         "all_attributes_aspect(name='x', foo=[':a'])");
 
     ConfiguredTarget a = getConfiguredTarget("//a:x");
-    assertThat(a.getProvider(RuleInfo.class).getData())
-        .containsExactly("aspect //a:a",  "aspect //a:b", "aspect //a:c", "rule //a:x");
+    assertThat(a.getProvider(RuleInfo.class).getData().toList())
+        .containsExactly("aspect //a:a", "aspect //a:b", "aspect //a:c", "rule //a:x");
   }
 
   /**
@@ -593,11 +607,11 @@ public class AspectTest extends AnalysisTestCase {
         "x/extension.bzl",
         "def _aspect_impl(target, ctx):",
         "  ctx.actions.do_nothing(mnemonic='Mnemonic')",
-        "  return struct()",
+        "  return []",
         "aspect1 = aspect(_aspect_impl, attr_aspects=['deps'])",
         "aspect2 = aspect(_aspect_impl, attr_aspects=['extra_deps'])",
         "def _rule_impl(ctx):",
-        "  return struct()",
+        "  return []",
         "injector1 = rule(_rule_impl, attrs = { 'deps' : attr.label_list(aspects = [aspect1]) })",
         "null_rule = rule(_rule_impl, attrs = { 'deps' : attr.label_list() })",
         "injector2 = rule(",
@@ -608,7 +622,7 @@ public class AspectTest extends AnalysisTestCase {
         "extra_action(name='xa', cmd='echo dont-care')",
         "action_listener(name='listener', mnemonics=['Mnemonic'], extra_actions=[':xa'])");
 
-    // Sanity check: //x:d injects an aspect which produces some extra-action.
+    // Check: //x:d injects an aspect which produces some extra-action.
     {
       AnalysisResult analysisResult = update("//x:d");
 
@@ -658,17 +672,16 @@ public class AspectTest extends AnalysisTestCase {
         "x/extension.bzl",
         "def _aspect_impl(target, ctx):",
         "  ctx.actions.do_nothing(mnemonic='Mnemonic')",
-        "  return struct()",
+        "  return []",
         "aspect1 = aspect(_aspect_impl, attr_aspects=['deps'], attrs =",
         "    {'param': attr.string(values = ['a', 'b'])})",
         "aspect2 = aspect(_aspect_impl, attr_aspects=['deps'])",
         "def _rule_impl(ctx):",
-        "  return struct()",
+        "  return []",
         "injector1 = rule(_rule_impl, attrs =",
         "    { 'deps' : attr.label_list(aspects = [aspect1]), 'param' : attr.string() })",
         "injector2 = rule(_rule_impl, attrs = { 'deps' : attr.label_list(aspects = [aspect2]) })",
-        "null_rule = rule(_rule_impl, attrs = { 'deps' : attr.label_list() })"
-    );
+        "null_rule = rule(_rule_impl, attrs = { 'deps' : attr.label_list() })");
 
     scratch.file(
         "pkg1/BUILD",
@@ -679,6 +692,41 @@ public class AspectTest extends AnalysisTestCase {
 
     // Implicitly check that update() didn't throw an exception because of two actions producing
     // the same outputs.
+  }
+
+  @Test
+  public void sharedArtifactsInAspect() throws Exception {
+    scratch.file(
+        "foo/shared_aspect.bzl",
+        "def _shared_aspect_impl(target, ctx):",
+        "  shared_file = ctx.actions.declare_file('shared_file')",
+        "  ctx.actions.write(output=shared_file, content='Shared content')",
+        "  lib = ctx.rule.attr.lib",
+        "  if lib:",
+        "    result = depset([shared_file], transitive=[ctx.rule.attr.lib.prov])",
+        "  else:",
+        "    result = depset([shared_file])",
+        "  return struct(prov=result)",
+        "",
+        "shared_aspect = aspect(implementation = _shared_aspect_impl,",
+        "                       attr_aspects = ['lib'])",
+        "",
+        "def _rule_impl(ctx):",
+        "  pass",
+        "",
+        "simple_rule = rule(",
+        "    implementation=_rule_impl,",
+        "    attrs = {'lib': attr.label(providers = ['prov'],",
+        "                               aspects=[shared_aspect])})");
+    scratch.file(
+        "foo/BUILD",
+        "load(':shared_aspect.bzl', 'shared_aspect', 'simple_rule')",
+        "",
+        "simple_rule(name = 'top_rule', lib = ':first_dep')",
+        "simple_rule(name = 'first_dep', lib = ':second_dep')",
+        "simple_rule(name = 'second_dep')");
+    // Confirm that load is successful and doesn't crash.
+    update("//foo:top_rule");
   }
 
   @Test
@@ -697,13 +745,9 @@ public class AspectTest extends AnalysisTestCase {
     update();
 
     ConfiguredTarget a = getConfiguredTarget("//a:x");
-    assertThat(a.getProvider(RuleInfo.class).getData())
+    assertThat(a.getProvider(RuleInfo.class).getData().toList())
         .containsExactly(
-            "aspect //a:a",
-            "aspect //a:b",
-            "aspect //a:c",
-            "aspect //extra:extra",
-            "rule //a:x");
+            "aspect //a:a", "aspect //a:b", "aspect //a:c", "aspect //extra:extra", "rule //a:x");
   }
 
 
@@ -725,13 +769,9 @@ public class AspectTest extends AnalysisTestCase {
     update();
 
     ConfiguredTarget a = getConfiguredTarget("//a:x");
-    assertThat(a.getProvider(RuleInfo.class).getData())
+    assertThat(a.getProvider(RuleInfo.class).getData().toList())
         .containsExactly(
-            "aspect //a:a",
-            "aspect //a:b",
-            "aspect //a:c",
-            "aspect //extra:extra",
-            "rule //a:x");
+            "aspect //a:a", "aspect //a:b", "aspect //a:c", "aspect //extra:extra", "rule //a:x");
   }
 
   /**
@@ -749,7 +789,7 @@ public class AspectTest extends AnalysisTestCase {
         "all_attributes_with_tool_aspect(name='x', foo=[':a'])");
 
     ConfiguredTarget a = getConfiguredTarget("//a:x");
-    assertThat(a.getProvider(RuleInfo.class).getData())
+    assertThat(a.getProvider(RuleInfo.class).getData().toList())
         .containsExactly("aspect //a:a", "rule //a:x");
   }
 
@@ -770,7 +810,7 @@ public class AspectTest extends AnalysisTestCase {
         "all_attributes_with_tool_aspect(name='x', foo=[':a'])");
 
     ConfiguredTarget a = getConfiguredTarget("//a:x");
-    assertThat(a.getProvider(RuleInfo.class).getData())
+    assertThat(a.getProvider(RuleInfo.class).getData().toList())
         .containsExactly(
             "aspect //a:a", "aspect //a:b", "aspect //a:c", "aspect //a:tool", "rule //a:x");
   }
@@ -811,9 +851,9 @@ public class AspectTest extends AnalysisTestCase {
     AnalysisResult analysisResult = update(new EventBus(), defaultFlags(),
         ImmutableList.of(aspectApplyingToFiles.getName()),
         "//a:x_deploy.jar");
-    AspectValue aspect = Iterables.getOnlyElement(analysisResult.getAspects());
+    ConfiguredAspect aspect = Iterables.getOnlyElement(analysisResult.getAspectsMap().values());
     AspectApplyingToFiles.Provider provider =
-        aspect.getConfiguredAspect().getProvider(AspectApplyingToFiles.Provider.class);
+        aspect.getProvider(AspectApplyingToFiles.Provider.class);
     assertThat(provider.getLabel())
         .isEqualTo(Label.parseAbsoluteUnchecked("//a:x_deploy.jar"));
   }
@@ -832,9 +872,8 @@ public class AspectTest extends AnalysisTestCase {
     AnalysisResult analysisResult = update(new EventBus(), defaultFlags(),
         ImmutableList.of(aspectApplyingToFiles.getName()),
         "//a:x.java");
-    AspectValue aspect = Iterables.getOnlyElement(analysisResult.getAspects());
-    assertThat(aspect.getConfiguredAspect().getProvider(AspectApplyingToFiles.Provider.class))
-        .isNull();
+    ConfiguredAspect aspect = Iterables.getOnlyElement(analysisResult.getAspectsMap().values());
+    assertThat(aspect.getProvider(AspectApplyingToFiles.Provider.class)).isNull();
   }
 
   @Test
@@ -850,9 +889,108 @@ public class AspectTest extends AnalysisTestCase {
             defaultFlags(),
             ImmutableList.of(aspectApplyingToFiles.getName(), aspectApplyingToFiles.getName()),
             "//a:x_deploy.jar");
-    AspectValue aspect = Iterables.getOnlyElement(analysisResult.getAspects());
+    ConfiguredAspect aspect = Iterables.getOnlyElement(analysisResult.getAspectsMap().values());
     AspectApplyingToFiles.Provider provider =
-        aspect.getConfiguredAspect().getProvider(AspectApplyingToFiles.Provider.class);
+        aspect.getProvider(AspectApplyingToFiles.Provider.class);
     assertThat(provider.getLabel()).isEqualTo(Label.parseAbsoluteUnchecked("//a:x_deploy.jar"));
+  }
+
+  @Test
+  public void sameConfiguredAttributeOnAspectAndRule() throws Exception {
+    scratch.file(
+        "a/a.bzl",
+        "def _a_impl(t, ctx):",
+        "  return [DefaultInfo()]",
+        "def _r_impl(ctx):",
+        "  return [DefaultInfo()]",
+        "a = aspect(",
+        "  implementation = _a_impl,",
+        "  attrs = {'_f': attr.label(",
+        "                   default = configuration_field(",
+        "                     fragment = 'cpp', name = 'cc_toolchain'))})",
+        "r = rule(",
+        "  implementation = _r_impl,",
+        "  attrs = {'_f': attr.label(",
+        "                   default = configuration_field(",
+        "                     fragment = 'cpp', name = 'cc_toolchain')),",
+        "           'dep': attr.label(aspects=[a])})");
+
+    scratch.file("a/BUILD", "load(':a.bzl', 'r')", "r(name='r')");
+
+    setRulesAndAspectsAvailableInTests(ImmutableList.of(), ImmutableList.of());
+    getConfiguredTarget("//a:r");
+  }
+
+  @Test
+  public void topLevelConflictDetected() throws Exception {
+    String bzlFileTemplate =
+        String.join(
+            "\n",
+            "def _aspect1_impl(target, ctx):",
+            "  outfile = ctx.actions.declare_file('aspect.out')",
+            "  ctx.actions.run_shell(",
+            "    outputs = [outfile],",
+            "    progress_message = 'Action for aspect 1',",
+            "    command = 'echo \"1\" > ' + outfile.path,",
+            "  )",
+            "  return [OutputGroupInfo(files = [outfile])]",
+            "def _aspect2_impl(target, ctx):",
+            "  outfile = ctx.actions.declare_file('aspect.out')",
+            "  ctx.actions.run_shell(",
+            "    outputs = [outfile],",
+            "    progress_message = 'Action for aspect 2',",
+            "    command = 'echo \"%s\" > ' + outfile.path,",
+            "  )",
+            "  return [OutputGroupInfo(files = [outfile])]",
+            "aspect1 = aspect(implementation = _aspect1_impl)",
+            "aspect2 = aspect(implementation = _aspect2_impl)");
+    scratch.file("foo/aspect.bzl", String.format(bzlFileTemplate, "2"));
+    scratch.file("foo/BUILD", "sh_library(name = 'foo', srcs = ['foo.sh'])");
+    // Expect errors.
+    reporter.removeHandler(failFastHandler);
+    ViewCreationFailedException exception =
+        assertThrows(
+            ViewCreationFailedException.class,
+            () ->
+                update(
+                    new EventBus(),
+                    defaultFlags(),
+                    ImmutableList.of("//foo:aspect.bzl%aspect1", "//foo:aspect.bzl%aspect2"),
+                    "//foo:foo"));
+    assertThat(exception)
+        .hasMessageThat()
+        .containsMatch(
+            "ConflictException: for foo/aspect.out, previous action: action 'Action for aspect .',"
+                + " attempted action: action 'Action for aspect .'");
+
+    // Fix bzl file so actions are shared: analysis should succeed now.
+    scratch.overwriteFile("foo/aspect.bzl", String.format(bzlFileTemplate, "1"));
+    reporter.addHandler(failFastHandler);
+    AnalysisResult result =
+        update(
+            new EventBus(),
+            defaultFlags(),
+            ImmutableList.of("//foo:aspect.bzl%aspect1", "//foo:aspect.bzl%aspect2"),
+            "//foo:foo");
+    assertThat(result.getAspectsMap()).hasSize(2);
+
+    // Break bzl file again: we should notice.
+    scratch.overwriteFile("foo/aspect.bzl", String.format(bzlFileTemplate, "2"));
+    // Expect errors.
+    reporter.removeHandler(failFastHandler);
+    exception =
+        assertThrows(
+            ViewCreationFailedException.class,
+            () ->
+                update(
+                    new EventBus(),
+                    defaultFlags(),
+                    ImmutableList.of("//foo:aspect.bzl%aspect1", "//foo:aspect.bzl%aspect2"),
+                    "//foo:foo"));
+    assertThat(exception)
+        .hasMessageThat()
+        .containsMatch(
+            "ConflictException: for foo/aspect.out, previous action: action 'Action for aspect .',"
+                + " attempted action: action 'Action for aspect .'");
   }
 }

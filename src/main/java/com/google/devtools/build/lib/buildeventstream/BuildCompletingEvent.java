@@ -15,7 +15,9 @@
 package com.google.devtools.build.lib.buildeventstream;
 
 import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos.BuildEventId;
 import com.google.devtools.build.lib.util.ExitCode;
+import com.google.protobuf.util.Timestamps;
 import java.util.Collection;
 
 /**
@@ -27,17 +29,25 @@ import java.util.Collection;
 public abstract class BuildCompletingEvent implements BuildEvent {
   private final ExitCode exitCode;
   private final long finishTimeMillis;
+
+  /** Was the build suspended mid-build (e.g. hardware sleep, SIGSTOP). */
+  private final boolean wasSuspended;
+
   private final Collection<BuildEventId> children;
 
   public BuildCompletingEvent(
-      ExitCode exitCode, long finishTimeMillis, Collection<BuildEventId> children) {
+      ExitCode exitCode,
+      long finishTimeMillis,
+      Collection<BuildEventId> children,
+      boolean wasSuspended) {
     this.exitCode = exitCode;
     this.finishTimeMillis = finishTimeMillis;
     this.children = children;
+    this.wasSuspended = wasSuspended;
   }
 
-  public BuildCompletingEvent(ExitCode exitCode, long finishTimeMillis) {
-    this(exitCode, finishTimeMillis, ImmutableList.of());
+  public BuildCompletingEvent(ExitCode exitCode, long finishTimeMillis, boolean wasSuspended) {
+    this(exitCode, finishTimeMillis, ImmutableList.of(), wasSuspended);
   }
 
   public ExitCode getExitCode() {
@@ -46,7 +56,7 @@ public abstract class BuildCompletingEvent implements BuildEvent {
 
   @Override
   public BuildEventId getEventId() {
-    return BuildEventId.buildFinished();
+    return BuildEventIdUtil.buildFinished();
   }
 
   @Override
@@ -62,11 +72,18 @@ public abstract class BuildCompletingEvent implements BuildEvent {
             .setCode(exitCode.getNumericExitCode())
             .build();
 
+    BuildEventStreamProtos.BuildFinished.AnomalyReport protoAnamolyReport =
+        BuildEventStreamProtos.BuildFinished.AnomalyReport.newBuilder()
+            .setWasSuspended(wasSuspended)
+            .build();
+
     BuildEventStreamProtos.BuildFinished finished =
         BuildEventStreamProtos.BuildFinished.newBuilder()
             .setOverallSuccess(ExitCode.SUCCESS.equals(exitCode))
             .setExitCode(protoExitCode)
+            .setFinishTime(Timestamps.fromMillis(finishTimeMillis))
             .setFinishTimeMillis(finishTimeMillis)
+            .setAnomalyReport(protoAnamolyReport)
             .build();
     return GenericBuildEvent.protoChaining(this).setFinished(finished).build();
   }

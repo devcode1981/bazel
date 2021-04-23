@@ -14,6 +14,12 @@
 
 // Mock C++ binary, only used in tests.
 
+#ifdef IS_WINDOWS
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#endif  // IS_WINDOWS
+
 #include "tools/cpp/runfiles/runfiles.h"
 
 #ifdef IS_WINDOWS
@@ -138,8 +144,9 @@ int _main(int argc, char** argv) {
 #ifdef IS_WINDOWS
     PROCESS_INFORMATION processInfo;
     STARTUPINFOA startupInfo = {0};
-    BOOL ok = CreateProcessA(NULL, argv0.get(), NULL, NULL, FALSE, 0,
-                             envvars.get(), NULL, &startupInfo, &processInfo);
+    BOOL ok =
+        CreateProcessA(nullptr, argv0.get(), nullptr, nullptr, FALSE, 0,
+                       envvars.get(), nullptr, &startupInfo, &processInfo);
     if (!ok) {
       DWORD err = GetLastError();
       fprintf(stderr, "ERROR: CreateProcessA error: %d\n", err);
@@ -149,7 +156,7 @@ int _main(int argc, char** argv) {
     CloseHandle(processInfo.hProcess);
     CloseHandle(processInfo.hThread);
 #else
-    char* args[2] = {argv0.get(), NULL};
+    char* args[2] = {argv0.get(), nullptr};
     pid_t child = fork();
     if (child) {
       int status;

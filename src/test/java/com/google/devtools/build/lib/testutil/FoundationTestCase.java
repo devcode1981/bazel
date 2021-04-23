@@ -22,11 +22,13 @@ import com.google.devtools.build.lib.events.EventCollector;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.events.EventKind;
 import com.google.devtools.build.lib.events.Reporter;
+import com.google.devtools.build.lib.vfs.DigestHashFunction;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
 import java.util.Set;
+import java.util.regex.Pattern;
 import org.junit.After;
 import org.junit.Before;
 
@@ -98,7 +100,7 @@ public abstract class FoundationTestCase {
    * Creates the file system; override to inject FS behavior.
    */
   protected FileSystem createFileSystem() {
-    return new InMemoryFileSystem(BlazeClock.instance());
+    return new InMemoryFileSystem(BlazeClock.instance(), DigestHashFunction.SHA256);
   }
 
   // Mix-in assertions:
@@ -110,6 +112,10 @@ public abstract class FoundationTestCase {
   protected Event assertContainsEvent(String expectedMessage) {
     return MoreAsserts.assertContainsEvent(eventCollector,
                                               expectedMessage);
+  }
+
+  protected Event assertContainsEvent(Pattern expectedMessagePattern) {
+    return MoreAsserts.assertContainsEvent(eventCollector, expectedMessagePattern);
   }
 
   protected Event assertContainsEvent(String expectedMessage, Set<EventKind> kinds) {
@@ -129,39 +135,7 @@ public abstract class FoundationTestCase {
                                              expectedMessage);
   }
 
-  protected Event assertContainsEventWithWordsInQuotes(String... words) {
-    return MoreAsserts.assertContainsEventWithWordsInQuotes(
-        eventCollector, words);
-  }
-
   protected void assertContainsEventsInOrder(String... expectedMessages) {
     MoreAsserts.assertContainsEventsInOrder(eventCollector, expectedMessages);
-  }
-
-  protected void writeBuildFileForJavaToolchain() throws Exception  {
-    scratch.file("java/com/google/test/turbine_canary_deploy.jar");
-    scratch.file("java/com/google/test/tzdata.jar");
-    scratch.overwriteFile(
-        "java/com/google/test/BUILD",
-        "java_toolchain(name = 'toolchain',",
-        "    source_version = '6',",
-        "    target_version = '6',",
-        "    bootclasspath = ['rt.jar'],",
-        "    extclasspath = ['ext/lib.jar'],",
-        "    xlint = ['toto'],",
-        "    misc = ['-Xmaxerrs 500'],",
-        "    compatible_javacopts = {",
-        "        'appengine': ['-XDappengineCompatible'],",
-        "        'android': ['-XDandroidCompatible'],",
-        "    },",
-        "    javac = [':javac_canary.jar'],",
-        "    javabuilder = [':JavaBuilderCanary_deploy.jar'],",
-        "    header_compiler = [':turbine_canary_deploy.jar'],",
-        "    singlejar = ['SingleJar_deploy.jar'],",
-        "    ijar = ['ijar'],",
-        "    genclass = ['GenClass_deploy.jar'],",
-        "    timezone_data = 'tzdata.jar',",
-        ")"
-    );
   }
 }

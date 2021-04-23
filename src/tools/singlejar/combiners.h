@@ -64,7 +64,7 @@ class Concatenator : public Combiner {
 
  private:
   void CreateBuffer() {
-    if (!buffer_.get()) {
+    if (!buffer_) {
       buffer_.reset(new TransientBytes());
     }
   }
@@ -134,6 +134,22 @@ class PropertyCombiner : public Concatenator {
     Append(value);
     Append("\n", 1);
   }
+};
+
+// Combines the contents of the multiple manifests.
+class ManifestCombiner : public Concatenator {
+ public:
+  ManifestCombiner(const std::string &filename)
+      : Concatenator(filename), multi_release_(false) {}
+  ~ManifestCombiner() override;
+
+  void *OutputEntry(bool compress) override;
+
+  bool Merge(const CDH *cdh, const LH *lh) override;
+
+ private:
+  bool multi_release_;
+  std::unique_ptr<Inflater> inflater_;
 };
 
 #endif  //  SRC_TOOLS_SINGLEJAR_COMBINERS_H_

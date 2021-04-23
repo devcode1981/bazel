@@ -1,3 +1,6 @@
+load("@rules_java//java:defs.bzl", "java_library")
+load("//src:release_archive.bzl", "release_archive")
+
 # Description:
 #   singlejar C++ implementation.
 package(default_visibility = ["//src:__subpackages__"])
@@ -8,31 +11,62 @@ filegroup(
     visibility = ["//src:__pkg__"],
 )
 
+SOURCES = [
+    "combiners.cc",
+    "combiners.h",
+    "diag.h",
+    "input_jar.cc",
+    "input_jar.h",
+    "mapped_file.cc",
+    "mapped_file.h",
+    "mapped_file_posix.inc",
+    "mapped_file_windows.inc",
+    "options.cc",
+    "options.h",
+    "output_jar.cc",
+    "output_jar.h",
+    "port.h",
+    "singlejar_main.cc",
+    "token_stream.h",
+    "transient_bytes.h",
+    "zip_headers.h",
+    "zlib_interface.h",
+]
+
 filegroup(
-    name = "embedded_tools",
-    srcs = [
-        "BUILD",
-        "combiners.cc",
-        "combiners.h",
-        "diag.h",
-        "input_jar.cc",
-        "input_jar.h",
-        "mapped_file.cc",
-        "mapped_file.h",
-        "mapped_file_posix.inc",
-        "mapped_file_windows.inc",
-        "options.cc",
-        "options.h",
-        "output_jar.cc",
-        "output_jar.h",
-        "port.h",
-        "singlejar_main.cc",
-        "token_stream.h",
-        "transient_bytes.h",
-        "zip_headers.h",
-        "zlib_interface.h",
+    name = "embedded_java_tools",
+    srcs = SOURCES + [
+        "//src/main/cpp/util:embedded_java_tools",
+        "//third_party/zlib:embedded_tools",
+        "//src/main/protobuf:desugar_deps_filegroup",
     ],
-    visibility = ["//visibility:public"],
+    visibility = ["//src:__pkg__"],
+)
+
+release_archive(
+    name = "singlejar_transitive_zip",
+    package_dir = "java_tools",
+    visibility = ["//src:__pkg__"],
+    deps = [
+        ":singlejar_zip",
+        "//src:zlib_zip",
+        "//src/main/cpp/util:cpp_util_with_deps_zip",
+        "//src/main/protobuf:desugar_deps_zip",
+    ],
+)
+
+release_archive(
+    name = "singlejar_zip",
+    srcs = SOURCES,
+    package_dir = "src/tools/singlejar",
+    visibility = ["//visibility:private"],
+)
+
+release_archive(
+    name = "singlejar_deploy_zip",
+    srcs = [":singlejar_local"],
+    package_dir = "java_tools/src/tools/singlejar",
+    visibility = ["//src:__pkg__"],
 )
 
 cc_binary(
@@ -42,6 +76,7 @@ cc_binary(
     ],
     linkopts = select({
         "//src/conditions:freebsd": ["-lm"],
+        "//src/conditions:openbsd": ["-lm"],
         "//conditions:default": [],
     }),
     linkstatic = 1,
@@ -60,6 +95,7 @@ cc_binary(
     ],
     linkopts = select({
         "//src/conditions:freebsd": ["-lm"],
+        "//src/conditions:openbsd": ["-lm"],
         "//conditions:default": [],
     }),
     linkstatic = 1,
@@ -81,9 +117,15 @@ cc_test(
         ":zip_headers",
         ":zlib_interface",
     ],
+    data = [
+        "data/multi_release.jar",
+    ],
+    # Requires at least 5 GiB of memory
+    exec_compatible_with = ["//:highcpu_machine"],
     deps = [
         ":combiners",
         ":input_jar",
+        ":test_util",
         "//third_party/zlib",
         "@com_google_googletest//:gtest_main",
     ],
@@ -299,6 +341,7 @@ cc_test(
 sh_test(
     name = "zip64_test",
     srcs = ["zip64_test.sh"],
+    args = ["$(JAVABASE)"],
     data = [
         ":singlejar",
         "//src/test/shell:bashunit",
@@ -355,6 +398,7 @@ cc_library(
     deps = [
         ":diag",
         ":port",
+        "//src/main/cpp/util",
     ],
 )
 
@@ -413,10 +457,7 @@ cc_library(
     hdrs = ["test_util.h"],
     deps = [
         "//src/main/cpp/util",
-        # TODO(laszlocsomor) Use @bazel_tools//tools/cpp/runfiles after Bazel is
-        # released with
-        # https://github.com/bazelbuild/bazel/commit/23bc3bee79d8a8b8dc15bbfb6072ec9f965dff96.
-        "//tools/cpp/runfiles:runfiles_src_for_singlejar_only",
+        "@bazel_tools//tools/cpp/runfiles",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -424,7 +465,10 @@ cc_library(
 cc_library(
     name = "token_stream",
     hdrs = ["token_stream.h"],
-    deps = [":diag"],
+    deps = [
+        ":diag",
+        "//src/main/cpp/util",
+    ],
 )
 
 filegroup(

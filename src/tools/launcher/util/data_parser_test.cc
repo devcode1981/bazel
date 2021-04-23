@@ -43,11 +43,11 @@ class LaunchDataParserTest : public ::testing::Test {
 
   void SetUp() override {
     char* tmpdir = getenv("TEST_TMPDIR");
-    if (tmpdir != NULL) {
+    if (tmpdir != nullptr) {
       test_tmpdir = string(tmpdir);
     } else {
       tmpdir = getenv("TEMP");
-      ASSERT_FALSE(tmpdir == NULL);
+      ASSERT_FALSE(tmpdir == nullptr);
       test_tmpdir = string(tmpdir);
     }
   }
@@ -102,7 +102,7 @@ class LaunchDataParserTest : public ::testing::Test {
     if (item == parsed_launch_info->end()) {
       return "Cannot find key: " + key;
     }
-    return blaze_util::WstringToString(item->second);
+    return blaze_util::WstringToCstring(item->second);
   }
 
   string test_tmpdir;

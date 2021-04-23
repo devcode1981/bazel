@@ -15,7 +15,6 @@ package com.google.devtools.build.lib.testutil;
 
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
-import static com.google.common.truth.Truth.assert_;
 import static org.junit.Assert.fail;
 
 import com.google.common.base.Function;
@@ -36,9 +35,9 @@ import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
 import java.util.regex.Pattern;
@@ -68,8 +67,7 @@ public class MoreAsserts {
       Object start, final Class<?> clazz) {
     Predicate<Object> p = obj -> clazz.isAssignableFrom(obj.getClass());
     if (isRetained(p, start)) {
-      assert_().fail(
-          "Found an instance of " + clazz.getCanonicalName() + " reachable from " + start);
+      fail("Found an instance of " + clazz.getCanonicalName() + " reachable from " + start);
     }
   }
 
@@ -86,7 +84,7 @@ public class MoreAsserts {
   static final Predicate<Field> ALL_STRONG_REFS = Predicates.equalTo(NON_STRONG_REF);
 
   private static boolean isRetained(Predicate<Object> predicate, Object start) {
-    Map<Object, Object> visited = Maps.newIdentityHashMap();
+    IdentityHashMap<Object, Object> visited = Maps.newIdentityHashMap();
     visited.put(start, start);
     Queue<Object> toScan = new ArrayDeque<>();
     toScan.add(start);
@@ -303,6 +301,49 @@ public class MoreAsserts {
   }
 
   /**
+   * If {@code eventCollector} does not contain an event which matches {@code expectedEventPattern},
+   * fails with an informative assertion.
+   */
+  public static Event assertContainsEvent(
+      Iterable<Event> eventCollector, Pattern expectedEventPattern, EventKind... kinds) {
+    return assertContainsEvent(eventCollector, expectedEventPattern, ImmutableSet.copyOf(kinds));
+  }
+
+  /**
+   * If {@code eventCollector} does not contain an event which matches {@code expectedEventPattern},
+   * fails with an informative assertion.
+   */
+  public static Event assertContainsEvent(
+      Iterable<Event> eventCollector, Pattern expectedEventPattern, Set<EventKind> kinds) {
+    for (Event event : eventCollector) {
+      // Does the event message match the expected regex?
+      if (!expectedEventPattern.matcher(event.toString()).find()) {
+        continue;
+      }
+      // Was an expected kind given, and does the event match?
+      if (!kinds.isEmpty() && !kinds.contains(event.getKind())) {
+        continue;
+      }
+      // Return the event, assertion successful
+      return event;
+    }
+    String eventsString = eventsToString(eventCollector);
+    String failureMessage = "Event matching '" + expectedEventPattern + "' not found";
+    if (!eventsString.isEmpty()) {
+      failureMessage += "; found these though: " + eventsString;
+    }
+    fail(failureMessage);
+    return null; // unreachable
+  }
+
+  public static void assertNotContainsEvent(
+      Iterable<Event> eventCollector, Pattern unexpectedEventPattern) {
+    for (Event event : eventCollector) {
+      assertThat(event.toString()).doesNotMatch(unexpectedEventPattern);
+    }
+  }
+
+  /**
    * If the specified EventCollector contains an event which has
    * 'expectedEvent' as a substring, an informative assertion fails.
    */
@@ -360,12 +401,12 @@ public class MoreAsserts {
   }
 
   /**
-   * If "expectedSublist" is not a sublist of "arguments", an informative
-   * assertion is failed in the context of the specified TestCase.
+   * If "expectedSublist" is not a sublist of "arguments", an informative assertion is failed in the
+   * context of the specified TestCase.
    *
    * <p>Argument order mnemonic: assert(X)ContainsSublist(Y).
    */
-  @SuppressWarnings({"unchecked", "varargs"})
+  @SuppressWarnings("varargs")
   public static <T> void assertContainsSublist(List<T> arguments, T... expectedSublist) {
     List<T> sublist = Arrays.asList(expectedSublist);
     try {
@@ -376,12 +417,12 @@ public class MoreAsserts {
   }
 
   /**
-   * If "expectedSublist" is a sublist of "arguments", an informative
-   * assertion is failed in the context of the specified TestCase.
+   * If "expectedSublist" is a sublist of "arguments", an informative assertion is failed in the
+   * context of the specified TestCase.
    *
    * <p>Argument order mnemonic: assert(X)DoesNotContainSublist(Y).
    */
-  @SuppressWarnings({"unchecked", "varargs"})
+  @SuppressWarnings("varargs")
   public static <T> void assertDoesNotContainSublist(List<T> arguments, T... expectedSublist) {
     List<T> sublist = Arrays.asList(expectedSublist);
     try {
@@ -392,12 +433,12 @@ public class MoreAsserts {
   }
 
   /**
-   * Check to see if each element of expectedMessages is the beginning of a message
-   * in eventCollector, in order, as in {@link #containsSublistWithGapsAndEqualityChecker}.
-   * If not, an informative assertion is failed
+   * Check to see if each element of expectedMessages is the beginning of a message in
+   * eventCollector, in order, as in {@link #containsSublistWithGapsAndEqualityChecker}. If not, an
+   * informative assertion is failed
    */
-  protected static void assertContainsEventsInOrder(Iterable<Event> eventCollector,
-      String... expectedMessages) {
+  public static void assertContainsEventsInOrder(
+      Iterable<Event> eventCollector, String... expectedMessages) {
     String failure =
         containsSublistWithGapsAndEqualityChecker(
             ImmutableList.copyOf(eventCollector),
@@ -418,7 +459,6 @@ public class MoreAsserts {
    * if the elements of the pair are equal by its lights.
    * @return first element not in arguments in order, or null if success.
    */
-  @SuppressWarnings({"unchecked"})
   protected static <S, T> T containsSublistWithGapsAndEqualityChecker(List<S> arguments,
       Function<Pair<S, T>, Boolean> equalityChecker, T... expectedSublist) {
     Iterator<S> iter = arguments.iterator();
@@ -446,39 +486,5 @@ public class MoreAsserts {
     List<Event> foundEvents = builder.build();
     assertWithMessage(events.toString()).that(foundEvents).hasSize(expectedFrequency);
     return foundEvents;
-  }
-
-  /*
-   * This method will be in JUnit 4.13. Instead of patching Bazel's JUnit jar to contain the
-   * <a href="https://github.com/junit-team/junit4/commit/bdb1799">patch</a>, we define it here.
-   * Once JUnit 4.13 is released, we will switcher callers to use org.junit.Assert#assertThrows
-   * instead. See https://github.com/bazelbuild/bazel/issues/3729.
-   */
-  public static <T extends Throwable> T assertThrows(
-      Class<T> expectedThrowable, ThrowingRunnable runnable) {
-    try {
-      runnable.run();
-    } catch (Throwable actualThrown) {
-      if (expectedThrowable.isInstance(actualThrown)) {
-        @SuppressWarnings("unchecked")
-        T retVal = (T) actualThrown;
-        return retVal;
-      } else {
-        throw new AssertionError(
-            String.format(
-                "expected %s to be thrown, but %s was thrown",
-                expectedThrowable.getSimpleName(), actualThrown.getClass().getSimpleName()),
-            actualThrown);
-      }
-    }
-    String message =
-        String.format(
-            "expected %s to be thrown, but nothing was thrown", expectedThrowable.getSimpleName());
-    throw new AssertionError(message);
-  }
-
-  /** A helper interface for {@link #assertThrows}. */
-  public interface ThrowingRunnable {
-    void run() throws Throwable;
   }
 }

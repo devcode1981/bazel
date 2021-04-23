@@ -13,12 +13,15 @@
 // limitations under the License.
 package com.google.devtools.build.lib.skyframe;
 
+import com.google.devtools.build.lib.actions.ActionLookupKey;
+import com.google.devtools.build.lib.actions.Actions;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.BasicActionLookupValue;
 import com.google.devtools.build.lib.analysis.WorkspaceStatusAction;
+import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.skyframe.SkyFunctionName;
-import com.google.devtools.build.skyframe.SkyKey;
+import javax.annotation.Nullable;
 
 /**
  * Value that stores the workspace status artifacts and their generating action. There should be
@@ -26,7 +29,6 @@ import com.google.devtools.build.skyframe.SkyKey;
  */
 // TODO(bazel-team): This seems to be superfluous now, but it cannot be removed without making
 // PrecomputedValue public instead of package-private
-@AutoCodec
 public class WorkspaceStatusValue extends BasicActionLookupValue {
   private final Artifact stableArtifact;
   private final Artifact volatileArtifact;
@@ -38,7 +40,7 @@ public class WorkspaceStatusValue extends BasicActionLookupValue {
       Artifact stableArtifact,
       Artifact volatileArtifact,
       WorkspaceStatusAction workspaceStatusAction) {
-    super(workspaceStatusAction);
+    super(Actions.GeneratingActions.fromSingleAction(workspaceStatusAction, BUILD_INFO_KEY));
     this.stableArtifact = stableArtifact;
     this.volatileArtifact = volatileArtifact;
   }
@@ -51,18 +53,19 @@ public class WorkspaceStatusValue extends BasicActionLookupValue {
     return volatileArtifact;
   }
 
-  @AutoCodec.VisibleForSerialization
-  WorkspaceStatusAction getWorkspaceStatusAction() {
-    return (WorkspaceStatusAction) getAction(0);
-  }
-
-  /** {@link SkyKey} for {@link WorkspaceStatusValue}. */
-  public static class BuildInfoKey extends ActionLookupKey {
+  /** {@link com.google.devtools.build.skyframe.SkyKey} for {@link WorkspaceStatusValue}. */
+  public static final class BuildInfoKey implements ActionLookupKey {
     private BuildInfoKey() {}
 
     @Override
     public SkyFunctionName functionName() {
       return SkyFunctions.BUILD_INFO;
+    }
+
+    @Nullable
+    @Override
+    public Label getLabel() {
+      return null;
     }
   }
 }

@@ -60,7 +60,7 @@ public class GroupedListTest {
     }
     Object compressedList = createAndCompress(list);
     assertThat(Iterables.elementsEqual(iterable(compressedList), list)).isTrue();
-    assertElementsEqual(compressedList, list);
+    assertElementsEqual(compressedList, list, size == 0 ? 0 : 1);
   }
 
   @Test
@@ -151,8 +151,8 @@ public class GroupedListTest {
     assertThat(groupedList.isEmpty()).isFalse();
     Object compressed = groupedList.compress();
     assertThat(GroupedList.numElements(compressed)).isEqualTo(groupedList.numElements());
-    assertElementsEqual(compressed, allElts);
-    assertElementsEqualInGroups(GroupedList.<String>create(compressed), elements);
+    assertElementsEqual(compressed, allElts, elements.size());
+    assertElementsEqualInGroups(GroupedList.create(compressed), elements);
     assertElementsEqualInGroups(groupedList, elements);
     assertThat(groupedList.getAllElementsAsIterable())
         .containsExactlyElementsIn(Iterables.concat(groupedList))
@@ -164,13 +164,12 @@ public class GroupedListTest {
     GroupedList<String> groupedList = new GroupedList<>();
     assertThat(groupedList.isEmpty()).isTrue();
     GroupedListHelper<String> helper = new GroupedListHelper<>();
-    @SuppressWarnings("unchecked") // varargs
-    List<ImmutableList<String>> elements = Lists.newArrayList(
-        ImmutableList.of("1"),
-        ImmutableList.<String>of(),
-        ImmutableList.of("2a", "2b"),
-        ImmutableList.of("3")
-        );
+    List<ImmutableList<String>> elements =
+        Lists.newArrayList(
+            ImmutableList.of("1"),
+            ImmutableList.of(),
+            ImmutableList.of("2a", "2b"),
+            ImmutableList.of("3"));
     List<String> allElts = new ArrayList<>();
     for (List<String> group : elements) {
       helper.startGroup(); // Start a group even if the group has only one element or is empty.
@@ -184,10 +183,10 @@ public class GroupedListTest {
     assertThat(groupedList.numElements()).isEqualTo(allElts.size());
     assertThat(groupedList.isEmpty()).isFalse();
     Object compressed = groupedList.compress();
-    assertElementsEqual(compressed, allElts);
+    assertElementsEqual(compressed, allElts, 3);
     // Get rid of empty list -- it was not stored in groupedList.
     elements.remove(1);
-    assertElementsEqualInGroups(GroupedList.<String>create(compressed), elements);
+    assertElementsEqualInGroups(GroupedList.create(compressed), elements);
     assertElementsEqualInGroups(groupedList, elements);
     assertThat(groupedList.getAllElementsAsIterable())
         .containsExactlyElementsIn(Iterables.concat(groupedList))
@@ -211,19 +210,49 @@ public class GroupedListTest {
   }
 
   @Test
+  public void createCompressedSingleton() {
+    GroupedList<String> groupedList = new GroupedList<>();
+    groupedList.appendGroup(ImmutableList.of("a"));
+    assertThat(GroupedList.createCompressedSingleton("a")).isEqualTo(groupedList.compress());
+  }
+
+  @Test
+  public void createCompressedWithTwoGroups() {
+    GroupedList<String> groupedList = new GroupedList<>();
+    groupedList.appendGroup(ImmutableList.of("a"));
+    groupedList.appendGroup(ImmutableList.of("b", "c"));
+    assertThat(GroupedList.createCompressedWithTwoGroups("a", ImmutableList.of("b", "c")))
+        .isEqualTo(groupedList.compress());
+    groupedList.remove(ImmutableSet.of("b"));
+    assertThat(GroupedList.createCompressedWithTwoGroups("a", ImmutableList.of("c")))
+        .isEqualTo(groupedList.compress());
+  }
+
+  @Test
+  public void createCompressedWithThreeGroups() {
+    GroupedList<String> groupedList = new GroupedList<>();
+    groupedList.appendGroup(ImmutableList.of("a"));
+    groupedList.appendGroup(ImmutableList.of("b", "c"));
+    groupedList.appendGroup(ImmutableList.of("d", "e", "f"));
+    assertThat(
+            GroupedList.createCompressedWithThreeGroups(
+                "a", ImmutableList.of("b", "c"), ImmutableList.of("d", "e", "f")))
+        .isEqualTo(groupedList.compress());
+  }
+
+  @Test
   public void removeMakesEmpty() {
     GroupedList<String> groupedList = new GroupedList<>();
     assertThat(groupedList.isEmpty()).isTrue();
     GroupedListHelper<String> helper = new GroupedListHelper<>();
-    @SuppressWarnings("unchecked") // varargs
-    List<List<String>> elements = Lists.newArrayList(
-        (List<String>) ImmutableList.of("1"),
-        ImmutableList.<String>of(),
-        Lists.newArrayList("2a", "2b"),
-        ImmutableList.of("3"),
-        ImmutableList.of("removedGroup1", "removedGroup2"),
-        ImmutableList.of("4")
-        );
+    List<List<String>> elements =
+        Lists.newArrayList(
+            ImmutableList.of("1"),
+            ImmutableList.of(),
+            Lists.newArrayList("2a", "2b"),
+            ImmutableList.of("3"),
+            ImmutableList.of("removedGroup1", "removedGroup2"),
+            ImmutableList.of("4"));
     List<String> allElts = new ArrayList<>();
     for (List<String> group : elements) {
       helper.startGroup(); // Start a group even if the group has only one element or is empty.
@@ -239,12 +268,12 @@ public class GroupedListTest {
     Object compressed = groupedList.compress();
     assertThat(GroupedList.numElements(compressed)).isEqualTo(groupedList.numElements());
     allElts.removeAll(removed);
-    assertElementsEqual(compressed, allElts);
+    assertElementsEqual(compressed, allElts, 3);
     elements.get(2).remove("2a");
     elements.remove(ImmutableList.of("3"));
     elements.remove(ImmutableList.of());
     elements.remove(ImmutableList.of("removedGroup1", "removedGroup2"));
-    assertElementsEqualInGroups(GroupedList.<String>create(compressed), elements);
+    assertElementsEqualInGroups(GroupedList.create(compressed), elements);
     assertElementsEqualInGroups(groupedList, elements);
   }
 
@@ -269,9 +298,9 @@ public class GroupedListTest {
     Object compressed = groupedList.compress();
     assertThat(GroupedList.numElements(compressed)).isEqualTo(groupedList.numElements());
     allElts.removeAll(removed);
-    assertElementsEqual(compressed, allElts);
+    assertElementsEqual(compressed, allElts, 1);
     elements.get(0).removeAll(removed);
-    assertElementsEqualInGroups(GroupedList.<String>create(compressed), elements);
+    assertElementsEqualInGroups(GroupedList.create(compressed), elements);
     assertElementsEqualInGroups(groupedList, elements);
   }
 
@@ -299,6 +328,7 @@ public class GroupedListTest {
     result.append(helper);
     Object compressed = result.compress();
     assertThat(GroupedList.numElements(compressed)).isEqualTo(result.numElements());
+    assertThat(GroupedList.numGroups(compressed)).isEqualTo(list.isEmpty() ? 0 : 1);
     return compressed;
   }
 
@@ -321,7 +351,9 @@ public class GroupedListTest {
     assertThat(elements).hasSize(i);
   }
 
-  private static void assertElementsEqual(Object compressed, Iterable<String> expected) {
+  private static void assertElementsEqual(
+      @GroupedList.Compressed Object compressed, Iterable<String> expected, int numGroups) {
     assertThat(GroupedList.<String>create(compressed).toSet()).containsExactlyElementsIn(expected);
+    assertThat(GroupedList.numGroups(compressed)).isEqualTo(numGroups);
   }
 }

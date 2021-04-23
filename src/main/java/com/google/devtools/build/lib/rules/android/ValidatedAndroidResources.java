@@ -14,25 +14,34 @@
 package com.google.devtools.build.lib.rules.android;
 
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.analysis.RuleErrorConsumer;
+import com.google.devtools.build.lib.collect.nestedset.Depset;
 import com.google.devtools.build.lib.packages.RuleClass.ConfiguredTargetFactory.RuleErrorException;
-import com.google.devtools.build.lib.packages.RuleErrorConsumer;
-import com.google.devtools.build.lib.rules.android.AndroidConfiguration.AndroidAaptVersion;
-import com.google.devtools.build.lib.skylarkbuildapi.android.ValidatedAndroidDataApi;
+import com.google.devtools.build.lib.starlarkbuildapi.android.ValidatedAndroidDataApi;
 import java.util.Objects;
 import java.util.Optional;
 import javax.annotation.Nullable;
+import net.starlark.java.eval.Sequence;
+import net.starlark.java.eval.StarlarkList;
 
 /** Wraps validated and packaged Android resource information */
-public class ValidatedAndroidResources extends MergedAndroidResources implements
-    ValidatedAndroidDataApi {
+public class ValidatedAndroidResources extends MergedAndroidResources
+    implements ValidatedAndroidDataApi<Artifact, AndroidResourcesInfo> {
+
+  public static final Depset.ElementType TYPE =
+      Depset.ElementType.of(ValidatedAndroidResources.class);
+
   private final Artifact rTxt;
   private final Artifact sourceJar;
   private final Artifact apk;
 
   // aapt2 outputs. Will be null if and only if aapt2 is not used for validation.
-  @Nullable private final Artifact aapt2RTxt;
   @Nullable private final Artifact aapt2SourceJar;
   @Nullable private final Artifact staticLibrary;
+
+  // Opaque file used to trigger resource validation.
+  @Nullable private final Artifact aapt2ValidationArtifact;
+  private final boolean useRTxtFromMergedResources;
 
   /**
    * Validates and packages merged resources.
@@ -54,36 +63,37 @@ public class ValidatedAndroidResources extends MergedAndroidResources implements
    * </ul>
    */
   public static ValidatedAndroidResources validateFrom(
-      AndroidDataContext dataContext, MergedAndroidResources merged, AndroidAaptVersion aaptVersion)
-      throws InterruptedException {
-    AndroidResourceValidatorActionBuilder builder =
-        new AndroidResourceValidatorActionBuilder()
-            .setJavaPackage(merged.getJavaPackage())
-            .setDebug(dataContext.useDebug())
-            .setMergedResources(merged.getMergedResources())
-            .setRTxtOut(dataContext.createOutputArtifact(AndroidRuleClasses.ANDROID_R_TXT))
-            .setSourceJarOut(
-                dataContext.createOutputArtifact(AndroidRuleClasses.ANDROID_JAVA_SOURCE_JAR))
-            // Request an APK so it can be inherited when a library is used in a binary's
-            // resources attr.
-            // TODO(b/30307842): Remove this once it is no longer needed for resources migration.
-            .setApkOut(dataContext.createOutputArtifact(AndroidRuleClasses.ANDROID_LIBRARY_APK))
-            .withDependencies(merged.getResourceDependencies());
+      AndroidDataContext dataContext, MergedAndroidResources merged) throws InterruptedException {
+    Artifact rTxtOut = dataContext.createOutputArtifact(AndroidRuleClasses.ANDROID_R_TXT);
+    Artifact sourceJarOut =
+        dataContext.createOutputArtifact(AndroidRuleClasses.ANDROID_JAVA_SOURCE_JAR);
+    Artifact apkOut = dataContext.createOutputArtifact(AndroidRuleClasses.ANDROID_LIBRARY_APK);
 
-    if (aaptVersion == AndroidAaptVersion.AAPT2) {
-      builder
-          .setCompiledSymbols(merged.getCompiledSymbols())
-          .setAapt2RTxtOut(
-              dataContext.createOutputArtifact(AndroidRuleClasses.ANDROID_RESOURCES_AAPT2_R_TXT))
-          .setAapt2SourceJarOut(
-              dataContext.createOutputArtifact(
-                  AndroidRuleClasses.ANDROID_RESOURCES_AAPT2_SOURCE_JAR))
-          .setStaticLibraryOut(
-              dataContext.createOutputArtifact(
-                  AndroidRuleClasses.ANDROID_RESOURCES_AAPT2_LIBRARY_APK));
-    }
+    BusyBoxActionBuilder.create(dataContext, "LINK_STATIC_LIBRARY")
+        .addAapt()
+        .addInput("--libraries", dataContext.getSdk().getAndroidJar())
+        .addInput("--compiled", merged.getCompiledSymbols())
+        .addInput("--manifest", merged.getManifest())
+        // Sets an alternative java package for the generated R.java
+        // this allows android rules to generate resources outside of the java{,tests} tree.
+        .maybeAddFlag("--packageForR", merged.getJavaPackage())
+        .addTransitiveVectoredInput(
+            "--compiledDep", merged.getResourceDependencies().getTransitiveCompiledSymbols())
+        .addOutput("--sourceJarOut", sourceJarOut)
+        .addOutput("--rTxtOut", rTxtOut)
+        .addOutput("--staticLibraryOut", apkOut)
+        .buildAndRegister("Linking static android resource library", "AndroidResourceLink");
 
-    return builder.build(dataContext, merged);
+    return of(
+        merged,
+        rTxtOut,
+        sourceJarOut,
+        apkOut,
+        // TODO: remove below three when incompatibleProhibitAapt1 is on by default.
+        rTxtOut,
+        sourceJarOut,
+        apkOut,
+        dataContext.getAndroidConfig().useRTxtFromMergedResources());
   }
 
   static ValidatedAndroidResources of(
@@ -91,11 +101,19 @@ public class ValidatedAndroidResources extends MergedAndroidResources implements
       Artifact rTxt,
       Artifact sourceJar,
       Artifact apk,
-      @Nullable Artifact aapt2RTxt,
+      @Nullable Artifact aapt2ValidationArtifact,
       @Nullable Artifact aapt2SourceJar,
-      @Nullable Artifact staticLibrary) {
+      @Nullable Artifact staticLibrary,
+      boolean useRTxtFromMergedResources) {
     return new ValidatedAndroidResources(
-        merged, rTxt, sourceJar, apk, aapt2RTxt, aapt2SourceJar, staticLibrary);
+        merged,
+        rTxt,
+        sourceJar,
+        apk,
+        aapt2ValidationArtifact,
+        aapt2SourceJar,
+        staticLibrary,
+        useRTxtFromMergedResources);
   }
 
   private ValidatedAndroidResources(
@@ -103,47 +121,72 @@ public class ValidatedAndroidResources extends MergedAndroidResources implements
       Artifact rTxt,
       Artifact sourceJar,
       Artifact apk,
-      @Nullable Artifact aapt2RTxt,
+      @Nullable Artifact aapt2ValidationArtifact,
       @Nullable Artifact aapt2SourceJar,
-      @Nullable Artifact staticLibrary) {
+      @Nullable Artifact staticLibrary,
+      boolean useRTxtFromMergedResources) {
     super(merged);
     this.rTxt = rTxt;
     this.sourceJar = sourceJar;
     this.apk = apk;
-    this.aapt2RTxt = aapt2RTxt;
+    this.aapt2ValidationArtifact = aapt2ValidationArtifact;
     this.aapt2SourceJar = aapt2SourceJar;
     this.staticLibrary = staticLibrary;
+    this.useRTxtFromMergedResources = useRTxtFromMergedResources;
   }
 
+  @Override
   public AndroidResourcesInfo toProvider() {
     return getResourceDependencies().toInfo(this);
   }
 
+  @Override
   public Artifact getRTxt() {
     return rTxt;
   }
 
+  @Override
+  public Artifact getJavaClassJar() {
+    return super.getClassJar();
+  }
+
+  @Override
   public Artifact getJavaSourceJar() {
     return sourceJar;
   }
 
+  // TODO(b/30307842,b/119560471): remove this; it was added for no reason, but persists because
+  // the Starlark API is not noneable.
+  @Override
   public Artifact getApk() {
     return apk;
   }
 
-  @Nullable
+  @Override
   public Artifact getAapt2RTxt() {
-    return aapt2RTxt;
+    return useRTxtFromMergedResources ? super.getAapt2RTxt() : aapt2ValidationArtifact;
   }
 
+  @Nullable
+  Artifact getAapt2ValidationArtifact() {
+    return aapt2ValidationArtifact;
+  }
+
+  @Override
   @Nullable
   public Artifact getAapt2SourceJar() {
     return aapt2SourceJar;
   }
 
+  @Override
   @Nullable
   public Artifact getStaticLibrary() {
     return staticLibrary;
+  }
+
+  @Override
+  public Sequence<Artifact> getResourcesList() {
+    return StarlarkList.immutableCopyOf(getResources());
   }
 
   public ValidatedAndroidResources filter(
@@ -160,7 +203,14 @@ public class ValidatedAndroidResources extends MergedAndroidResources implements
         .map(
             merged ->
                 ValidatedAndroidResources.of(
-                    merged, rTxt, sourceJar, apk, aapt2RTxt, aapt2SourceJar, staticLibrary));
+                    merged,
+                    rTxt,
+                    sourceJar,
+                    apk,
+                    aapt2ValidationArtifact,
+                    aapt2SourceJar,
+                    staticLibrary,
+                    useRTxtFromMergedResources));
   }
 
   @Override
@@ -173,15 +223,13 @@ public class ValidatedAndroidResources extends MergedAndroidResources implements
     return rTxt.equals(other.rTxt)
         && sourceJar.equals(other.sourceJar)
         && apk.equals(other.apk)
-        && Objects.equals(aapt2RTxt, other.aapt2RTxt)
         && Objects.equals(aapt2SourceJar, other.aapt2SourceJar)
         && Objects.equals(staticLibrary, other.staticLibrary);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(
-        super.hashCode(), rTxt, sourceJar, apk, aapt2RTxt, aapt2SourceJar, staticLibrary);
+    return Objects.hash(super.hashCode(), rTxt, sourceJar, apk, aapt2SourceJar, staticLibrary);
   }
 
   public ValidatedAndroidResources export() {
@@ -197,14 +245,16 @@ public class ValidatedAndroidResources extends MergedAndroidResources implements
                 null),
             getMergedResources(),
             getClassJar(),
+            getAapt2RTxt(),
             getDataBindingInfoZip(),
             getResourceDependencies(),
             getProcessedManifest()),
         getRTxt(),
         getJavaSourceJar(),
         getApk(),
-        getAapt2RTxt(),
+        getAapt2ValidationArtifact(),
         getAapt2SourceJar(),
-        getStaticLibrary());
+        getStaticLibrary(),
+        useRTxtFromMergedResources);
   }
 }

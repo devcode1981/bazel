@@ -25,10 +25,10 @@ import java.util.Map;
 import javax.annotation.Nullable;
 
 /**
- * The result of a Skyframe {@link Evaluator#eval} call. Will contain all the
- * successfully evaluated values, retrievable through {@link #get}. As well, the {@link ErrorInfo}
- * for the first value that failed to evaluate (in the non-keep-going case), or any remaining values
- * that failed to evaluate (in the keep-going case) will be retrievable.
+ * The result of a Skyframe {@link ParallelEvaluator#eval} call. Will contain all the successfully
+ * evaluated values, retrievable through {@link #get}. As well, the {@link ErrorInfo} for the first
+ * value that failed to evaluate (in the non-keep-going case), or any remaining values that failed
+ * to evaluate (in the keep-going case) will be retrievable.
  *
  * <p>A node can never be successfully evaluated and fail to evaluate. Thus, if {@link #get} returns
  * non-null for some key, there is no stored error for that key, and vice versa.
@@ -87,21 +87,26 @@ public class EvaluationResult<T extends SkyValue> {
   }
 
   /**
-   * Returns {@link Map} of {@link SkyKey}s to {@link ErrorInfo}. Note that currently some
-   * of the returned SkyKeys may not be the ones requested by the user. Moreover, the SkyKey
-   * is not necessarily the cause of the error -- it is just the value that was being evaluated
-   * when the error was discovered. For the cause of the error, use
-   * {@link ErrorInfo#getRootCauses()} on each ErrorInfo.
+   * Returns {@link Map} of {@link SkyKey}s to {@link ErrorInfo}. Note that currently some of the
+   * returned SkyKeys may not be the ones requested by the user. Moreover, the SkyKey is not
+   * necessarily the cause of the error -- it is just the value that was being evaluated when the
+   * error was discovered.
    */
   public Map<SkyKey, ErrorInfo> errorMap() {
     return ImmutableMap.copyOf(errorMap);
   }
 
-  /**
-   * @param key {@link SkyKey} to get {@link ErrorInfo} for.
-   */
+  /** Returns {@link ErrorInfo} for given {@code key} which must be present in errors. */
   public ErrorInfo getError(SkyKey key) {
     return Preconditions.checkNotNull(errorMap, key).get(key);
+  }
+
+  /**
+   * Returns some error info. Convenience method equivalent to Iterables.getFirst({@link
+   * #errorMap()}, null).getValue().
+   */
+  public ErrorInfo getError() {
+    return Iterables.getFirst(errorMap.entrySet(), null).getValue();
   }
 
   /**
@@ -109,11 +114,11 @@ public class EvaluationResult<T extends SkyValue> {
    *     the keys in {@link #errorMap}.
    */
   public <S> Collection<? extends S> keyNames() {
-    return this.<S>getNames(resultMap.keySet());
+    return EvaluationResult.<S>getNames(resultMap.keySet());
   }
 
   @SuppressWarnings("unchecked")
-  private <S> Collection<? extends S> getNames(Collection<SkyKey> keys) {
+  private static <S> Collection<? extends S> getNames(Collection<SkyKey> keys) {
     Collection<S> names = Lists.newArrayListWithCapacity(keys.size());
     for (SkyKey key : keys) {
       names.add((S) key.argument());
@@ -124,14 +129,6 @@ public class EvaluationResult<T extends SkyValue> {
   @Nullable
   public WalkableGraph getWalkableGraph() {
     return walkableGraph;
-  }
-
-  /**
-   * Returns some error info. Convenience method equivalent to
-   * Iterables.getFirst({@link #errorMap()}, null).getValue().
-   */
-  public ErrorInfo getError() {
-    return Iterables.getFirst(errorMap.entrySet(), null).getValue();
   }
 
   @Override
@@ -168,10 +165,13 @@ public class EvaluationResult<T extends SkyValue> {
     }
 
     /** Adds an error to the result. A successful value for this key must not already be present. */
-    public Builder<T> addError(SkyKey key, ErrorInfo error) {
+    Builder<T> addError(SkyKey key, ErrorInfo error) {
       errors.put(key, Preconditions.checkNotNull(error, key));
       Preconditions.checkState(
           !result.containsKey(key), "%s in both result and errors: %s %s", error, result);
+      if (error.isCatastrophic()) {
+        setCatastrophe(error.getException());
+      }
       return this;
     }
 
@@ -194,6 +194,10 @@ public class EvaluationResult<T extends SkyValue> {
     public Builder<T> setCatastrophe(Exception catastrophe) {
       this.catastrophe = catastrophe;
       return this;
+    }
+
+    boolean hasCatastrophe() {
+      return this.catastrophe != null;
     }
   }
 }

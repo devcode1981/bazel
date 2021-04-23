@@ -85,10 +85,10 @@ public enum OptionDocumentationCategory {
   SIGNING,
 
   /**
-   * This option affects semantics of the skylark language or the build API accessible to BUILD
+   * This option affects semantics of the Starlark language or the build API accessible to BUILD
    * files, .bzl files, or WORKSPACE files.
    */
-  SKYLARK_SEMANTICS,
+  STARLARK_SEMANTICS,
 
   /**
    * This option dictates information about the test environment or test runner.
@@ -112,4 +112,7 @@ public enum OptionDocumentationCategory {
    * specific inputs.
    */
   GENERIC_INPUTS,
+
+  /** A category of options to configure Bazel's remote caching and execution capabilities. */
+  REMOTE,
 }

@@ -19,11 +19,14 @@ import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ArtifactRoot;
 import com.google.devtools.build.lib.analysis.buildinfo.BuildInfoCollection;
 import com.google.devtools.build.lib.analysis.buildinfo.BuildInfoFactory;
+import com.google.devtools.build.lib.analysis.buildinfo.BuildInfoKey;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.List;
 
 /**
@@ -42,37 +45,60 @@ public final class CppBuildInfo implements BuildInfoFactory {
       PathFragment.create("build-info-redacted.h");
 
   @Override
-  public BuildInfoCollection create(BuildInfoContext buildInfoContext, BuildConfiguration config,
-      Artifact buildInfo, Artifact buildChangelist, RepositoryName repositoryName) {
+  public BuildInfoCollection create(
+      BuildInfoContext buildInfoContext,
+      BuildConfiguration config,
+      Artifact buildInfo,
+      Artifact buildChangelist) {
     List<Action> actions = new ArrayList<>();
-    WriteBuildInfoHeaderAction redactedInfo = getHeader(buildInfoContext, config,
-        BUILD_INFO_REDACTED_HEADER_NAME,
-        Artifact.NO_ARTIFACTS, true, true, repositoryName);
-    WriteBuildInfoHeaderAction nonvolatileInfo = getHeader(buildInfoContext, config,
-        BUILD_INFO_NONVOLATILE_HEADER_NAME,
-        ImmutableList.of(buildInfo),
-        false, true, repositoryName);
-    WriteBuildInfoHeaderAction volatileInfo = getHeader(buildInfoContext, config,
-        BUILD_INFO_VOLATILE_HEADER_NAME,
-        ImmutableList.of(buildChangelist),
-        true, false, repositoryName);
+    WriteBuildInfoHeaderAction redactedInfo =
+        getHeader(
+            buildInfoContext,
+            config,
+            BUILD_INFO_REDACTED_HEADER_NAME,
+            NestedSetBuilder.emptySet(Order.STABLE_ORDER),
+            true,
+            true);
+    WriteBuildInfoHeaderAction nonvolatileInfo =
+        getHeader(
+            buildInfoContext,
+            config,
+            BUILD_INFO_NONVOLATILE_HEADER_NAME,
+            NestedSetBuilder.create(Order.STABLE_ORDER, buildInfo),
+            false,
+            true);
+    WriteBuildInfoHeaderAction volatileInfo =
+        getHeader(
+            buildInfoContext,
+            config,
+            BUILD_INFO_VOLATILE_HEADER_NAME,
+            NestedSetBuilder.create(Order.STABLE_ORDER, buildChangelist),
+            true,
+            false);
     actions.add(redactedInfo);
     actions.add(nonvolatileInfo);
     actions.add(volatileInfo);
-    return new BuildInfoCollection(actions,
+    return new BuildInfoCollection(
+        actions,
         ImmutableList.of(nonvolatileInfo.getPrimaryOutput(), volatileInfo.getPrimaryOutput()),
         ImmutableList.of(redactedInfo.getPrimaryOutput()));
   }
 
-  private WriteBuildInfoHeaderAction getHeader(BuildInfoContext buildInfoContext,
-      BuildConfiguration config, PathFragment headerName,
-      Collection<Artifact> inputs,
-      boolean writeVolatileInfo, boolean writeNonVolatileInfo, RepositoryName repositoryName) {
-    ArtifactRoot outputPath = config.getIncludeDirectory(repositoryName);
+  private WriteBuildInfoHeaderAction getHeader(
+      BuildInfoContext buildInfoContext,
+      BuildConfiguration config,
+      PathFragment headerName,
+      NestedSet<Artifact> inputs,
+      boolean writeVolatileInfo,
+      boolean writeNonVolatileInfo) {
+    ArtifactRoot outputPath = config.getIncludeDirectory(RepositoryName.MAIN);
     final Artifact header =
-        buildInfoContext.getBuildInfoArtifact(headerName, outputPath,
+        buildInfoContext.getBuildInfoArtifact(
+            headerName,
+            outputPath,
             writeVolatileInfo && !inputs.isEmpty()
-            ? BuildInfoType.NO_REBUILD : BuildInfoType.FORCE_REBUILD_IF_CHANGED);
+                ? BuildInfoType.NO_REBUILD
+                : BuildInfoType.FORCE_REBUILD_IF_CHANGED);
     return new WriteBuildInfoHeaderAction(
         inputs, header, writeVolatileInfo, writeNonVolatileInfo);
   }

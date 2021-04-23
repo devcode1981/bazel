@@ -30,17 +30,16 @@ public final class CoreRules implements RuleSet {
 
   @Override
   public void init(ConfiguredRuleClassProvider.Builder builder) {
-    builder.setShouldInvalidateCacheForDiff(
-        TestConfiguration.HAVE_OPTIONS_AFFECTING_NON_TEST_TARGETS_CHANGED);
-    builder.addConfig(TestConfiguration.TestOptions.class, new TestConfiguration.Loader());
+    builder.setShouldInvalidateCacheForOptionDiff(
+        TestConfiguration.SHOULD_INVALIDATE_FOR_OPTION_DIFF);
+    builder.addConfigurationFragment(TestConfiguration.class);
     builder.addTrimmingTransitionFactory(new TestTrimmingTransitionFactory());
-    builder.addRuleDefinition(new BaseRuleClasses.RootRule());
-    builder.addRuleDefinition(new BaseRuleClasses.BaseRule());
-    builder.addRuleDefinition(new BaseRuleClasses.RuleBase());
+    builder.addRuleDefinition(new BaseRuleClasses.NativeBuildRule());
+    builder.addRuleDefinition(new BaseRuleClasses.NativeActionCreatingRule());
     builder.addRuleDefinition(new BaseRuleClasses.MakeVariableExpandingRule());
     builder.addRuleDefinition(new BaseRuleClasses.BinaryBaseRule());
     builder.addRuleDefinition(new BaseRuleClasses.TestBaseRule());
-    builder.addRuleDefinition(new BaseRuleClasses.ErrorRule());
+    builder.addNativeAspectClass(new ValidateTarget()); // internally used aspect
   }
 
   @Override

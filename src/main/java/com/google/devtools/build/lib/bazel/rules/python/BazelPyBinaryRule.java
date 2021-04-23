@@ -23,7 +23,6 @@ import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
 import com.google.devtools.build.lib.analysis.config.HostTransition;
 import com.google.devtools.build.lib.bazel.rules.python.BazelPyRuleClasses.PyBinaryBaseRule;
 import com.google.devtools.build.lib.packages.RuleClass;
-import com.google.devtools.build.lib.rules.cpp.CppRuleClasses;
 import com.google.devtools.build.lib.rules.python.PyRuleClasses;
 import com.google.devtools.build.lib.rules.python.PythonConfiguration;
 
@@ -41,16 +40,15 @@ public final class BazelPyBinaryRule implements RuleDefinition {
     <!-- #END_BLAZE_RULE.NAME --> */
     return builder
         .requiresConfigurationFragments(PythonConfiguration.class, BazelPythonConfiguration.class)
-        .cfg(PyRuleClasses.DEFAULT_PYTHON_VERSION_TRANSITION)
+        .cfg(PyRuleClasses.VERSION_TRANSITION)
         .add(
             attr("$zipper", LABEL)
-                .cfg(HostTransition.INSTANCE)
+                .cfg(HostTransition.createFactory())
                 .exec()
                 .value(env.getToolsLabel("//tools/zip:zipper")))
-        .addRequiredToolchains(CppRuleClasses.ccToolchainTypeAttribute(env))
         .add(
             attr("$launcher", LABEL)
-                .cfg(HostTransition.INSTANCE)
+                .cfg(HostTransition.createFactory())
                 .value(env.getToolsLabel("//tools/launcher:launcher")))
         .build();
   }

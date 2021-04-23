@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
 // For rand_s function, https://msdn.microsoft.com/en-us/library/sxtz2fa8.aspx
 #define _CRT_RAND_S
 #include <fcntl.h>
@@ -20,12 +25,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+
 #include <algorithm>
 #include <sstream>
 #include <string>
 
 #include "src/main/cpp/util/path_platform.h"
+#include "src/main/native/windows/file.h"
 #include "src/tools/launcher/util/launcher_util.h"
 
 namespace bazel {
@@ -46,8 +52,8 @@ string GetLastErrorString() {
   size_t size = FormatMessageA(
       FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
           FORMAT_MESSAGE_IGNORE_INSERTS,
-      NULL, last_error, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-      (LPSTR)&message_buffer, 0, NULL);
+      nullptr, last_error, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+      (LPSTR)&message_buffer, 0, nullptr);
 
   stringstream result;
   result << "(error: " << last_error << "): " << message_buffer;
@@ -117,18 +123,30 @@ bool DeleteDirectoryByPath(const wchar_t* path) {
   return RemoveDirectoryW(AsAbsoluteWindowsPath(path).c_str());
 }
 
-wstring GetBinaryPathWithoutExtension(const wstring& binary) {
-  if (binary.find(L".exe", binary.size() - 4) != wstring::npos) {
-    return binary.substr(0, binary.length() - 4);
+static bool EndsWithExe(const wstring& s) {
+  return s.size() >= 4 && _wcsnicmp(s.c_str() + s.size() - 4, L".exe", 4) == 0;
+}
+
+wstring GetWindowsLongPath(const wstring& path) {
+  std::unique_ptr<WCHAR[]> result;
+  wstring abs_path = AsAbsoluteWindowsPath(path.c_str());
+  wstring error = bazel::windows::GetLongPath(abs_path.c_str(), &result);
+  if (!error.empty()) {
+    PrintError(L"Failed to get long path for %s: %s", path.c_str(),
+               error.c_str());
   }
-  return binary;
+  return wstring(blaze_util::RemoveUncPrefixMaybe(result.get()));
+}
+
+wstring GetBinaryPathWithoutExtension(const wstring& binary) {
+  return EndsWithExe(binary) ? binary.substr(0, binary.size() - 4) : binary;
 }
 
 wstring GetBinaryPathWithExtension(const wstring& binary) {
-  return GetBinaryPathWithoutExtension(binary) + L".exe";
+  return EndsWithExe(binary) ? binary : (binary + L".exe");
 }
 
-wstring GetEscapedArgument(const wstring& argument, bool escape_backslash) {
+std::wstring BashEscapeArg(const std::wstring& argument) {
   wstring escaped_arg;
   // escaped_arg will be at least this long
   escaped_arg.reserve(argument.size());
@@ -150,8 +168,8 @@ wstring GetEscapedArgument(const wstring& argument, bool escape_backslash) {
         break;
 
       case L'\\':
-        // Escape back slashes if escape_backslash is true
-        escaped_arg += (escape_backslash ? L"\\\\" : L"\\");
+        // Escape back slashes.
+        escaped_arg += L"\\\\";
         break;
 
       default:

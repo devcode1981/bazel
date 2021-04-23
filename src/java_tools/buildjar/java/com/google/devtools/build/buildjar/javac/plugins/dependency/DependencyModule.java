@@ -77,7 +77,6 @@ public final class DependencyModule {
   private final Set<Path> depsArtifacts;
   private final String targetLabel;
   private final Path outputDepsProtoFile;
-  private final Set<Path> usedClasspath;
   private boolean hasMissingTargets;
   private final Map<Path, Dependency> explicitDependenciesMap;
   private final Map<Path, Dependency> implicitDependenciesMap;
@@ -108,7 +107,6 @@ public final class DependencyModule {
     this.explicitDependenciesMap = new HashMap<>();
     this.implicitDependenciesMap = new HashMap<>();
     this.platformJars = platformJars;
-    this.usedClasspath = new HashSet<>();
     this.fixMessage = fixMessage;
     this.exemptGenerators = exemptGenerators;
     this.packages = new HashSet<>();
@@ -125,7 +123,8 @@ public final class DependencyModule {
    * <p>We collect precise dependency information to allow Blaze to analyze both strict and unused
    * dependencies, as well as packages contained by the output jar.
    */
-  public void emitDependencyInformation(ImmutableList<Path> classpath, boolean successful)
+  public void emitDependencyInformation(
+      ImmutableList<Path> classpath, boolean successful, boolean requiresFallback)
       throws IOException {
     if (outputDepsProtoFile == null) {
       return;
@@ -133,19 +132,23 @@ public final class DependencyModule {
 
     try (BufferedOutputStream out =
         new BufferedOutputStream(Files.newOutputStream(outputDepsProtoFile))) {
-      buildDependenciesProto(classpath, successful).writeTo(out);
+      buildDependenciesProto(classpath, successful, requiresFallback).writeTo(out);
     } catch (IOException ex) {
       throw new IOException("Cannot write dependencies to " + outputDepsProtoFile, ex);
     }
   }
 
   @VisibleForTesting
-  Dependencies buildDependenciesProto(ImmutableList<Path> classpath, boolean successful) {
+  Dependencies buildDependenciesProto(
+      ImmutableList<Path> classpath, boolean successful, boolean requiresFallback) {
     Dependencies.Builder deps = Dependencies.newBuilder();
     if (targetLabel != null) {
       deps.setRuleLabel(targetLabel);
     }
     deps.setSuccess(successful);
+    if (requiresFallback) {
+      deps.setRequiresReducedClasspathFallback(true);
+    }
 
     deps.addAllContainedPackage(
         packages
@@ -210,11 +213,6 @@ public final class DependencyModule {
     return outputDepsProtoFile;
   }
 
-  @VisibleForTesting
-  Set<Path> getUsedClasspath() {
-    return usedClasspath;
-  }
-
   /** Returns a message to suggest fix when a missing indirect dependency is found. */
   public FixMessage getFixMessage() {
     return fixMessage;
@@ -275,7 +273,7 @@ public final class DependencyModule {
   private void collectDependenciesFromArtifact(Path path) throws IOException {
     try (BufferedInputStream bis = new BufferedInputStream(Files.newInputStream(path))) {
       Dependencies deps = Dependencies.parseFrom(bis);
-      // Sanity check to make sure we have a valid proto.
+      // Quick check to make sure we have a valid proto.
       if (!deps.hasRuleLabel()) {
         throw new IOException("Could not parse Deps.Dependencies message from proto.");
       }

@@ -16,7 +16,9 @@ package com.google.devtools.build.lib.buildeventstream;
 
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
+import com.google.common.util.concurrent.ListenableFuture;
 import com.google.devtools.build.lib.events.ExtendedEventHandler;
 import com.google.devtools.build.lib.vfs.Path;
 import java.util.Collection;
@@ -41,19 +43,45 @@ public interface BuildEvent extends ChainableEvent, ExtendedEventHandler.Postabl
      */
     public enum LocalFileType {
       OUTPUT,
+      /** An OUTPUT_FILE is an OUTPUT that is known to be a file, not a directory. */
+      OUTPUT_FILE,
       SUCCESSFUL_TEST_OUTPUT,
       FAILED_TEST_OUTPUT,
+      COVERAGE_OUTPUT,
       STDOUT,
       STDERR,
       LOG,
+      PERFORMANCE_LOG;
+
+      /** Returns true if the LocalFile is a generic output from an Action. */
+      public boolean isOutput() {
+        return this == OUTPUT || this == OUTPUT_FILE;
+      }
+
+      /** Returns true if the LocalFile is known by construction to be a file, not a directory. */
+      public boolean isGuaranteedFile() {
+        return this != OUTPUT;
+      }
+    }
+
+    /** Indicates the type of compression the local file should have. */
+    public enum LocalFileCompression {
+      NONE,
+      GZIP,
     }
 
     public final Path path;
     public final LocalFileType type;
+    public final LocalFileCompression compression;
 
     public LocalFile(Path path, LocalFileType type) {
-      this.path = path;
-      this.type = type;
+      this(path, type, LocalFileCompression.NONE);
+    }
+
+    public LocalFile(Path path, LocalFileType type, LocalFileCompression compression) {
+      this.path = Preconditions.checkNotNull(path);
+      this.type = Preconditions.checkNotNull(type);
+      this.compression = Preconditions.checkNotNull(compression);
     }
 
     @Override
@@ -65,12 +93,14 @@ public interface BuildEvent extends ChainableEvent, ExtendedEventHandler.Postabl
         return false;
       }
       LocalFile localFile = (LocalFile) o;
-      return Objects.equal(path, localFile.path) && type == localFile.type;
+      return Objects.equal(path, localFile.path)
+          && type == localFile.type
+          && compression == localFile.compression;
     }
 
     @Override
     public int hashCode() {
-      return Objects.hashCode(path, type);
+      return Objects.hashCode(path, type, compression);
     }
 
     @Override
@@ -98,10 +128,20 @@ public interface BuildEvent extends ChainableEvent, ExtendedEventHandler.Postabl
   }
 
   /**
+   * Returns a collection of URI futures corresponding to in-flight file uploads.
+   *
+   * <p>The files here are considered "remote" in that they may not correspond to on-disk files.
+   */
+  default Collection<ListenableFuture<String>> remoteUploads() {
+    return ImmutableList.of();
+  }
+
+  /**
    * Provide a binary representation of the event.
    *
    * <p>Provide a presentation of the event according to the specified binary format, as appropriate
    * protocol buffer.
    */
-  BuildEventStreamProtos.BuildEvent asStreamProto(BuildEventContext context);
+  BuildEventStreamProtos.BuildEvent asStreamProto(BuildEventContext context)
+      throws InterruptedException;
 }

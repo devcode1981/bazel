@@ -17,7 +17,7 @@ package com.google.devtools.build.lib.rules.objc;
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.devtools.build.lib.actions.util.ActionsTestUtil.getFirstArtifactEndingWith;
 import static com.google.devtools.build.lib.rules.objc.ObjcRuleClasses.LIPO;
-import static com.google.devtools.build.lib.testutil.MoreAsserts.assertThrows;
+import static org.junit.Assert.assertThrows;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
@@ -25,12 +25,19 @@ import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Action;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.CommandAction;
+import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
+import com.google.devtools.build.lib.analysis.OutputGroupInfo;
 import com.google.devtools.build.lib.analysis.actions.SymlinkAction;
+import com.google.devtools.build.lib.packages.util.MockObjcSupport;
+import com.google.devtools.build.lib.packages.util.MockProtoSupport;
 import com.google.devtools.build.lib.rules.apple.AppleConfiguration.ConfigurationDistinguisher;
+import com.google.devtools.build.lib.rules.cpp.CppRuleClasses;
 import com.google.devtools.build.lib.testutil.Scratch;
+import com.google.devtools.build.lib.testutil.TestConstants;
 import java.io.IOException;
 import java.util.Set;
+import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -57,6 +64,12 @@ public class AppleStaticLibraryTest extends ObjcRuleTestCase {
       return attributes.build();
     }
   };
+
+  @Before
+  public void setUp() throws Exception {
+    MockProtoSupport.setupWorkspace(scratch);
+    invalidatePackages();
+  }
 
   @Test
   public void testMandatoryMinimumOsVersionUnset() throws Exception {
@@ -94,39 +107,8 @@ public class AppleStaticLibraryTest extends ObjcRuleTestCase {
     SymlinkAction action = (SymlinkAction) lipoLibAction("//x:x");
     CommandAction linkAction = linkLibAction("//x:x");
 
-    assertThat(action.getInputs())
+    assertThat(action.getInputs().toList())
         .containsExactly(Iterables.getOnlyElement(linkAction.getOutputs()));
-  }
-
-  @Test
-  public void testAvoidDepsProviders() throws Exception {
-    scratch.file(
-        "package/BUILD",
-        "apple_static_library(",
-        "    name = 'test',",
-        "    deps = [':objcLib'],",
-        "    platform_type = 'ios',",
-        "    avoid_deps = [':avoidLib'],",
-        ")",
-        "objc_library(name = 'objcLib', srcs = [ 'b.m' ], deps = [':avoidLib', ':baseLib'])",
-        "objc_library(",
-        "    name = 'baseLib',",
-        "    srcs = [ 'base.m' ],",
-        "    sdk_frameworks = ['BaseSDK'],",
-        "    resources = [':base.png']",
-        ")",
-        "objc_library(",
-        "    name = 'avoidLib',",
-        "    srcs = [ 'c.m' ],",
-        "    sdk_frameworks = ['AvoidSDK'],",
-        "    resources = [':avoid.png']",
-        ")");
-
-    ObjcProvider provider =  getConfiguredTarget("//package:test")
-        .get(AppleStaticLibraryInfo.SKYLARK_CONSTRUCTOR).getDepsObjcProvider();
-    // Do not remove SDK_FRAMEWORK values in avoid_deps.
-    assertThat(provider.get(ObjcProvider.SDK_FRAMEWORK))
-        .containsAllOf(new SdkFramework("AvoidSDK"), new SdkFramework("BaseSDK"));
   }
 
   @Test
@@ -156,9 +138,9 @@ public class AppleStaticLibraryTest extends ObjcRuleTestCase {
     String x8664Lib =
         configurationBin("x86_64", ConfigurationDistinguisher.APPLEBIN_IOS) + "x/x-fl.a";
 
-    assertThat(Artifact.toExecPaths(action.getInputs()))
-        .containsExactly(i386Lib, x8664Lib, MOCK_XCRUNWRAPPER_PATH,
-            MOCK_XCRUNWRAPPER_EXECUTABLE_PATH);
+    assertThat(Artifact.asExecPaths(action.getInputs()))
+        .containsExactly(
+            i386Lib, x8664Lib, MOCK_XCRUNWRAPPER_PATH, MOCK_XCRUNWRAPPER_EXECUTABLE_PATH);
 
     assertThat(action.getArguments())
         .containsExactly(
@@ -198,7 +180,7 @@ public class AppleStaticLibraryTest extends ObjcRuleTestCase {
             getGeneratingAction(getFirstArtifactEndingWith(linkAction.getInputs(), "libobjcLib.a"));
 
     assertAppleSdkPlatformEnv(objcLibCompileAction, "WatchSimulator");
-    assertThat(objcLibCompileAction.getArguments()).containsAllOf("-arch_only", "i386").inOrder();
+    assertThat(objcLibCompileAction.getArguments()).containsAtLeast("-arch_only", "i386").inOrder();
   }
 
   @Test
@@ -228,9 +210,9 @@ public class AppleStaticLibraryTest extends ObjcRuleTestCase {
             getGeneratingAction(
                 getFirstArtifactEndingWith(action.getInputs(), x8664Prefix + "package/test-fl.a"));
 
-    assertThat(Artifact.toExecPaths(i386BinAction.getInputs()))
+    assertThat(Artifact.asExecPaths(i386BinAction.getInputs()))
         .contains(i386Prefix + "package/libcclib.a");
-    assertThat(Artifact.toExecPaths(x8664BinAction.getInputs()))
+    assertThat(Artifact.asExecPaths(x8664BinAction.getInputs()))
         .contains(x8664Prefix + "package/libcclib.a");
   }
 
@@ -247,13 +229,13 @@ public class AppleStaticLibraryTest extends ObjcRuleTestCase {
     String armv7kBin = configurationBin("armv7k", ConfigurationDistinguisher.APPLEBIN_WATCHOS)
         + "x/x-fl.a";
 
-    assertThat(Artifact.toExecPaths(action.getInputs()))
-        .containsExactly(i386Bin, armv7kBin, MOCK_XCRUNWRAPPER_PATH,
-            MOCK_XCRUNWRAPPER_EXECUTABLE_PATH);
+    assertThat(Artifact.asExecPaths(action.getInputs()))
+        .containsExactly(
+            i386Bin, armv7kBin, MOCK_XCRUNWRAPPER_PATH, MOCK_XCRUNWRAPPER_EXECUTABLE_PATH);
 
     assertContainsSublist(action.getArguments(), ImmutableList.of(
         MOCK_XCRUNWRAPPER_EXECUTABLE_PATH, LIPO, "-create"));
-    assertThat(action.getArguments()).containsAllOf(armv7kBin, i386Bin);
+    assertThat(action.getArguments()).containsAtLeast(armv7kBin, i386Bin);
     assertContainsSublist(action.getArguments(), ImmutableList.of(
         "-o", execPathEndingWith(action.getOutputs(), "x_lipo.a")));
 
@@ -265,8 +247,13 @@ public class AppleStaticLibraryTest extends ObjcRuleTestCase {
 
   @Test
   public void testProtoDeps() throws Exception {
+    MockObjcSupport.setupObjcProtoLibrary(scratch);
+    scratch.file("x/filter_a.pbascii");
+    scratch.file("x/filter_b.pbascii");
     scratch.file(
         "protos/BUILD",
+        TestConstants.LOAD_PROTO_LIBRARY,
+        "load('//objc_proto_library:objc_proto_library.bzl', 'objc_proto_library')",
         "proto_library(",
         "    name = 'protos_main',",
         "    srcs = ['data_a.proto', 'data_b.proto'],",
@@ -304,13 +291,13 @@ public class AppleStaticLibraryTest extends ObjcRuleTestCase {
         "avoid_deps", "['//libs:apple_low_level_lib']");
 
     CommandAction linkAction = linkLibAction("//x:x");
-    Iterable<Artifact> linkActionInputs = linkAction.getInputs();
+    Iterable<Artifact> linkActionInputs = linkAction.getInputs().toList();
 
     ImmutableList.Builder<Artifact> objects = ImmutableList.builder();
     for (Artifact binActionArtifact : linkActionInputs) {
       if (binActionArtifact.getRootRelativePath().getPathString().endsWith(".a")) {
         CommandAction subLinkAction = (CommandAction) getGeneratingAction(binActionArtifact);
-        for (Artifact linkActionArtifact : subLinkAction.getInputs()) {
+        for (Artifact linkActionArtifact : subLinkAction.getInputs().toList()) {
           if (linkActionArtifact.getRootRelativePath().getPathString().endsWith(".o")) {
             objects.add(linkActionArtifact);
           }
@@ -407,7 +394,7 @@ public class AppleStaticLibraryTest extends ObjcRuleTestCase {
   @Test
   public void testAppleSdkIphoneosPlatformEnv() throws Exception {
     RULE_TYPE.scratchTarget(scratch, "platform_type", "'ios'");
-    useConfiguration("--cpu=ios_arm64");
+    useConfiguration("--apple_platform_type=ios", "--cpu=ios_arm64");
 
     CommandAction action = linkLibAction("//x:x");
 
@@ -478,7 +465,7 @@ public class AppleStaticLibraryTest extends ObjcRuleTestCase {
 
     assertAppleSdkPlatformEnv(linkAction, "WatchSimulator");
     assertThat(normalizeBashArgs(linkAction.getArguments()))
-        .containsAllOf("-arch_only", "i386")
+        .containsAtLeast("-arch_only", "i386")
         .inOrder();
   }
 
@@ -486,14 +473,16 @@ public class AppleStaticLibraryTest extends ObjcRuleTestCase {
   public void testAppleStaticLibraryInfo() throws Exception {
     RULE_TYPE.scratchTarget(scratch, "platform_type", "'ios'");
     ConfiguredTarget binTarget = getConfiguredTarget("//x:x");
-    AppleStaticLibraryInfo provider =
-        binTarget.get(AppleStaticLibraryInfo.SKYLARK_CONSTRUCTOR);
+    AppleStaticLibraryInfo provider = binTarget.get(AppleStaticLibraryInfo.STARLARK_CONSTRUCTOR);
     assertThat(provider).isNotNull();
     assertThat(provider.getMultiArchArchive()).isNotNull();
     assertThat(provider.getDepsObjcProvider()).isNotNull();
-    assertThat(provider.getMultiArchArchive()).isEqualTo(
-        Iterables.getOnlyElement(
-            provider.getDepsObjcProvider().get(ObjcProvider.MULTI_ARCH_LINKED_ARCHIVES)));
+    assertThat(provider.getMultiArchArchive())
+        .isEqualTo(
+            provider
+                .getDepsObjcProvider()
+                .get(ObjcProvider.MULTI_ARCH_LINKED_ARCHIVES)
+                .getSingleton());
   }
 
   @Test
@@ -515,8 +504,8 @@ public class AppleStaticLibraryTest extends ObjcRuleTestCase {
         "objc_library(name = 'avoidLib', srcs = [ 'c.m' ])");
 
     CommandAction action = linkLibAction("//package:test");
-    assertThat(Artifact.toRootRelativePaths(action.getInputs())).containsAllOf(
-        "package/libobjcLib.a", "package/libbaseLib.a");
+    assertThat(Artifact.toRootRelativePaths(action.getInputs()))
+        .containsAtLeast("package/libobjcLib.a", "package/libbaseLib.a");
     assertThat(Artifact.toRootRelativePaths(action.getInputs())).doesNotContain(
         "package/libavoidLib.a");
   }
@@ -668,38 +657,38 @@ public class AppleStaticLibraryTest extends ObjcRuleTestCase {
     scratch.file("examples/rule/BUILD");
     scratch.file(
         "examples/rule/apple_rules.bzl",
-        "def skylark_static_lib_impl(ctx):",
+        "def starlark_static_lib_impl(ctx):",
         "   dep_provider = ctx.attr.proxy[apple_common.AppleStaticLibrary]",
         "   my_provider = apple_common.AppleStaticLibrary(archive = dep_provider.archive,",
         "       objc = dep_provider.objc)",
-        "   return struct(",
-        "      providers = [my_provider]",
-        "   )",
+        "   return [my_provider]",
         "",
-        "skylark_static_lib = rule(",
-        "  implementation = skylark_static_lib_impl,",
+        "starlark_static_lib = rule(",
+        "  implementation = starlark_static_lib_impl,",
         "  attrs = {'proxy': attr.label()},",
         ")");
 
     scratch.file(
-        "examples/apple_skylark/BUILD",
+        "examples/apple_starlark/BUILD",
         "package(default_visibility = ['//visibility:public'])",
-        "load('//examples/rule:apple_rules.bzl', 'skylark_static_lib')",
-        "skylark_static_lib(",
+        "load('//examples/rule:apple_rules.bzl', 'starlark_static_lib')",
+        "starlark_static_lib(",
         "   name='my_target',",
         "   proxy='//x:x'",
         ")");
 
-    ConfiguredTarget binTarget = getConfiguredTarget("//examples/apple_skylark:my_target");
+    ConfiguredTarget binTarget = getConfiguredTarget("//examples/apple_starlark:my_target");
 
-    AppleStaticLibraryInfo provider =
-        binTarget.get(AppleStaticLibraryInfo.SKYLARK_CONSTRUCTOR);
+    AppleStaticLibraryInfo provider = binTarget.get(AppleStaticLibraryInfo.STARLARK_CONSTRUCTOR);
     assertThat(provider).isNotNull();
     assertThat(provider.getMultiArchArchive()).isNotNull();
     assertThat(provider.getDepsObjcProvider()).isNotNull();
-    assertThat(provider.getMultiArchArchive()).isEqualTo(
-        Iterables.getOnlyElement(
-            provider.getDepsObjcProvider().get(ObjcProvider.MULTI_ARCH_LINKED_ARCHIVES)));
+    assertThat(provider.getMultiArchArchive())
+        .isEqualTo(
+            provider
+                .getDepsObjcProvider()
+                .get(ObjcProvider.MULTI_ARCH_LINKED_ARCHIVES)
+                .getSingleton());
   }
 
   @Test
@@ -708,32 +697,57 @@ public class AppleStaticLibraryTest extends ObjcRuleTestCase {
     scratch.file("examples/rule/BUILD");
     scratch.file(
         "examples/rule/apple_rules.bzl",
-        "def skylark_static_lib_impl(ctx):",
+        "def starlark_static_lib_impl(ctx):",
         "   dep_provider = ctx.attr.proxy[apple_common.AppleStaticLibrary]",
         "   my_provider = apple_common.AppleStaticLibrary(archive = dep_provider.archive,",
         "       objc = dep_provider.objc, foo = 'bar')",
-        "   return struct(",
-        "      providers = [my_provider]",
-        "   )",
+        "   return [my_provider]",
         "",
-        "skylark_static_lib = rule(",
-        "  implementation = skylark_static_lib_impl,",
+        "starlark_static_lib = rule(",
+        "  implementation = starlark_static_lib_impl,",
         "  attrs = {'proxy': attr.label()},",
         ")");
 
     scratch.file(
-        "examples/apple_skylark/BUILD",
+        "examples/apple_starlark/BUILD",
         "package(default_visibility = ['//visibility:public'])",
-        "load('//examples/rule:apple_rules.bzl', 'skylark_static_lib')",
-        "skylark_static_lib(",
+        "load('//examples/rule:apple_rules.bzl', 'starlark_static_lib')",
+        "starlark_static_lib(",
         "   name='my_target',",
         "   proxy='//x:x'",
         ")");
 
     AssertionError expected =
-        assertThrows(AssertionError.class, () ->
-            getConfiguredTarget("//examples/apple_skylark:my_target"));
-    assertThat(expected).hasMessageThat()
-        .contains("unexpected keyword 'foo', in call to AppleStaticLibrary");
+        assertThrows(
+            AssertionError.class, () -> getConfiguredTarget("//examples/apple_starlark:my_target"));
+    assertThat(expected).hasMessageThat().contains("unexpected keyword argument 'foo'");
+  }
+
+  @Test
+  public void testProtoBundlingWithTargetsWithNoDeps() throws Exception {
+    checkProtoBundlingWithTargetsWithNoDeps(RULE_TYPE);
+  }
+
+  @Test
+  public void testProtoBundlingDoesNotHappen() throws Exception {
+    useConfiguration("--noenable_apple_binary_native_protos");
+    checkProtoBundlingDoesNotHappen(RULE_TYPE);
+  }
+
+  @Test
+  public void testProcessHeadersInDependencies() throws Exception {
+    MockObjcSupport.setupCcToolchainConfig(
+        mockToolsConfig, MockObjcSupport.darwinX86_64().withFeatures(CppRuleClasses.PARSE_HEADERS));
+    useConfiguration("--features=parse_headers", "--process_headers_in_dependencies");
+    ConfiguredTarget x =
+        scratchConfiguredTarget(
+            "foo",
+            "x",
+            "apple_static_library(name = 'x', platform_type = 'macos', deps = [':y', ':z'])",
+            "cc_library(name = 'y', hdrs = ['y.h'])",
+            "objc_library(name = 'z', hdrs = ['z.h'])");
+    String validation = ActionsTestUtil.baseNamesOf(getOutputGroup(x, OutputGroupInfo.VALIDATION));
+    assertThat(validation).contains("y.h.processed");
+    assertThat(validation).contains("z.h.processed");
   }
 }

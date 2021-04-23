@@ -33,7 +33,7 @@ if ($fixPackage -eq $true) {
   if ($mode -eq "release") {
     $prefix = "."
   }
-  $tvPackageFixVersion = "$($prefix)$((get-date).tostring("yyyyMMdd_hhmmss"))"
+  $tvPackageFixVersion = "$($prefix)$((get-date).tostring("yyyyMMdd"))"
 }
 remove-item -force -ErrorAction SilentlyContinue "./*.nupkg"
 remove-item -force -ErrorAction SilentlyContinue "./bazel.nuspec"
@@ -43,7 +43,7 @@ remove-item -force -ErrorAction SilentlyContinue "./tools/params.*"
 if ($checksum -eq "") {
   remove-item -force -ErrorAction SilentlyContinue ./*.zip
 }
-
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 if (($mode -eq "release") -or ($mode -eq "rc")) {
   Invoke-WebRequest "$($tvUri).sha256" -UseBasicParsing -passthru -outfile sha256.txt
   $tvChecksum = (gc sha256.txt).split(' ')[0]

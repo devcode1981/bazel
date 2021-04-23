@@ -1,5 +1,10 @@
 package(default_visibility = ["//src:__subpackages__"])
 
+cc_binary(
+    name = "daemonize",
+    srcs = ["daemonize.c"],
+)
+
 cc_library(
     name = "logging",
     srcs = ["logging.cc"],
@@ -8,7 +13,10 @@ cc_library(
 
 cc_library(
     name = "process-tools",
-    srcs = ["process-tools.cc"],
+    srcs = ["process-tools.cc"] + select({
+        "//src/conditions:darwin": ["process-tools-darwin.cc"],
+        "//conditions:default": ["process-tools-linux.cc"],
+    }),
     hdrs = ["process-tools.h"],
     deps = [
         ":logging",
@@ -31,7 +39,11 @@ cc_binary(
     }),
     linkopts = select({
         "//src/conditions:windows": [],
-        "//conditions:default": ["-lm"],
+        "//src/conditions:darwin": ["-lm"],
+        "//conditions:default": [
+            "-lm",
+            "-lrt",
+        ],
     }),
     deps = select({
         "//src/conditions:windows": [],
@@ -48,15 +60,24 @@ cc_binary(
         "//src/conditions:windows": ["build-runfiles-windows.cc"],
         "//conditions:default": ["build-runfiles.cc"],
     }),
-    deps = ["//src/main/cpp/util:filesystem"],
+    linkopts = select({
+        "//src/conditions:windows": [
+            "-DEFAULTLIB:advapi32.lib",  # RegGetValueW
+        ],
+        "//conditions:default": [],
+    }),
+    deps = ["//src/main/cpp/util:filesystem"] + select({
+        "//src/conditions:windows": ["//src/main/native/windows:lib-file"],
+        "//conditions:default": [],
+    }),
 )
 
 cc_binary(
     name = "linux-sandbox",
     srcs = select({
         "//src/conditions:darwin": ["dummy-sandbox.c"],
-        "//src/conditions:darwin_x86_64": ["dummy-sandbox.c"],
         "//src/conditions:freebsd": ["dummy-sandbox.c"],
+        "//src/conditions:openbsd": ["dummy-sandbox.c"],
         "//src/conditions:windows": ["dummy-sandbox.c"],
         "//conditions:default": [
             "linux-sandbox.cc",
@@ -67,24 +88,26 @@ cc_binary(
             "linux-sandbox-pid1.h",
         ],
     }),
-    linkopts = ["-lm"],
+    linkopts = select({
+        "//src/conditions:darwin": [],
+        "//src/conditions:freebsd": [],
+        "//src/conditions:openbsd": [],
+        "//src/conditions:windows": [],
+        "//conditions:default": [
+            "-lm",
+            "-lrt",
+        ],
+    }),
     deps = select({
         "//src/conditions:darwin": [],
-        "//src/conditions:darwin_x86_64": [],
         "//src/conditions:freebsd": [],
+        "//src/conditions:openbsd": [],
         "//src/conditions:windows": [],
         "//conditions:default": [
             ":logging",
             ":process-tools",
         ],
     }),
-)
-
-filegroup(
-    name = "jdk-support",
-    srcs = [
-        "jdk.BUILD",
-    ],
 )
 
 exports_files([

@@ -1,10 +1,11 @@
-# Whitelists for restricting access to Bazel features.
+# Allowlists for restricting access to Bazel features.
 
 filegroup(
     name = "srcs",
     srcs = [
         "BUILD",
         "//tools/whitelists/config_feature_flag:srcs",
+        "//tools/whitelists/function_transition_whitelist:srcs",
     ],
-    visibility = ["//tools:__pkg__"],
+    visibility = ["//tools/allowlists:__pkg__"],
 )

@@ -32,7 +32,7 @@ function test_local_action_cache() {
   rm -rf $cache
   mkdir $cache
 
-  touch WORKSPACE
+  create_workspace_with_default_repos WORKSPACE
   # No sandboxing, side effect is needed to detect action execution
   cat > BUILD <<EOF
 genrule(
@@ -40,7 +40,7 @@ genrule(
     cmd = "echo run > $execution_file && cat \$< >\$@",
     srcs = ["$input_file"],
     outs = ["foo.txt"],
-    tags = ["local"],
+    tags = ["no-sandbox"],
 )
 EOF
 
@@ -64,6 +64,31 @@ EOF
   bazel build $flags :foo &> $TEST_log || fail "Build failed"
   assert_equals "1" $(cat "${output_file}")
   assert_equals "0" $(cat "${execution_file}")
+}
+
+function test_input_directories_in_external_repo_with_sibling_repository_layout() {
+  create_new_workspace
+  l=$TEST_TMPDIR/l
+  mkdir -p "$l/dir"
+  touch "$l/WORKSPACE"
+  touch "$l/dir/f"
+  cat > "$l/BUILD" <<'EOF'
+exports_files(["dir"])
+EOF
+
+  cat >> WORKSPACE <<EOF
+local_repository(name="l", path="$l")
+EOF
+
+  cat > BUILD <<'EOF'
+genrule(name="g", srcs=["@l//:dir"], outs=["go"], cmd="find $< > $@")
+EOF
+
+  bazel build \
+    --experimental_sibling_repository_layout  \
+    --disk_cache="$TEST_TMPDIR/cache" \
+    //:g || fail "build failed"
+
 }
 
 run_suite "local action cache test"

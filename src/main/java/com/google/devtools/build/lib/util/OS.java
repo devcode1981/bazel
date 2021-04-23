@@ -21,11 +21,12 @@ import java.util.EnumSet;
 public enum OS {
   DARWIN("osx", "Mac OS X"),
   FREEBSD("freebsd", "FreeBSD"),
+  OPENBSD("openbsd", "OpenBSD"),
   LINUX("linux", "Linux"),
   WINDOWS("windows", "Windows"),
   UNKNOWN("unknown", "");
 
-  private static final EnumSet<OS> POSIX_COMPATIBLE = EnumSet.of(DARWIN, FREEBSD, LINUX);
+  private static final EnumSet<OS> POSIX_COMPATIBLE = EnumSet.of(DARWIN, FREEBSD, OPENBSD, LINUX);
 
   private final String canonicalName;
   private final String detectionName;
@@ -34,6 +35,17 @@ public enum OS {
     this.canonicalName = canonicalName;
     this.detectionName = detectionName;
   }
+
+  public String getCanonicalName() {
+    return canonicalName;
+  }
+
+  @Override
+  public String toString() {
+    return getCanonicalName();
+  }
+
+  private static final OS HOST_SYSTEM = determineCurrentOs();
 
   /**
    * The current operating system.
@@ -46,17 +58,8 @@ public enum OS {
     return POSIX_COMPATIBLE.contains(getCurrent());
   }
 
-  public String getCanonicalName() {
-    return canonicalName;
-  }
-
   public static String getVersion() {
     return System.getProperty("os.version");
-  }
-
-  @Override
-  public String toString() {
-    return getCanonicalName();
   }
 
   // We inject a the OS name through blaze.os, so we can have
@@ -80,6 +83,4 @@ public enum OS {
 
     return OS.UNKNOWN;
   }
-
-  private static final OS HOST_SYSTEM = determineCurrentOs();
 }

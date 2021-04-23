@@ -13,26 +13,26 @@
 // limitations under the License.
 package com.google.devtools.build.lib.rules.android;
 
+import static com.google.devtools.build.lib.rules.android.AndroidStarlarkData.fromNoneable;
+
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.collect.nestedset.Depset;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.packages.BuiltinProvider;
 import com.google.devtools.build.lib.packages.NativeInfo;
-import com.google.devtools.build.lib.skylarkbuildapi.android.AndroidAssetsInfoApi;
-import com.google.devtools.build.lib.syntax.EvalException;
-import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
+import com.google.devtools.build.lib.starlarkbuildapi.android.AndroidAssetsInfoApi;
 import java.util.Optional;
 import javax.annotation.Nullable;
+import net.starlark.java.eval.EvalException;
 
 /** Provides information about transitive Android assets. */
 public final class AndroidAssetsInfo extends NativeInfo
     implements AndroidAssetsInfoApi<Artifact, ParsedAndroidAssets> {
 
-  public static final String PROVIDER_NAME = "AndroidAssetsInfo";
   public static final Provider PROVIDER = new Provider();
 
   private final Label label;
@@ -86,7 +86,6 @@ public final class AndroidAssetsInfo extends NativeInfo
       NestedSet<Artifact> transitiveAssets,
       NestedSet<Artifact> transitiveSymbols,
       NestedSet<Artifact> transitiveCompiledSymbols) {
-    super(PROVIDER);
     this.label = label;
     this.hasLocalAssets = validationResult != null;
     this.validationResult = validationResult;
@@ -95,6 +94,11 @@ public final class AndroidAssetsInfo extends NativeInfo
     this.transitiveAssets = transitiveAssets;
     this.transitiveSymbols = transitiveSymbols;
     this.transitiveCompiledSymbols = transitiveCompiledSymbols;
+  }
+
+  @Override
+  public Provider getProvider() {
+    return PROVIDER;
   }
 
   @Override
@@ -109,6 +113,10 @@ public final class AndroidAssetsInfo extends NativeInfo
   }
 
   @Override
+  public Depset /*<ParsedAndroidAssets>*/ getDirectParsedAssetsForStarlark() {
+    return Depset.of(ParsedAndroidAssets.TYPE, directParsedAssets);
+  }
+
   public NestedSet<ParsedAndroidAssets> getDirectParsedAssets() {
     return directParsedAssets;
   }
@@ -124,28 +132,44 @@ public final class AndroidAssetsInfo extends NativeInfo
   }
 
   @Override
+  public Depset /*<ParsedAndroidAssets>*/ getTransitiveParsedAssetsForStarlark() {
+    return Depset.of(ParsedAndroidAssets.TYPE, transitiveParsedAssets);
+  }
+
   public NestedSet<ParsedAndroidAssets> getTransitiveParsedAssets() {
     return transitiveParsedAssets;
   }
 
   @Override
+  public Depset /*<Artifact>*/ getAssetsForStarlark() {
+    return Depset.of(Artifact.TYPE, transitiveAssets);
+  }
+
   public NestedSet<Artifact> getAssets() {
     return transitiveAssets;
   }
 
   @Override
+  public Depset /*<Artifact>*/ getSymbolsForStarlark() {
+    return Depset.of(Artifact.TYPE, transitiveSymbols);
+  }
+
   public NestedSet<Artifact> getSymbols() {
     return transitiveSymbols;
   }
 
   private Optional<ParsedAndroidAssets> getLocalParsedAndroidAssets() {
     return hasLocalAssets && getDirectParsedAssets().isSingleton()
-        ? Optional.of(Iterables.getOnlyElement(getDirectParsedAssets()))
+        ? Optional.of(getDirectParsedAssets().getSingleton())
         : Optional.empty();
   }
 
   @Override
-  public NestedSet<Artifact> getCompiledSymbols() {
+  public Depset /*<Artifact>*/ getCompiledSymbolsForStarlark() {
+    return Depset.of(Artifact.TYPE, transitiveCompiledSymbols);
+  }
+
+  NestedSet<Artifact> getCompiledSymbols() {
     return transitiveCompiledSymbols;
   }
 
@@ -154,31 +178,34 @@ public final class AndroidAssetsInfo extends NativeInfo
       implements AndroidAssetsInfoApi.Provider<Artifact, ParsedAndroidAssets> {
 
     private Provider() {
-      super(PROVIDER_NAME, AndroidAssetsInfo.class);
+      super(NAME, AndroidAssetsInfo.class);
     }
 
     @Override
     public AndroidAssetsInfo createInfo(
         Label label,
-        Artifact validationResult,
-        SkylarkNestedSet directParsedAssets,
-        SkylarkNestedSet transitiveParsedAssets,
-        SkylarkNestedSet transitiveAssets,
-        SkylarkNestedSet transitiveSymbols,
-        SkylarkNestedSet transitiveCompiledSymbols)
+        Object validationResult,
+        Depset directParsedAssets,
+        Depset transitiveParsedAssets,
+        Depset transitiveAssets,
+        Depset transitiveSymbols,
+        Depset transitiveCompiledSymbols)
         throws EvalException {
       return new AndroidAssetsInfo(
           label,
-          validationResult,
-          nestedSet(directParsedAssets, ParsedAndroidAssets.class),
-          nestedSet(transitiveParsedAssets, ParsedAndroidAssets.class),
-          nestedSet(transitiveAssets, Artifact.class),
-          nestedSet(transitiveSymbols, Artifact.class),
-          nestedSet(transitiveCompiledSymbols, Artifact.class));
+          fromNoneable(validationResult, Artifact.class),
+          nestedSet(directParsedAssets, ParsedAndroidAssets.class, "direct_parsed_assets"),
+          nestedSet(transitiveParsedAssets, ParsedAndroidAssets.class, "transitive_parsed_assets"),
+          nestedSet(transitiveAssets, Artifact.class, "transitive_assets"),
+          nestedSet(transitiveSymbols, Artifact.class, "transitive_symbols"),
+          nestedSet(transitiveCompiledSymbols, Artifact.class, "transitive_compiled_symbols"));
     }
 
-    private <T> NestedSet<T> nestedSet(SkylarkNestedSet from, Class<T> with) {
-      return NestedSetBuilder.<T>naiveLinkOrder().addTransitive(from.getSet(with)).build();
+    private static <T> NestedSet<T> nestedSet(Depset from, Class<T> with, String fieldName)
+        throws EvalException {
+      return NestedSetBuilder.<T>naiveLinkOrder()
+          .addTransitive(Depset.cast(from, with, fieldName))
+          .build();
     }
   }
 }

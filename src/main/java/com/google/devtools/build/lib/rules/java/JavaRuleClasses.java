@@ -23,28 +23,70 @@ import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
 import com.google.devtools.build.lib.analysis.platform.ToolchainInfo;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
-import com.google.devtools.build.lib.packages.SkylarkProviderIdentifier;
+import com.google.devtools.build.lib.packages.StarlarkProviderIdentifier;
 
 /** Common rule class definitions for Java rules. */
 public class JavaRuleClasses {
+
+  public static final String JAVA_TOOLCHAIN_ATTRIBUTE_NAME = "$java_toolchain";
+  public static final String JAVA_RUNTIME_ATTRIBUTE_NAME = "$jvm";
+
   /** Common attributes for rules that depend on ijar. */
   public static final class IjarBaseRule implements RuleDefinition {
     @Override
     public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
-      return builder
-          .add(
-              attr(":java_toolchain", LABEL)
-                  .useOutputLicenses()
-                  .mandatoryProviders(ToolchainInfo.PROVIDER.id())
-                  .value(JavaSemantics.javaToolchainAttribute(env)))
-          .setPreferredDependencyPredicate(JavaSemantics.JAVA_SOURCE)
-          .build();
+      return builder.setPreferredDependencyPredicate(JavaSemantics.JAVA_SOURCE).build();
     }
 
     @Override
     public Metadata getMetadata() {
       return RuleDefinition.Metadata.builder()
           .name("$ijar_base_rule")
+          .type(RuleClassType.ABSTRACT)
+          .ancestors(JavaToolchainBaseRule.class)
+          .build();
+    }
+  }
+
+  /** Common attributes for rules that use the Java toolchain. */
+  public static final class JavaToolchainBaseRule implements RuleDefinition {
+    @Override
+    public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
+      return builder
+          .add(
+              attr(JAVA_TOOLCHAIN_ATTRIBUTE_NAME, LABEL)
+                  .useOutputLicenses()
+                  .mandatoryProviders(ToolchainInfo.PROVIDER.id())
+                  .value(JavaSemantics.javaToolchainAttribute(env)))
+          .build();
+    }
+
+    @Override
+    public Metadata getMetadata() {
+      return RuleDefinition.Metadata.builder()
+          .name("$java_toolchain_base_rule")
+          .type(RuleClassType.ABSTRACT)
+          .build();
+    }
+  }
+
+  /** Common attributes for rules that use the Java runtime. */
+  public static final class JavaRuntimeBaseRule implements RuleDefinition {
+    @Override
+    public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
+      return builder
+          .add(
+              attr(JAVA_RUNTIME_ATTRIBUTE_NAME, LABEL)
+                  .value(JavaSemantics.jvmAttribute(env))
+                  .mandatoryProviders(ToolchainInfo.PROVIDER.id())
+                  .useOutputLicenses())
+          .build();
+    }
+
+    @Override
+    public Metadata getMetadata() {
+      return RuleDefinition.Metadata.builder()
+          .name("$java_runtime_toolchain_base_rule")
           .type(RuleClassType.ABSTRACT)
           .build();
     }
@@ -55,6 +97,6 @@ public class JavaRuleClasses {
    * {@link JavaInfo} through an attribute. Other providers can be included in {@code
    * mandatoryProvidersLists} as well.
    */
-  public static final ImmutableList<SkylarkProviderIdentifier> CONTAINS_JAVA_PROVIDER =
-      ImmutableList.of(SkylarkProviderIdentifier.forKey(JavaInfo.PROVIDER.getKey()));
+  public static final ImmutableList<StarlarkProviderIdentifier> CONTAINS_JAVA_PROVIDER =
+      ImmutableList.of(StarlarkProviderIdentifier.forKey(JavaInfo.PROVIDER.getKey()));
 }

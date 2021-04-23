@@ -13,9 +13,10 @@
 // limitations under the License.
 package com.google.devtools.build.skyframe;
 
+import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.util.GroupedList;
 import com.google.devtools.build.lib.util.GroupedList.GroupedListHelper;
-import java.util.Collection;
+import java.util.List;
 import java.util.Set;
 import javax.annotation.Nullable;
 
@@ -71,17 +72,12 @@ public abstract class DelegatingNodeEntry implements NodeEntry {
   }
 
   @Override
-  public boolean signalDep() {
-    return getDelegate().signalDep();
-  }
-
-  @Override
   public boolean signalDep(Version childVersion, @Nullable SkyKey childForDebugging) {
     return getDelegate().signalDep(childVersion, childForDebugging);
   }
 
   @Override
-  public Set<SkyKey> markClean() throws InterruptedException {
+  public NodeValueAndRdepsToSignal markClean() throws InterruptedException {
     return getDelegate().markClean();
   }
 
@@ -101,7 +97,7 @@ public abstract class DelegatingNodeEntry implements NodeEntry {
   }
 
   @Override
-  public Collection<SkyKey> getNextDirtyDirectDeps() throws InterruptedException {
+  public List<SkyKey> getNextDirtyDirectDeps() throws InterruptedException {
     return getDelegate().getNextDirtyDirectDeps();
   }
 
@@ -111,7 +107,7 @@ public abstract class DelegatingNodeEntry implements NodeEntry {
   }
 
   @Override
-  public Set<SkyKey> getAllRemainingDirtyDirectDeps() throws InterruptedException {
+  public ImmutableSet<SkyKey> getAllRemainingDirtyDirectDeps() throws InterruptedException {
     return getDelegate().getAllRemainingDirtyDirectDeps();
   }
 
@@ -166,6 +162,11 @@ public abstract class DelegatingNodeEntry implements NodeEntry {
   }
 
   @Override
+  public boolean hasAtLeastOneDep() throws InterruptedException {
+    return getDelegate().hasAtLeastOneDep();
+  }
+
+  @Override
   public void removeReverseDep(SkyKey reverseDep) throws InterruptedException {
     getDelegate().removeReverseDep(reverseDep);
   }
@@ -197,7 +198,12 @@ public abstract class DelegatingNodeEntry implements NodeEntry {
   }
 
   @Override
-  public void addTemporaryDirectDepsGroupToDirtyEntry(Collection<SkyKey> group) {
+  public void addTemporaryDirectDepsGroupToDirtyEntry(List<SkyKey> group) {
     getDelegate().addTemporaryDirectDepsGroupToDirtyEntry(group);
+  }
+
+  @Override
+  public void addExternalDep() {
+    getDelegate().addExternalDep();
   }
 }

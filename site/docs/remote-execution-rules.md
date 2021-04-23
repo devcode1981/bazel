@@ -1,19 +1,21 @@
 ---
 layout: documentation
-title: Adapting Bazel Rules for Remote Execution
+title: Adapting Bazel rules for remote execution
 ---
 
 # Adapting Bazel Rules for Remote Execution
 
+This page is intended for Bazel users writing custom build and test rules
+who want to understand the requirements for Bazel rules in the context of
+remote execution.
+
 Remote execution allows Bazel to execute actions on a separate platform, such as
-a datacenter. A [gRPC protocol](https://github.com/googleapis/googleapis/blob/master/google/devtools/remoteexecution/v1test/remote_execution.proto)
+a datacenter. A [gRPC protocol](https://github.com/bazelbuild/remote-apis/blob/master/build/bazel/remote/execution/v2/remote_execution.proto)
 is currently in development. You can try remote execution with [bazel-buildfarm](https://github.com/bazelbuild/bazel-buildfarm),
 an open-source project that aims to provide a distributed remote execution
-platform. This document is intended for Bazel users writing custom build and
-test rules who want to understand the requirements for Bazel rules in
-the context of remote execution.
+platform.
 
-This document uses the following terminology when referring to different
+This page uses the following terminology when referring to different
 environment types or *platforms*:
 
 *   **Host platform** - where Bazel runs.
@@ -23,7 +25,7 @@ environment types or *platforms*:
 ## Overview
 
 When configuring a Bazel build for remote execution, you must follow the
-guidelines described in this document to ensure the build executes remotely
+guidelines described in this page to ensure the build executes remotely
 error-free. This is due to the nature of remote execution, namely:
 
 *   **Isolated build actions.** Build tools do not retain state and dependencies
@@ -32,7 +34,7 @@ error-free. This is due to the nature of remote execution, namely:
 *   **Diverse execution environments.** Local build configuration is not always
     suitable for remote execution environments.
 
-This document describes the issues that can arise when implementing custom Bazel
+This page describes the issues that can arise when implementing custom Bazel
 build and test rules for remote execution and how to avoid them. It covers the
 following topics:
 
@@ -132,15 +134,17 @@ remote execution:
     build to fail on the remote execution platform as Bazel will not be able to
     locate them. Instead, create symlinks using standard build actions so that
     the symlinked tools and libraries are accessible from Bazel's `runfiles`
-    tree. Do not use [`repository_ctx.symlink`](https://docs.bazel.build/versions/master/skylark/lib/repository_ctx.html#symlink)
+    tree. Do not use [`repository_ctx.symlink`](skylark/lib/repository_ctx.html#symlink)
     to symlink target files outside of the external repo directory.
 
 *   **Mutating the host platform.** Avoid creating files outside of the Bazel
     `runfiles` tree, creating environment variables, and similar actions, as
      they may behave unexpectedly on the remote execution platform.
 
+To help find potential non-hermetic behavior you can use [Workspace rules log](/workspace-log.md).
+
 If an external dependency executes specific operations dependent on the host
-platform, we recommend splitting those operations between `WORKSPACE` and build
+platform, you should split those operations between `WORKSPACE` and build
 rules as follows:
 
 *   **Platform inspection and dependency enumeration.** These operations are

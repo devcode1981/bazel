@@ -14,71 +14,48 @@
 
 package com.google.devtools.build.lib.rules.cpp;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Verify;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.devtools.build.lib.analysis.config.AutoCpuConverter;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration.Options.MakeVariableSource;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
 import com.google.devtools.build.lib.analysis.config.CompilationMode;
+import com.google.devtools.build.lib.analysis.config.CoreOptions;
+import com.google.devtools.build.lib.analysis.config.Fragment;
 import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
 import com.google.devtools.build.lib.analysis.config.PerLabelOptions;
-import com.google.devtools.build.lib.analysis.skylark.annotations.SkylarkConfigurationField;
+import com.google.devtools.build.lib.analysis.config.RequiresOptions;
+import com.google.devtools.build.lib.analysis.starlark.annotations.StarlarkConfigurationField;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
-import com.google.devtools.build.lib.events.Location;
-import com.google.devtools.build.lib.rules.cpp.CppConfigurationLoader.CppConfigurationParameters;
-import com.google.devtools.build.lib.rules.cpp.Link.LinkingMode;
-import com.google.devtools.build.lib.skylarkbuildapi.cpp.CppConfigurationApi;
-import com.google.devtools.build.lib.skylarkinterface.SkylarkCallable;
-import com.google.devtools.build.lib.syntax.EvalException;
+import com.google.devtools.build.lib.packages.BazelModuleContext;
+import com.google.devtools.build.lib.rules.apple.AppleCommandLineOptions;
+import com.google.devtools.build.lib.rules.apple.AppleCommandLineOptions.AppleBitcodeMode;
+import com.google.devtools.build.lib.rules.apple.AppleConfiguration;
+import com.google.devtools.build.lib.rules.apple.AppleConfiguration.AppleCpus;
+import com.google.devtools.build.lib.rules.apple.ApplePlatform;
+import com.google.devtools.build.lib.starlarkbuildapi.cpp.CppConfigurationApi;
+import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig;
-import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.CrosstoolRelease;
+import java.util.EnumMap;
 import javax.annotation.Nullable;
+import net.starlark.java.annot.StarlarkMethod;
+import net.starlark.java.eval.EvalException;
+import net.starlark.java.eval.Module;
+import net.starlark.java.eval.Starlark;
+import net.starlark.java.eval.StarlarkThread;
 
 /**
  * This class represents the C/C++ parts of the {@link BuildConfiguration}, including the host
- * architecture, target architecture, compiler version, and a standard library version. It has
- * information about the tools locations and the flags required for compiling.
- *
- * <p>Before {@link CppConfiguration} is created, two things need to be done:
- *
- * <ol>
- *   <li>choosing a {@link CcToolchainRule} label from {@code toolchains} map attribute of {@link
- *       CcToolchainSuiteRule}.
- *   <li>selection of a {@link
- *       com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.CToolchain} from the
- *       CROSSTOOL file.
- * </ol>
- *
- * <p>The process goes as follows:
- *
- * <p>Check for existence of {@link CcToolchainSuiteRule}.toolchains[<cpu>|<compiler>], if
- * --compiler is specified, otherwise check for {@link CcToolchainSuiteRule}.toolchains[<cpu>].
- *
- * <ul>
- *   <li>if a value is found, load the {@link CcToolchainRule} rule and look for the {@code
- *       toolchain_identifier} attribute.
- *   <li>
- *       <ul>
- *         <li>if the attribute exists, loop through all the {@code CToolchain}s in CROSSTOOL and
- *             select the one with the matching toolchain identifier.
- *         <li>otherwise fall back to selecting the CToolchain from CROSSTOOL by matching the --cpu
- *             and --compiler values.
- *       </ul>
- *   <li>If a value is not found, select the CToolchain from CROSSTOOL by matching the --cpu and
- *       --compiler values, and construct the key as follows: <toolchain.cpu>|<toolchain.compiler>.
- * </ul>
+ * architecture, target architecture, compiler version, and a standard library version.
  */
 @Immutable
-public final class CppConfiguration extends BuildConfiguration.Fragment
+@RequiresOptions(options = {AppleCommandLineOptions.class, CppOptions.class})
+public final class CppConfiguration extends Fragment
     implements CppConfigurationApi<InvalidConfigurationException> {
   /**
    * String indicating a Mac system, for example when used in a crosstool configuration's host or
@@ -90,8 +67,13 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
   public static final String CC_FLAGS_MAKE_VARIABLE_NAME = "CC_FLAGS";
 
   /**
-   * An enumeration of all the tools that comprise a toolchain.
+   * Packages that can use the extended parameters in CppConfiguration See javadoc for {@link
+   * com.google.devtools.build.lib.rules.cpp.CcModule}
    */
+  public static final ImmutableList<String> EXPANDED_CC_CONFIGURATION_API_ALLOWLIST =
+      ImmutableList.of();
+
+  /** An enumeration of all the tools that comprise a toolchain. */
   public enum Tool {
     AR("ar"),
     CPP("cpp"),
@@ -99,6 +81,7 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
     GCOV("gcov"),
     GCOVTOOL("gcov-tool"),
     LD("ld"),
+    LLVM_COV("llvm-cov"),
     NM("nm"),
     OBJCOPY("objcopy"),
     OBJDUMP("objdump"),
@@ -144,16 +127,17 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
    * --dynamic_mode parses to DynamicModeFlag, but AUTO will be translated based on platform,
    * resulting in a DynamicMode value.
    */
-  public enum DynamicMode     { OFF, DEFAULT, FULLY }
+  public enum DynamicMode {
+    OFF,
+    DEFAULT,
+    FULLY
+  }
 
-  /**
-   * This enumeration is used for the --strip option.
-   */
+  /** This enumeration is used for the --strip option. */
   public enum StripMode {
-
-    ALWAYS("always"),       // Always strip.
+    ALWAYS("always"), // Always strip.
     SOMETIMES("sometimes"), // Strip iff compilationMode == FASTBUILD.
-    NEVER("never");         // Never strip.
+    NEVER("never"); // Never strip.
 
     private final String mode;
 
@@ -173,43 +157,21 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
    */
   public static final String FDO_STAMP_MACRO = "BUILD_FDO_TYPE";
 
-  private final Label crosstoolTop;
-  /**
-   * cc_toolchain_suite allows to override CROSSTOOL by using proto attribute. This attribute value
-   * is stored here so cc_toolchain can access it in the analysis. Don't use this for anything, it
-   * will be removed when b/113849758 is fixed. If you do, I'll send bubo to take your keyboard
-   * away.
-   */
-  @Deprecated private final CrosstoolRelease crosstoolFromCcToolchainProtoAttribute;
-
-  private final String transformedCpuFromOptions;
-  private final String compilerFromOptions;
-  // TODO(lberki): desiredCpu *should* be always the same as targetCpu, except that we don't check
-  // that the CPU we get from the toolchain matches BuildConfiguration.Options.cpu . So we store
-  // it here so that the output directory doesn't depend on the CToolchain. When we will eventually
-  // verify that the two are the same, we can remove one of desiredCpu and targetCpu.
-  private final String desiredCpu;
-  private final PathFragment crosstoolTopPathFragment;
+  // TODO(lberki): This is only used for determining the output directory name.
+  // Unfortunately, we can't move it easily to OutputDirectories.buildMnemonic() because the CPU is
+  // currently in the middle of the name of the configuration directory (e.g. it comes after the
+  // Android configuration)
+  private final String cpu;
 
   private final PathFragment fdoPath;
   private final Label fdoOptimizeLabel;
 
-  // TODO(b/113849758): Remove once it's not needed for toolchain selection in CppConfiguration.
-  private final Label ccToolchainLabel;
-  private final Label stlLabel;
+  private final PathFragment csFdoAbsolutePath;
+  private final PathFragment propellerOptimizeAbsoluteCCProfile;
+  private final PathFragment propellerOptimizeAbsoluteLdProfile;
 
-  // TODO(kmensah): This is temporary until all the Skylark functions that need this can be removed.
-  private final PathFragment nonConfiguredSysroot;
-  private final Label sysrootLabel;
-
-  private final ImmutableList<String> compilerFlags;
-  private final ImmutableList<String> cxxFlags;
-  private final ImmutableList<String> unfilteredCompilerFlags;
   private final ImmutableList<String> conlyopts;
 
-  private final ImmutableList<String> mostlyStaticLinkFlags;
-  private final ImmutableList<String> mostlyStaticSharedLinkFlags;
-  private final ImmutableList<String> dynamicLinkFlags;
   private final ImmutableList<String> copts;
   private final ImmutableList<String> cxxopts;
 
@@ -222,44 +184,17 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
   // The dynamic mode for linking.
   private final boolean stripBinaries;
   private final CompilationMode compilationMode;
+  private final boolean collectCodeCoverage;
+  private final boolean isToolConfigurationDoNotUseWillBeRemovedFor129045294;
 
-  private final boolean shouldProvideMakeVariables;
+  private final boolean appleGenerateDsym;
+  private final AppleBitcodeMode appleBitcodeMode;
 
-  private final CppToolchainInfo cppToolchainInfo;
+  public CppConfiguration(BuildOptions options) throws InvalidConfigurationException {
+    CppOptions cppOptions = options.get(CppOptions.class);
 
-  static CppConfiguration create(CppConfigurationParameters params)
-      throws InvalidConfigurationException {
-    CppOptions cppOptions = params.cppOptions;
-    PathFragment crosstoolTopPathFragment =
-        params.crosstoolTop.getPackageIdentifier().getPathUnderExecRoot();
-    CppToolchainInfo cppToolchainInfo =
-        CppToolchainInfo.create(
-            crosstoolTopPathFragment,
-            params.ccToolchainLabel,
-            params.ccToolchainConfigInfo,
-            cppOptions.disableLegacyCrosstoolFields,
-            cppOptions.disableCompilationModeFlags,
-            cppOptions.disableLinkingModeFlags);
-
-    CompilationMode compilationMode = params.commonOptions.compilationMode;
-
-    ImmutableList.Builder<String> coptsBuilder =
-        ImmutableList.<String>builder()
-            .addAll(cppToolchainInfo.getCompilerFlags())
-            .addAll(cppToolchainInfo.getCFlagsByCompilationMode().get(compilationMode));
-    if (cppOptions.experimentalOmitfp) {
-      coptsBuilder.add("-fomit-frame-pointer");
-      coptsBuilder.add("-fasynchronous-unwind-tables");
-      coptsBuilder.add("-DNO_FRAME_POINTER");
-    }
-    coptsBuilder.addAll(cppOptions.coptList);
-
-    ImmutableList<String> cxxOpts =
-        ImmutableList.<String>builder()
-            .addAll(cppToolchainInfo.getCxxFlags())
-            .addAll(cppToolchainInfo.getCxxFlagsByCompilationMode().get(compilationMode))
-            .addAll(cppOptions.cxxoptList)
-            .build();
+    CoreOptions commonOptions = options.get(CoreOptions.class);
+    CompilationMode compilationMode = commonOptions.compilationMode;
 
     ImmutableList.Builder<String> linkoptsBuilder = ImmutableList.builder();
     linkoptsBuilder.addAll(cppOptions.linkoptList);
@@ -267,392 +202,129 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
       linkoptsBuilder.add("-Wl,--eh-frame-hdr");
     }
 
-    return new CppConfiguration(
-        params.crosstoolTop,
-        params.crosstoolFromCcToolchainProtoAttribute,
-        params.transformedCpu,
-        params.compiler,
-        Preconditions.checkNotNull(params.commonOptions.cpu),
-        crosstoolTopPathFragment,
-        params.fdoPath,
-        params.fdoOptimizeLabel,
-        params.ccToolchainLabel,
-        params.stlLabel,
-        params.sysrootLabel == null
-            ? cppToolchainInfo.getDefaultSysroot()
-            : params.sysrootLabel.getPackageFragment(),
-        params.sysrootLabel,
-        coptsBuilder.build(),
-        cxxOpts,
-        cppToolchainInfo.getUnfilteredCompilerOptions(/* sysroot= */ null),
-        ImmutableList.copyOf(cppOptions.conlyoptList),
-        cppToolchainInfo.configureAllLegacyLinkOptions(compilationMode, LinkingMode.STATIC),
-        cppToolchainInfo.configureAllLegacyLinkOptions(
-            compilationMode, LinkingMode.LEGACY_MOSTLY_STATIC_LIBRARIES),
-        cppToolchainInfo.configureAllLegacyLinkOptions(compilationMode, LinkingMode.DYNAMIC),
-        ImmutableList.copyOf(cppOptions.coptList),
-        ImmutableList.copyOf(cppOptions.cxxoptList),
-        linkoptsBuilder.build(),
-        ImmutableList.copyOf(cppOptions.ltoindexoptList),
-        ImmutableList.copyOf(cppOptions.ltobackendoptList),
-        cppOptions,
-        (cppOptions.stripBinaries == StripMode.ALWAYS
-            || (cppOptions.stripBinaries == StripMode.SOMETIMES
-                && compilationMode == CompilationMode.FASTBUILD)),
-        compilationMode,
-        params.commonOptions.makeVariableSource == MakeVariableSource.CONFIGURATION,
-        cppToolchainInfo);
-  }
-
-  private CppConfiguration(
-      Label crosstoolTop,
-      CrosstoolRelease crosstoolFromCcToolchainProtoAttribute,
-      String transformedCpuFromOptions,
-      String compilerFromOptions,
-      String desiredCpu,
-      PathFragment crosstoolTopPathFragment,
-      PathFragment fdoPath,
-      Label fdoOptimizeLabel,
-      Label ccToolchainLabel,
-      Label stlLabel,
-      PathFragment nonConfiguredSysroot,
-      Label sysrootLabel,
-      ImmutableList<String> compilerFlags,
-      ImmutableList<String> cxxFlags,
-      ImmutableList<String> unfilteredCompilerFlags,
-      ImmutableList<String> conlyopts,
-      ImmutableList<String> mostlyStaticLinkFlags,
-      ImmutableList<String> mostlyStaticSharedLinkFlags,
-      ImmutableList<String> dynamicLinkFlags,
-      ImmutableList<String> copts,
-      ImmutableList<String> cxxopts,
-      ImmutableList<String> linkopts,
-      ImmutableList<String> ltoindexOptions,
-      ImmutableList<String> ltobackendOptions,
-      CppOptions cppOptions,
-      boolean stripBinaries,
-      CompilationMode compilationMode,
-      boolean shouldProvideMakeVariables,
-      CppToolchainInfo cppToolchainInfo) {
-    this.crosstoolTop = crosstoolTop;
-    this.crosstoolFromCcToolchainProtoAttribute = crosstoolFromCcToolchainProtoAttribute;
-    this.transformedCpuFromOptions = transformedCpuFromOptions;
-    this.compilerFromOptions = compilerFromOptions;
-    this.desiredCpu = desiredCpu;
-    this.crosstoolTopPathFragment = crosstoolTopPathFragment;
-    this.fdoPath = fdoPath;
-    this.fdoOptimizeLabel = fdoOptimizeLabel;
-    this.ccToolchainLabel = ccToolchainLabel;
-    this.stlLabel = stlLabel;
-    this.nonConfiguredSysroot = nonConfiguredSysroot;
-    this.sysrootLabel = sysrootLabel;
-    this.compilerFlags = compilerFlags;
-    this.cxxFlags = cxxFlags;
-    this.unfilteredCompilerFlags = unfilteredCompilerFlags;
-    this.conlyopts = conlyopts;
-    this.mostlyStaticLinkFlags = mostlyStaticLinkFlags;
-    this.mostlyStaticSharedLinkFlags = mostlyStaticSharedLinkFlags;
-    this.dynamicLinkFlags = dynamicLinkFlags;
-    this.copts = copts;
-    this.cxxopts = cxxopts;
-    this.linkopts = linkopts;
-    this.ltoindexOptions = ltoindexOptions;
-    this.ltobackendOptions = ltobackendOptions;
-    this.cppOptions = cppOptions;
-    this.stripBinaries = stripBinaries;
-    this.compilationMode = compilationMode;
-    this.shouldProvideMakeVariables = shouldProvideMakeVariables;
-    this.cppToolchainInfo = cppToolchainInfo;
-  }
-
-  @VisibleForTesting
-  static LinkingMode importLinkingMode(CrosstoolConfig.LinkingMode mode) {
-    switch (mode.name()) {
-      case "FULLY_STATIC":
-        return LinkingMode.LEGACY_FULLY_STATIC;
-      case "MOSTLY_STATIC_LIBRARIES":
-        return LinkingMode.LEGACY_MOSTLY_STATIC_LIBRARIES;
-      case "MOSTLY_STATIC":
-        return LinkingMode.STATIC;
-      case "DYNAMIC":
-        return LinkingMode.DYNAMIC;
-      default:
-        throw new IllegalArgumentException(
-            String.format("Linking mode '%s' not known.", mode.name()));
+    PathFragment fdoPath = null;
+    Label fdoProfileLabel = null;
+    if (cppOptions.getFdoOptimize() != null) {
+      if (cppOptions.getFdoOptimize().startsWith("//")) {
+        try {
+          fdoProfileLabel = Label.parseAbsolute(cppOptions.getFdoOptimize(), ImmutableMap.of());
+        } catch (LabelSyntaxException e) {
+          throw new InvalidConfigurationException(e);
+        }
+      } else {
+        fdoPath = PathFragment.create(cppOptions.getFdoOptimize());
+        try {
+          // We don't check for file existence, but at least the filename should be well-formed.
+          FileSystemUtils.checkBaseName(fdoPath.getBaseName());
+        } catch (IllegalArgumentException e) {
+          throw new InvalidConfigurationException(e);
+        }
+      }
     }
+
+    PathFragment csFdoAbsolutePath = null;
+    if (cppOptions.csFdoAbsolutePathForBuild != null) {
+      csFdoAbsolutePath = PathFragment.create(cppOptions.csFdoAbsolutePathForBuild);
+      if (!csFdoAbsolutePath.isAbsolute()) {
+        throw new InvalidConfigurationException(
+            "Path of '"
+                + csFdoAbsolutePath.getPathString()
+                + "' in --cs_fdo_absolute_path is not an absolute path.");
+      }
+      try {
+        FileSystemUtils.checkBaseName(csFdoAbsolutePath.getBaseName());
+      } catch (IllegalArgumentException e) {
+        throw new InvalidConfigurationException(e);
+      }
+    }
+
+    PathFragment propellerOptimizeAbsoluteCCProfile = null;
+    if (cppOptions.propellerOptimizeAbsoluteCCProfile != null) {
+      propellerOptimizeAbsoluteCCProfile =
+          PathFragment.create(cppOptions.propellerOptimizeAbsoluteCCProfile);
+      if (!propellerOptimizeAbsoluteCCProfile.isAbsolute()) {
+        throw new InvalidConfigurationException(
+            "Path of '"
+                + propellerOptimizeAbsoluteCCProfile.getPathString()
+                + "' in --propeller_optimize_absolute_cc_profile is not an absolute path.");
+      }
+      try {
+        FileSystemUtils.checkBaseName(propellerOptimizeAbsoluteCCProfile.getBaseName());
+      } catch (IllegalArgumentException e) {
+        throw new InvalidConfigurationException(e);
+      }
+    }
+
+    PathFragment propellerOptimizeAbsoluteLdProfile = null;
+    if (cppOptions.propellerOptimizeAbsoluteLdProfile != null) {
+      propellerOptimizeAbsoluteLdProfile =
+          PathFragment.create(cppOptions.propellerOptimizeAbsoluteLdProfile);
+      if (!propellerOptimizeAbsoluteLdProfile.isAbsolute()) {
+        throw new InvalidConfigurationException(
+            "Path of '"
+                + propellerOptimizeAbsoluteLdProfile.getPathString()
+                + "' in --propeller_optimize_absolute_ld_profile is not an absolute path.");
+      }
+      try {
+        FileSystemUtils.checkBaseName(propellerOptimizeAbsoluteLdProfile.getBaseName());
+      } catch (IllegalArgumentException e) {
+        throw new InvalidConfigurationException(e);
+      }
+    }
+
+    this.cpu = commonOptions.cpu;
+    this.fdoPath = fdoPath;
+    this.fdoOptimizeLabel = fdoProfileLabel;
+    this.csFdoAbsolutePath = csFdoAbsolutePath;
+    this.propellerOptimizeAbsoluteCCProfile = propellerOptimizeAbsoluteCCProfile;
+    this.propellerOptimizeAbsoluteLdProfile = propellerOptimizeAbsoluteLdProfile;
+    this.conlyopts = ImmutableList.copyOf(cppOptions.conlyoptList);
+    this.copts = ImmutableList.copyOf(cppOptions.coptList);
+    this.cxxopts = ImmutableList.copyOf(cppOptions.cxxoptList);
+    this.linkopts = linkoptsBuilder.build();
+    this.ltoindexOptions = ImmutableList.copyOf(cppOptions.ltoindexoptList);
+    this.ltobackendOptions = ImmutableList.copyOf(cppOptions.ltobackendoptList);
+    this.cppOptions = cppOptions;
+    this.stripBinaries =
+        cppOptions.stripBinaries == StripMode.ALWAYS
+            || (cppOptions.stripBinaries == StripMode.SOMETIMES
+                && compilationMode == CompilationMode.FASTBUILD);
+    this.compilationMode = compilationMode;
+    this.collectCodeCoverage = commonOptions.collectCodeCoverage;
+    this.isToolConfigurationDoNotUseWillBeRemovedFor129045294 =
+        commonOptions.isHost || commonOptions.isExec;
+    this.appleGenerateDsym =
+        (cppOptions.appleGenerateDsym
+            || (cppOptions.appleEnableAutoDsymDbg && compilationMode == CompilationMode.DBG));
+    this.appleBitcodeMode =
+        computeAppleBitcodeMode(options.get(AppleCommandLineOptions.class), commonOptions);
   }
 
-  /** Returns the {@link CppToolchainInfo} used by this configuration. */
-  public CppToolchainInfo getCppToolchainInfo() {
-    return cppToolchainInfo;
-  }
+  private static AppleBitcodeMode computeAppleBitcodeMode(
+      AppleCommandLineOptions options, CoreOptions commonOptions) {
+    ApplePlatform.PlatformType applePlatformType =
+        Preconditions.checkNotNull(options.applePlatformType, "applePlatformType");
+    AppleCpus appleCpus = AppleCpus.create(options, commonOptions);
+    EnumMap<ApplePlatform.PlatformType, AppleBitcodeMode> platformBitcodeModes =
+        AppleConfiguration.collectBitcodeModes(options.appleBitcodeMode);
 
-  /**
-   * Returns the toolchain identifier, which uniquely identifies the compiler version, target libc
-   * version, and target cpu.
-   */
-  public String getToolchainIdentifier() {
-    return cppToolchainInfo.getToolchainIdentifier();
-  }
-
-  /** Returns the label of the CROSSTOOL for this configuration. */
-  public Label getCrosstoolTop() {
-    return crosstoolTop;
-  }
-
-  /**
-   * Returns the path of the crosstool.
-   */
-  public PathFragment getCrosstoolTopPathFragment() {
-    return cppToolchainInfo.getCrosstoolTopPathFragment();
-  }
-
-  @Override
-  public String toString() {
-    return cppToolchainInfo.toString();
-  }
-
-  /**
-   * Returns the compiler version string (e.g. "gcc-4.1.1").
-   *
-   * <p>Deprecated: Use {@link CcToolchainProvider#getCompiler()}
-   */
-  // TODO(b/68038647): Remove once make variables are no longer derived from CppConfiguration.
-  @Override
-  @Deprecated
-  public String getCompiler() throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    return cppToolchainInfo.getCompiler();
-  }
-
-  /**
-   * Returns the libc version string (e.g. "glibc-2.2.2").
-   *
-   * <p>Deprecated: Use {@link CcToolchainProvider#getTargetLibc()}
-   */
-  // TODO(b/68038647): Remove once make variables are no longer derived from CppConfiguration.
-  @Override
-  @Deprecated
-  public String getTargetLibc() throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    return cppToolchainInfo.getTargetLibc();
-  }
-
-  /**
-   * Returns the target architecture using blaze-specific constants (e.g. "piii").
-   *
-   * <p>Deprecated: Use {@link CcToolchainProvider#getTargetCpu()}
-   */
-  // TODO(b/68038647): Remove once skylark callers are migrated.
-  @Override
-  @Deprecated
-  public String getTargetCpu() throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    return cppToolchainInfo.getTargetCpu();
-  }
-
-  /**
-   * Returns the path fragment that is either absolute or relative to the execution root that can be
-   * used to execute the given tool.
-   *
-   * <p>Deprecated: Use {@link CcToolchainProvider#getToolPathFragment(Tool)}
-   */
-  @Deprecated
-  public PathFragment getToolPathFragment(CppConfiguration.Tool tool) {
-    return cppToolchainInfo.getToolPathFragment(tool);
+    return AppleConfiguration.getAppleBitcodeMode(
+        applePlatformType, appleCpus, platformBitcodeModes);
   }
 
   /** Returns the label of the <code>cc_compiler</code> rule for the C++ configuration. */
-  @SkylarkConfigurationField(
+  @StarlarkConfigurationField(
       name = "cc_toolchain",
       doc = "The label of the target describing the C++ toolchain",
       defaultLabel = "//tools/cpp:crosstool",
       defaultInToolRepository = true)
   public Label getRuleProvidingCcToolchainProvider() {
-    if (provideCcToolchainInfoFromCcToolchainSuite()) {
-      return crosstoolTop;
-    } else {
-      return ccToolchainLabel;
-    }
+    return cppOptions.crosstoolTop;
   }
 
-  /**
-   * Returns the configured features of the toolchain. Rules should not call this directly, but
-   * instead use {@code CcToolchainProvider.getFeatures}.
-   */
-  public CcToolchainFeatures getFeatures() {
-    return cppToolchainInfo.getFeatures();
-  }
-
-  /**
-   * Returns the configured current compilation mode. Rules should not call this directly, but
-   * instead use {@code CcToolchainProvider.getCompilationMode}.
-   */
+  /** Returns the configured current compilation mode. */
   public CompilationMode getCompilationMode() {
     return compilationMode;
-  }
-
-  @Override
-  @Deprecated
-  public ImmutableList<String> getBuiltInIncludeDirectoriesForSkylark()
-      throws InvalidConfigurationException, EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    return getBuiltInIncludeDirectories(nonConfiguredSysroot)
-            .stream()
-            .map(PathFragment::getPathString)
-            .collect(ImmutableList.toImmutableList());
-  }
-
-  /**
-   * Returns the built-in list of system include paths for the toolchain compiler. All paths in this
-   * list should be relative to the exec directory. They may be absolute if they are also installed
-   * on the remote build nodes or for local compilation.
-   *
-   * <p>TODO(b/64384912): Migrate skylark callers to
-   * CcToolchainProvider#getBuiltinIncludeDirectories and delete this method.
-   */
-  private ImmutableList<PathFragment> getBuiltInIncludeDirectories(PathFragment sysroot)
-      throws InvalidConfigurationException {
-    ImmutableList.Builder<PathFragment> builtInIncludeDirectoriesBuilder = ImmutableList.builder();
-    for (String s : cppToolchainInfo.getRawBuiltInIncludeDirectories()) {
-      builtInIncludeDirectoriesBuilder.add(
-          CcToolchainProviderHelper.resolveIncludeDir(s, sysroot, crosstoolTopPathFragment));
-    }
-    return builtInIncludeDirectoriesBuilder.build();
-  }
-
-  /**
-   * Returns the sysroot to be used. If the toolchain compiler does not support
-   * different sysroots, or the sysroot is the same as the default sysroot, then
-   * this method returns <code>null</code>.
-   */
-  @Override
-  @Deprecated
-  public String getSysroot() throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    return nonConfiguredSysroot.getPathString();
-  }
-
-  public Label getSysrootLabel() {
-    return sysrootLabel;
-  }
-
-  /**
-   * Returns the default options to use for compiling C, C++, and assembler. This is just the
-   * options that should be used for all three languages. There may be additional C-specific or
-   * C++-specific options that should be used, in addition to the ones returned by this method.
-   *
-   * <p>Deprecated: Use {@link CcToolchainProvider#getLegacyCompileOptionsWithCopts()}
-   */
-  // TODO(b/64384912): Migrate skylark callers and remove.
-  @Override
-  @Deprecated
-  public ImmutableList<String> getCompilerOptions(Iterable<String> featuresNotUsedAnymore)
-    throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    checkForLegacyCompilationApiAvailability();
-    return compilerFlags;
-  }
-
-  /**
-   * Returns the list of additional C-specific options to use for compiling C. These should be go on
-   * the command line after the common options returned by {@link #getCompilerOptions}.
-   */
-  // TODO(b/64384912): Migrate skylark callers and remove.
-  @Override
-  @Deprecated
-  public ImmutableList<String> getCOptionsForSkylark() throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    checkForLegacyCompilationApiAvailability();
-    return getCOptions();
-  }
-
-  public ImmutableList<String> getCOptions() {
-    return conlyopts;
-  }
-
-  /**
-   * Returns the list of additional C++-specific options to use for compiling C++. These should be
-   * on the command line after the common options returned by {@link #getCompilerOptions}.
-   *
-   * <p>Deprecated: Use {@link CcToolchainProvider#getCxxOptionsWithCopts}
-   */
-  // TODO(b/64384912): Migrate skylark callers and remove.
-  @Override
-  @Deprecated
-  public ImmutableList<String> getCxxOptions(Iterable<String> featuresNotUsedAnymore)
-    throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    checkForLegacyCompilationApiAvailability();
-    return cxxFlags;
-  }
-
-  /**
-   * Returns the default list of options which cannot be filtered by BUILD rules. These should be
-   * appended to the command line after filtering.
-   *
-   * @deprecated since it uses nonconfigured sysroot. Use {@link
-   *     CcToolchainProvider#getUnfilteredCompilerOptionsWithSysroot(Iterable)} if you *really* need
-   *     to.
-   */
-  // TODO(b/65401585): Migrate existing uses to cc_toolchain and cleanup here.
-  @Deprecated
-  @Override
-  public ImmutableList<String> getUnfilteredCompilerOptionsWithLegacySysroot(
-      Iterable<String> featuresNotUsedAnymore) throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    checkForLegacyCompilationApiAvailability();
-    return getUnfilteredCompilerOptionsDoNotUse(nonConfiguredSysroot);
-  }
-
-  /**
-   * @deprecated since it hardcodes --sysroot flag. Use {@link
-   *     com.google.devtools.build.lib.rules.cpp.CcToolchainFeatures.FeatureConfiguration} instead.
-   */
-  // TODO(b/65401585): Migrate existing uses to cc_toolchain and cleanup here.
-  @Deprecated
-  ImmutableList<String> getUnfilteredCompilerOptionsDoNotUse(@Nullable PathFragment sysroot)
-    throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    if (sysroot == null) {
-      return unfilteredCompilerFlags;
-    }
-    return ImmutableList.<String>builder()
-        .add("--sysroot=" + sysroot)
-        .addAll(unfilteredCompilerFlags)
-        .build();
-  }
-
-  /**
-   * Returns the set of command-line linker options, including any flags inferred from the
-   * command-line options.
-   *
-   * @see Link
-   * @deprecated since it uses nonconfigured sysroot. Use
-   * {@link CcToolchainProvider#getLinkOptionsWithSysroot()} if you *really* need to.
-   */
-  // TODO(b/65401585): Migrate existing uses to cc_toolchain and cleanup here.
-  @Deprecated
-  @Override
-  public ImmutableList<String> getLinkOptionsWithLegacySysroot() throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    checkForLegacyLinkingApiAvailability();
-    return getLinkOptionsDoNotUse(nonConfiguredSysroot);
-  }
-
-  /**
-   * @deprecated since it hardcodes --sysroot flag. Use
-   * {@link com.google.devtools.build.lib.rules.cpp.CcToolchainFeatures.FeatureConfiguration}
-   * instead.
-   */
-  // TODO(b/65401585): Migrate existing uses to cc_toolchain and cleanup here.
-  @Deprecated
-  ImmutableList<String> getLinkOptionsDoNotUse(@Nullable PathFragment sysroot) {
-    if (sysroot == null) {
-      return linkopts;
-    } else {
-      return ImmutableList.<String>builder().addAll(linkopts).add("--sysroot=" + sysroot).build();
-    }
   }
 
   public boolean hasSharedLinkOption() {
@@ -669,116 +341,11 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
     return ltobackendOptions;
   }
 
-  /**
-   * Returns the immutable list of linker options for fully statically linked outputs. Does not
-   * include command-line options passed via --linkopt or --linkopts.
-   *
-   * @param featuresNotUsedAnymore
-   * @param sharedLib true if the output is a shared lib, false if it's an executable
-   *     <p>Deprecated: Use {@link CppHelper#getFullyStaticLinkOptions(CppConfiguration,
-   *     CcToolchainProvider, boolean)}
-   */
-  // TODO(b/64384912): Migrate skylark users to cc_common and remove.
-  @Override
-  @Deprecated
-  public ImmutableList<String> getFullyStaticLinkOptions(
-      Iterable<String> featuresNotUsedAnymore, Boolean sharedLib) throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    checkForLegacyLinkingApiAvailability();
-    if (!sharedLib) {
-      throw new EvalException(
-          Location.BUILTIN, "fully_static_link_options is deprecated, new uses are not allowed.");
-    }
-    return getSharedLibraryLinkOptions(mostlyStaticLinkFlags);
-  }
-
-  /**
-   * Returns the immutable list of linker options for mostly statically linked outputs. Does not
-   * include command-line options passed via --linkopt or --linkopts.
-   *
-   * @param featuresNotUsedAnymore
-   * @param sharedLib true if the output is a shared lib, false if it's an executable
-   *     <p>Deprecated: Use {@link CppHelper#getMostlyStaticLinkOptions( CppConfiguration,
-   *     CcToolchainProvider, boolean, boolean)}
-   */
-  // TODO(b/64384912): Migrate skylark users to cc_common and remove.
-  @Override
-  @Deprecated
-  public ImmutableList<String> getMostlyStaticLinkOptions(
-      Iterable<String> featuresNotUsedAnymore, Boolean sharedLib) throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    checkForLegacyLinkingApiAvailability();
-    if (sharedLib) {
-      return getSharedLibraryLinkOptions(
-          cppToolchainInfo.supportsEmbeddedRuntimes()
-              ? mostlyStaticSharedLinkFlags
-              : dynamicLinkFlags);
-    } else {
-      return mostlyStaticLinkFlags;
-    }
-  }
-
-  /**
-   * Returns the immutable list of linker options for artifacts that are not fully or mostly
-   * statically linked. Does not include command-line options passed via --linkopt or --linkopts.
-   *
-   * @param featuresNotUsedAnymore
-   * @param sharedLib true if the output is a shared lib, false if it's an executable
-   *     <p>Deprecated: Use {@link CppHelper#getDynamicLinkOptions(CppConfiguration,
-   *     CcToolchainProvider, Boolean)}
-   */
-  // TODO(b/64384912): Migrate skylark users to cc_common and remove.
-  @Override
-  @Deprecated
-  public ImmutableList<String> getDynamicLinkOptions(
-      Iterable<String> featuresNotUsedAnymore, Boolean sharedLib) throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    checkForLegacyLinkingApiAvailability();
-    if (sharedLib) {
-      return getSharedLibraryLinkOptions(dynamicLinkFlags);
-    } else {
-      return dynamicLinkFlags;
-    }
-  }
-
-  /**
-   * Returns link options for the specified flag list, combined with universal options for all
-   * shared libraries (regardless of link staticness).
-   *
-   * <p>Deprecated: Use {@link CcToolchainProvider#getSharedLibraryLinkOptions}
-   */
-  // TODO(b/64384912): Migrate skylark dependants and delete.
-  private ImmutableList<String> getSharedLibraryLinkOptions(ImmutableList<String> flags) {
-    return cppToolchainInfo.getSharedLibraryLinkOptions(flags);
-  }
-
-  /**
-   * Returns a map of additional make variables for use by {@link
-   * BuildConfiguration}. These are to used to allow some build rules to
-   * avoid the limits on stack frame sizes and variable-length arrays.
-   *
-   * <p>The returned map must contain an entry for {@code STACK_FRAME_UNLIMITED},
-   * though the entry may be an empty string.
-   */
-  public ImmutableMap<String, String> getAdditionalMakeVariables() {
-    return cppToolchainInfo.getAdditionalMakeVariables();
-  }
-
-  /**
-   * Returns the execution path to the linker binary to use for this build. Relative paths are
-   * relative to the execution root.
-   */
-  @Override
-  @Deprecated
-  public String getLdExecutableForSkylark() throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    PathFragment ldExecutable = getToolPathFragment(CppConfiguration.Tool.LD);
-    return ldExecutable != null ? ldExecutable.getPathString() : "";
-  }
-
-  @SkylarkCallable(
+  @StarlarkMethod(
       name = "minimum_os_version",
-      doc = "The minimum OS version for C/C++ compilation.")
+      doc = "The minimum OS version for C/C++ compilation.",
+      allowReturnNones = true)
+  @Nullable
   public String getMinimumOsVersion() {
     return cppOptions.minimumOsVersion;
   }
@@ -788,64 +355,46 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
     return cppOptions.dynamicMode;
   }
 
-  public boolean getLinkCompileOutputSeparately() {
-    return cppOptions.linkCompileOutputSeparately;
-  }
-
-  /**
-   * Returns the STL label if given on the command line. {@code null}
-   * otherwise.
-   */
-  public Label getStl() {
-    return stlLabel;
-  }
-
-  @SkylarkConfigurationField(
-      name = "stl",
-      doc = "The label of the STL target",
-      defaultLabel = "//third_party/stl",
-      defaultInToolRepository = false
-  )
-  public Label getSkylarkStl() {
-    if (stlLabel == null) {
-      try {
-        return Label.parseAbsolute("//third_party/stl", ImmutableMap.of());
-      } catch (LabelSyntaxException e) {
-        throw new IllegalStateException("STL label not formatted correctly", e);
-      }
-    }
-    return stlLabel;
+  @StarlarkMethod(
+      name = "dynamic_mode",
+      doc = "Whether C/C++ binaries/tests were requested to be linked dynamically.")
+  public String getDynamicModeFlagString() {
+    return cppOptions.dynamicMode.name();
   }
 
   public boolean isFdo() {
     return cppOptions.isFdo();
   }
 
-  /**
-   * Returns whether or not to strip the binaries.
-   */
+  public boolean isCSFdo() {
+    return cppOptions.isCSFdo();
+  }
+
+  public boolean useArgsParamsFile() {
+    return cppOptions.useArgsParamsFile;
+  }
+
+  /** Returns whether or not to strip the binaries. */
   public boolean shouldStripBinaries() {
     return stripBinaries;
   }
 
   /**
-   * Returns the additional options to pass to strip when generating a
-   * {@code <name>.stripped} binary by this build.
+   * Returns the additional options to pass to strip when generating a {@code <name>.stripped}
+   * binary by this build.
    */
   public ImmutableList<String> getStripOpts() {
     return ImmutableList.copyOf(cppOptions.stripoptList);
   }
 
-  /**
-   * Returns whether temporary outputs from gcc will be saved.
-   */
+  /** Returns whether temporary outputs from gcc will be saved. */
   public boolean getSaveTemps() {
     return cppOptions.saveTemps;
   }
 
   /**
-   * Returns the {@link PerLabelOptions} to apply to the gcc command line, if
-   * the label of the compiled file matches the regular expression.
+   * Returns the {@link PerLabelOptions} to apply to the gcc command line, if the label of the
+   * compiled file matches the regular expression.
    */
   public ImmutableList<PerLabelOptions> getPerFileCopts() {
     return ImmutableList.copyOf(cppOptions.perFileCopts);
@@ -859,16 +408,16 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
     return ImmutableList.copyOf(cppOptions.perFileLtoBackendOpts);
   }
 
-  /**
-   * Returns the custom malloc library label.
-   */
+  /** Returns the custom malloc library label. */
+  @Override
+  @StarlarkConfigurationField(
+      name = "custom_malloc",
+      doc = "The label specified in --custom_malloc")
   public Label customMalloc() {
     return cppOptions.customMalloc;
   }
 
-  /**
-   * Returns whether we are processing headers in dependencies of built C++ targets.
-   */
+  /** Returns whether we are processing headers in dependencies of built C++ targets. */
   public boolean processHeadersInDependencies() {
     return cppOptions.processHeadersInDependencies;
   }
@@ -898,110 +447,30 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
     return cppOptions.useStartEndLib;
   }
 
-  /**
-   * @return value from the --cpu option transformed using {@link CpuTransformer}. If it was not
-   *     passed explicitly, {@link AutoCpuConverter} will try to guess something reasonable.
-   */
-  public String getTransformedCpuFromOptions() {
-    return transformedCpuFromOptions;
-  }
-
   /** @return value from --compiler option, null if the option was not passed. */
   @Nullable
   public String getCompilerFromOptions() {
-    return compilerFromOptions;
+    return cppOptions.cppCompiler;
   }
 
   public boolean legacyWholeArchive() {
     return cppOptions.legacyWholeArchive;
   }
 
-  public boolean getSymbolCounts() {
-    return cppOptions.symbolCounts;
+  public boolean removeLegacyWholeArchive() {
+    return cppOptions.removeLegacyWholeArchive;
   }
 
   public boolean getInmemoryDotdFiles() {
     return cppOptions.inmemoryDotdFiles;
   }
 
-  public boolean getParseHeadersVerifiesModules() {
-    return cppOptions.parseHeadersVerifiesModules;
+  public boolean getParseHeadersSkippedIfCorrespondingSrcsFound() {
+    return cppOptions.parseHeadersSkippedIfCorrespondingSrcsFound;
   }
 
-  public boolean getUseInterfaceSharedObjects() {
+  public boolean getUseInterfaceSharedLibraries() {
     return cppOptions.useInterfaceSharedObjects;
-  }
-
-  /**
-   * Returns the path to the GNU binutils 'objcopy' binary to use for this build. (Corresponds to
-   * $(OBJCOPY) in make-dbg.) Relative paths are relative to the execution root.
-   */
-  @Override
-  @Deprecated
-  public String getObjCopyExecutableForSkylark() throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    PathFragment objCopyExecutable = getToolPathFragment(Tool.OBJCOPY);
-    return objCopyExecutable != null ? objCopyExecutable.getPathString() : "";
-  }
-
-  @Override
-  @Deprecated
-  public String getCppExecutableForSkylark() throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    PathFragment cppExecutable = getToolPathFragment(Tool.GCC);
-    return cppExecutable != null ? cppExecutable.getPathString() : "";
-  }
-
-  @Override
-  @Deprecated
-  public String getCpreprocessorExecutableForSkylark() throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    PathFragment cpreprocessorExecutable = getToolPathFragment(Tool.CPP);
-    return cpreprocessorExecutable != null ? cpreprocessorExecutable.getPathString() : "";
-  }
-
-  @Override
-  @Deprecated
-  public String getNmExecutableForSkylark() throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    PathFragment nmExecutable = getToolPathFragment(Tool.NM);
-    return nmExecutable != null ? nmExecutable.getPathString() : "";
-  }
-
-  @Override
-  @Deprecated
-  public String getObjdumpExecutableForSkylark() throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    PathFragment objdumpExecutable = getToolPathFragment(Tool.OBJDUMP);
-    return objdumpExecutable != null ? objdumpExecutable.getPathString() : "";
-  }
-
-  @Override
-  @Deprecated
-  public String getArExecutableForSkylark() throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    PathFragment arExecutable = getToolPathFragment(Tool.AR);
-    return arExecutable != null ? arExecutable.getPathString() : "";
-  }
-
-  @Override
-  @Deprecated
-  public String getStripExecutableForSkylark() throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    PathFragment stripExecutable = getToolPathFragment(Tool.STRIP);
-    return stripExecutable != null ? stripExecutable.getPathString() : "";
-  }
-
-  /**
-   * Returns the GNU System Name
-   *
-   */
-  //TODO(b/70225490): Migrate skylark dependants to CcToolchainProvider and delete.
-  @Override
-  @Deprecated
-  public String getTargetGnuSystemName() throws EvalException {
-    checkForToolchainSkylarkApiAvailability();
-    return cppToolchainInfo.getTargetGnuSystemName();
   }
 
   /** Returns whether this configuration will use libunwind for stack unwinding. */
@@ -1012,6 +481,14 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
   /** Returns flags passed to Bazel by --copt option. */
   @Override
   public ImmutableList<String> getCopts() {
+    if (isOmitfp()) {
+      return ImmutableList.<String>builder()
+          .add("-fomit-frame-pointer")
+          .add("-fasynchronous-unwind-tables")
+          .add("-DNO_FRAME_POINTER")
+          .addAll(copts)
+          .build();
+    }
     return copts;
   }
 
@@ -1072,44 +549,21 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
 
     // This is an assertion check vs. user error because users can't trigger this state.
     Verify.verify(
-        !(buildOptions.get(BuildConfiguration.Options.class).isHost && cppOptions.isFdo()),
+        !(buildOptions.get(CoreOptions.class).isHost && cppOptions.isFdo()),
         "FDO state should not propagate to the host configuration");
   }
 
   @Override
-  public void addGlobalMakeVariables(ImmutableMap.Builder<String, String> globalMakeEnvBuilder) {
-    if (cppOptions.disableMakeVariables) {
-      return;
-    }
-
-    if (!shouldProvideMakeVariables) {
-      return;
-    }
-    globalMakeEnvBuilder.putAll(
-        CcToolchainProvider.getCppBuildVariables(
-            this::getToolPathFragment,
-            cppToolchainInfo.getTargetLibc(),
-            cppToolchainInfo.getCompiler(),
-            desiredCpu,
-            crosstoolTopPathFragment,
-            cppToolchainInfo.getAbiGlibcVersion(),
-            cppToolchainInfo.getAbi(),
-            getAdditionalMakeVariables()));
-  }
-
-  @Override
   public String getOutputDirectoryName() {
-    String toolchainPrefix = desiredCpu;
+    String result = cpu;
     if (!cppOptions.outputDirectoryTag.isEmpty()) {
-      toolchainPrefix += "-" + cppOptions.outputDirectoryTag;
+      result += "-" + cppOptions.outputDirectoryTag;
     }
 
-    return toolchainPrefix;
+    return result;
   }
 
-  /**
-   * Returns true if we should share identical native libraries between different targets.
-   */
+  /** Returns true if we should share identical native libraries between different targets. */
   public boolean shareNativeDeps() {
     return cppOptions.shareNativeDeps;
   }
@@ -1118,24 +572,108 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
     return cppOptions.strictSystemIncludes;
   }
 
-  public String getFdoInstrument() {
+  String getFdoInstrument() {
+    if (isToolConfigurationDoNotUseWillBeRemovedFor129045294()) {
+      // We don't want FDO in the host configuration
+      return null;
+    }
     return cppOptions.fdoInstrumentForBuild;
   }
 
-  public PathFragment getFdoPath() {
+  /**
+   * @deprecated Unsafe because it returns a value from target configuration even in the host
+   *     configuration.
+   */
+  @Deprecated
+  PathFragment getFdoPathUnsafeSinceItCanReturnValueFromWrongConfiguration() {
     return fdoPath;
   }
 
-  public Label getFdoOptimizeLabel() {
+  /**
+   * @deprecated Unsafe because it returns a value from target configuration even in the host
+   *     configuration.
+   */
+  @Deprecated
+  Label getFdoOptimizeLabelUnsafeSinceItCanReturnValueFromWrongConfiguration() {
     return fdoOptimizeLabel;
   }
 
-  public Label getFdoPrefetchHintsLabel() {
+  public String getCSFdoInstrument() {
+    return cppOptions.csFdoInstrumentForBuild;
+  }
+
+  public PathFragment getCSFdoAbsolutePath() {
+    return csFdoAbsolutePath;
+  }
+
+  public PathFragment getPropellerOptimizeAbsoluteCCProfile() {
+    return propellerOptimizeAbsoluteCCProfile;
+  }
+
+  public PathFragment getPropellerOptimizeAbsoluteLdProfile() {
+    return propellerOptimizeAbsoluteLdProfile;
+  }
+
+  Label getFdoPrefetchHintsLabel() {
+    if (isToolConfigurationDoNotUseWillBeRemovedFor129045294()) {
+      // We don't want FDO in the host configuration
+      return null;
+    }
+    return getFdoPrefetchHintsLabelUnsafeSinceItCanReturnValueFromWrongConfiguration();
+  }
+
+  /**
+   * @deprecated Unsafe because it returns a value from target configuration even in the host
+   *     configuration.
+   */
+  @Deprecated
+  Label getFdoPrefetchHintsLabelUnsafeSinceItCanReturnValueFromWrongConfiguration() {
     return cppOptions.getFdoPrefetchHintsLabel();
   }
 
-  public Label getFdoProfileLabel() {
+  /**
+   * @deprecated Unsafe because it returns a value from target configuration even in the host
+   *     configuration.
+   */
+  @Deprecated
+  Label getFdoProfileLabelUnsafeSinceItCanReturnValueFromWrongConfiguration() {
     return cppOptions.fdoProfileLabel;
+  }
+
+  public Label getCSFdoProfileLabel() {
+    return cppOptions.csFdoProfileLabel;
+  }
+
+  public Label getPropellerOptimizeLabel() {
+    return cppOptions.propellerOptimizeLabel;
+  }
+
+  /**
+   * @deprecated Unsafe because it returns a value from target configuration even in the host
+   *     configuration.
+   */
+  @Deprecated
+  Label getPropellerOptimizeLabelUnsafeSinceItCanReturnValueFromWrongConfiguration() {
+    if (cppOptions.fdoInstrumentForBuild != null || cppOptions.csFdoInstrumentForBuild != null) {
+      return null;
+    }
+    return cppOptions.getPropellerOptimizeLabel();
+  }
+
+  /**
+   * @deprecated Unsafe because it returns a value from target configuration even in the host
+   *     configuration.
+   */
+  @Deprecated
+  Label getXFdoProfileLabelUnsafeSinceItCanReturnValueFromWrongConfiguration() {
+    if (cppOptions.fdoOptimizeForBuild != null
+        || cppOptions.fdoInstrumentForBuild != null
+        || cppOptions.fdoProfileLabel != null
+        || collectCodeCoverage) {
+      return null;
+    }
+
+    return cppOptions.xfdoProfileLabel;
   }
 
   public boolean isFdoAbsolutePathEnabled() {
@@ -1146,99 +684,15 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
     return cppOptions.useLLVMCoverageMapFormat;
   }
 
-  public boolean disableLegacyCrosstoolFields() {
-    return cppOptions.disableLegacyCrosstoolFields;
-  }
-
-  public boolean disableCompilationModeFlags() {
-    return cppOptions.disableCompilationModeFlags;
-  }
-
-  public boolean disableLinkingModeFlags() {
-    return cppOptions.disableLinkingModeFlags;
-  }
-
-  public boolean disableMakeVariables() {
-    return cppOptions.disableMakeVariables;
-  }
-
-  public boolean disableCcToolchainFromCrosstool() {
-    return cppOptions.disableCcToolchainFromCrosstool;
-  }
-  /**
-   * cc_toolchain_suite allows to override CROSSTOOL by using proto attribute. This attribute value
-   * is stored here so cc_toolchain can access it in the analysis. Don't use this for anything, it
-   * will be removed when b/113849758 is fixed. If you do, I'll send bubo to take your keyboard
-   * away.
-   */
-  @Deprecated
-  public CrosstoolRelease getCrosstoolFromCcToolchainProtoAttribute() {
-    return crosstoolFromCcToolchainProtoAttribute;
-  }
-
-  public boolean enableLinkoptsInUserLinkFlags() {
-    return cppOptions.enableLinkoptsInUserLinkFlags;
-  }
-
-  public boolean disableEmittingStaticLibgcc() {
-    return cppOptions.disableEmittingStaticLibgcc;
-  }
-
-  public boolean disableDepsetInUserFlags() {
-    return cppOptions.disableDepsetInUserFlags;
-  }
-
-  private void checkForToolchainSkylarkApiAvailability() throws EvalException {
-    if (cppOptions.disableLegacyToolchainSkylarkApi
-        || !cppOptions.enableLegacyToolchainSkylarkApi) {
-      throw new EvalException(
-          null,
-          "Information about the C++ toolchain API is not accessible "
-              + "anymore through ctx.fragments.cpp "
-              + "(see --incompatible_disable_legacy_cpp_toolchain_skylark_api on "
-              + "http://docs.bazel.build/versions/master/skylark/backward-compatibility.html"
-              + "#disable-legacy-c-configuration-api for migration notes). "
-              + "Use CcToolchainInfo instead.");
-    }
-  }
-
-  public void checkForLegacyCompilationApiAvailability() throws EvalException {
-    if (cppOptions.disableLegacyCompilationApi || cppOptions.disableLegacyFlagsCcToolchainApi) {
-      throw new EvalException(
-          null,
-          "Starlark APIs accessing compilation flags has been removed. "
-              + "Use the new API on cc_common (see "
-              + "--incompatible_disable_legacy_flags_cc_toolchain_api on"
-              + "https://docs.bazel.build/versions/master/skylark/backward-compatibility.html"
-              + "#disable-legacy-c-toolchain-api for migration notes).");
-    }
-  }
-
-  public void checkForLegacyLinkingApiAvailability() throws EvalException {
-    if (cppOptions.disableLegacyLinkingApi || cppOptions.disableLegacyFlagsCcToolchainApi) {
-      throw new EvalException(
-          null,
-          "Starlark APIs accessing linking flags has been removed. "
-              + "Use the new API on cc_common (see "
-              + "--incompatible_disable_legacy_flags_cc_toolchain_api on"
-              + "https://docs.bazel.build/versions/master/skylark/backward-compatibility.html"
-              + "#disable-legacy-c-toolchain-api for migration notes).");
-    }
+  public boolean removeCpuCompilerCcToolchainAttributes() {
+    return cppOptions.removeCpuCompilerCcToolchainAttributes;
   }
 
   public static PathFragment computeDefaultSysroot(String builtInSysroot) {
     if (builtInSysroot.isEmpty()) {
       return null;
     }
-    if (!PathFragment.isNormalized(builtInSysroot)) {
-      throw new IllegalArgumentException(
-          "The built-in sysroot '" + builtInSysroot + "' is not normalized.");
-    }
     return PathFragment.create(builtInSysroot);
-  }
-
-  boolean enableCcToolchainConfigInfoFromSkylark() {
-    return cppOptions.enableCcToolchainConfigInfoFromSkylark;
   }
 
   /**
@@ -1248,11 +702,166 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
     return cppOptions.libcTopLabel;
   }
 
-  public boolean provideCcToolchainInfoFromCcToolchainSuite() {
-    return cppOptions.provideCcToolchainInfoFromCcToolchainSuite;
+  /**
+   * Returns the value of the libc top-level directory (--grte_top) as specified on the command line
+   */
+  public Label getTargetLibcTopLabel() {
+    if (!isToolConfigurationDoNotUseWillBeRemovedFor129045294()) {
+      // This isn't for a platform-enabled C++ toolchain (legacy C++ toolchains evaluate in the
+      // target configuration while platform-enabled toolchains evaluate in the host/exec
+      // configuration). targetLibcTopLabel is only intended for platform-enabled toolchains and can
+      // cause errors otherwise.
+      //
+      // For example: if a legacy-configured toolchain inherits a --grte_top pointing to an Android
+      // runtime alias that select()s on a target Android CPU and an iOS dep changes the CPU to an
+      // iOS CPU, the alias resolution fails. Legacy toolchains should read --grte_top through
+      // libcTopLabel (which changes along with the iOS CPU change), not this.
+      return null;
+    }
+    return cppOptions.targetLibcTopLabel;
   }
 
-  public boolean disableSysrootFromConfiguration() {
-    return cppOptions.disableSysrootFromConfiguration;
+  public boolean enableLegacyCcProvider() {
+    return !cppOptions.disableLegacyCcProvider;
+  }
+
+  public boolean dontEnableHostNonhost() {
+    return cppOptions.dontEnableHostNonhost;
+  }
+
+  public boolean requireCtxInConfigureFeatures() {
+    return cppOptions.requireCtxInConfigureFeatures;
+  }
+
+  public boolean collectCodeCoverage() {
+    return collectCodeCoverage;
+  }
+
+  /** @deprecated this is only a temporary workaround, will be removed by b/129045294. */
+  // TODO(b/129045294): Remove at first opportunity
+  @Deprecated
+  boolean isToolConfigurationDoNotUseWillBeRemovedFor129045294() {
+    return isToolConfigurationDoNotUseWillBeRemovedFor129045294;
+  }
+
+  public boolean enableCcToolchainResolution() {
+    return cppOptions.enableCcToolchainResolution;
+  }
+
+  public boolean saveFeatureState() {
+    return cppOptions.saveFeatureState;
+  }
+
+  public boolean useStandaloneLtoIndexingCommandLines() {
+    return cppOptions.useStandaloneLtoIndexingCommandLines;
+  }
+
+  public boolean useSpecificToolFiles() {
+    return cppOptions.useSpecificToolFiles;
+  }
+
+  public boolean disableNoCopts() {
+    return cppOptions.disableNoCopts;
+  }
+
+  public boolean loadCcRulesFromBzl() {
+    return cppOptions.loadCcRulesFromBzl;
+  }
+
+  public boolean validateTopLevelHeaderInclusions() {
+    return cppOptions.validateTopLevelHeaderInclusions;
+  }
+
+  public boolean appleGenerateDsym() {
+    return appleGenerateDsym;
+  }
+
+  public boolean experimentalStarlarkCcImport() {
+    return cppOptions.experimentalStarlarkCcImport;
+  }
+
+  public boolean strictHeaderCheckingFromStarlark() {
+    return cppOptions.forceStrictHeaderCheckFromStarlark;
+  }
+
+  public boolean useCppCompileHeaderMnemonic() {
+    return cppOptions.useCppCompileHeaderMnemonic;
+  }
+
+  public boolean generateLlvmLCov() {
+    return cppOptions.generateLlvmLcov;
+  }
+
+  public boolean objcShouldScanIncludes() {
+    return cppOptions.objcScanIncludes;
+  }
+
+  public boolean objcShouldGenerateDotdFiles() {
+    return cppOptions.objcGenerateDotdFiles;
+  }
+
+  @Override
+  public boolean macosSetInstallName() {
+    return cppOptions.macosSetInstallName;
+  }
+
+  private static void checkInExpandedApiAllowlist(StarlarkThread thread, String feature)
+      throws EvalException {
+    String rulePackage =
+        ((BazelModuleContext) Module.ofInnermostEnclosingStarlarkFunction(thread).getClientData())
+            .label()
+            .getPackageName();
+    if (!EXPANDED_CC_CONFIGURATION_API_ALLOWLIST.contains(rulePackage)) {
+      throw Starlark.errorf(
+          "Rule in '%s' cannot use '%s' in CppConfiguration", rulePackage, feature);
+    }
+  }
+
+  @Override
+  public boolean forcePicStarlark(StarlarkThread thread) throws EvalException {
+    checkInExpandedApiAllowlist(thread, "force_pic");
+    return forcePic();
+  }
+
+  @Override
+  public boolean generateLlvmLcovStarlark(StarlarkThread thread) throws EvalException {
+    checkInExpandedApiAllowlist(thread, "generate_llvm_lcov");
+    return generateLlvmLCov();
+  }
+
+  @Override
+  public String fdoInstrumentStarlark(StarlarkThread thread) throws EvalException {
+    checkInExpandedApiAllowlist(thread, "fdo_instrument");
+    return getFdoInstrument();
+  }
+
+  @Override
+  public boolean processHeadersInDependenciesStarlark(StarlarkThread thread) throws EvalException {
+    checkInExpandedApiAllowlist(thread, "process_headers_in_dependencies");
+    return processHeadersInDependencies();
+  }
+
+  @Override
+  public boolean saveFeatureStateStarlark(StarlarkThread thread) throws EvalException {
+    checkInExpandedApiAllowlist(thread, "save_feature_state");
+    return saveFeatureState();
+  }
+
+  @Override
+  public boolean fissionActiveForCurrentCompilationModeStarlark(StarlarkThread thread)
+      throws EvalException {
+    checkInExpandedApiAllowlist(thread, "fission_active_for_current_compilation_mode");
+    return fissionIsActiveForCurrentCompilationMode();
+  }
+
+  /**
+   * Returns the bitcode mode to use for compilation.
+   *
+   * <p>Users can control bitcode mode using the {@code apple_bitcode} build flag, but bitcode will
+   * be disabled for all simulator architectures regardless of this flag.
+   */
+  @Override
+  public AppleBitcodeMode getAppleBitcodeMode() {
+    return appleBitcodeMode;
   }
 }

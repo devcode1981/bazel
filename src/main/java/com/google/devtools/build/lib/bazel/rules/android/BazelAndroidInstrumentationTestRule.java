@@ -27,6 +27,7 @@ public final class BazelAndroidInstrumentationTestRule implements RuleDefinition
   @Override
   public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment environment) {
     return builder
+        .cfg(AndroidRuleClasses.androidBinarySelfTransition())
         .removeAttribute("deps")
         .removeAttribute("javacopts")
         .removeAttribute("plugins")
@@ -42,6 +43,7 @@ public final class BazelAndroidInstrumentationTestRule implements RuleDefinition
         .ancestors(
             AndroidInstrumentationTestBaseRule.class,
             AndroidRuleClasses.AndroidBaseRule.class,
+            BazelSdkToolchainRule.class,
             BaseRuleClasses.TestBaseRule.class)
         .factoryClass(BazelAndroidInstrumentationTest.class)
         .build();

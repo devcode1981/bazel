@@ -1,3 +1,5 @@
+load("@rules_java//java:defs.bzl", "java_library")
+
 package(default_visibility = [
     "//src/java_tools/junitrunner:junitrunner_package_group",
 ])
@@ -11,7 +13,16 @@ java_library(
     ],
 )
 
+java_library(
+    name = "api-android",
+    srcs = glob(["*.java"]),
+    deps = [
+        "//third_party/java/junit:junit-android",
+    ],
+)
+
 filegroup(
     name = "srcs",
     srcs = glob(["**/*.java"]) + ["BUILD"],
+    visibility = ["//src:__subpackages__"],
 )

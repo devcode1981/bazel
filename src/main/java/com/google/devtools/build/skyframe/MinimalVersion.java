@@ -14,14 +14,13 @@
 package com.google.devtools.build.skyframe;
 
 /**
- * A Version "less than" all other versions, other than itself. Only used as initializer in
- * node entry.
+ * A Version "less than" all other versions, other than itself. Only used as initializer in node
+ * entry.
  */
-class MinimalVersion implements Version {
+final class MinimalVersion implements Version {
   static final MinimalVersion INSTANCE = new MinimalVersion();
 
-  private MinimalVersion() {
-  }
+  private MinimalVersion() {}
 
   @Override
   public boolean atMost(Version other) {

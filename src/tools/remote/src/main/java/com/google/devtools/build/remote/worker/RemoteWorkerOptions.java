@@ -14,8 +14,9 @@
 
 package com.google.devtools.build.remote.worker;
 
+import com.google.common.flogger.GoogleLogger;
 import com.google.devtools.build.lib.actions.LocalHostCapacity;
-import com.google.devtools.common.options.Converters.RangeConverter;
+import com.google.devtools.build.lib.util.ResourceConverter;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
@@ -25,6 +26,8 @@ import java.util.List;
 
 /** Options for remote worker. */
 public class RemoteWorkerOptions extends OptionsBase {
+  private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
+
   @Option(
     name = "listen_port",
     defaultValue = "8080",
@@ -89,25 +92,23 @@ public class RemoteWorkerOptions extends OptionsBase {
   public boolean sandboxing;
 
   @Option(
-    name = "sandboxing_writable_path",
-    defaultValue = "",
-    category = "build_worker",
-    documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-    effectTags = {OptionEffectTag.UNKNOWN},
-    allowMultiple = true,
-    help = "When using sandboxing, allow running actions to write to this path."
-  )
+      name = "sandboxing_writable_path",
+      defaultValue = "null",
+      category = "build_worker",
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      allowMultiple = true,
+      help = "When using sandboxing, allow running actions to write to this path.")
   public List<String> sandboxingWritablePaths;
 
   @Option(
-    name = "sandboxing_tmpfs_dir",
-    defaultValue = "",
-    category = "build_worker",
-    documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-    effectTags = {OptionEffectTag.UNKNOWN},
-    allowMultiple = true,
-    help = "When using sandboxing, mount an empty tmpfs onto this path for each running action."
-  )
+      name = "sandboxing_tmpfs_dir",
+      defaultValue = "null",
+      category = "build_worker",
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      allowMultiple = true,
+      help = "When using sandboxing, mount an empty tmpfs onto this path for each running action.")
   public List<String> sandboxingTmpfsDirs;
 
   @Option(
@@ -121,17 +122,20 @@ public class RemoteWorkerOptions extends OptionsBase {
   public boolean sandboxingBlockNetwork;
 
   @Option(
-    name = "jobs",
-    defaultValue = "auto",
-    converter = JobsConverter.class,
-    category = "build_worker",
-    documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-    effectTags = {OptionEffectTag.UNKNOWN},
-    help =
-        "The maximum number of concurrent jobs to run. \"auto\" means to use a reasonable value"
-            + " derived from the machine's hardware profile (e.g. the number of processors)."
-            + " Values above " + MAX_JOBS + " are not allowed."
-  )
+      name = "jobs",
+      defaultValue = "auto",
+      converter = JobsConverter.class,
+      category = "build_worker",
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      help =
+          "The maximum number of concurrent jobs to run. Takes "
+              + ResourceConverter.FLAG_SYNTAX
+              + ". \"auto\" means to use a reasonable value"
+              + " derived from the machine's hardware profile (e.g. the number of processors)."
+              + " Values less than 1 or above "
+              + MAX_JOBS
+              + " are not allowed.")
   public int jobs;
 
   @Option(
@@ -146,27 +150,61 @@ public class RemoteWorkerOptions extends OptionsBase {
               + "testing only.")
   public int httpListenPort;
 
+  @Option(
+      name = "tls_certificate",
+      defaultValue = "null",
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      help = "Specify the TLS server certificate to use.")
+  public String tlsCertificate;
+
+  @Option(
+      name = "tls_private_key",
+      defaultValue = "null",
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      help = "Specify the TLS private key to be used.")
+  public String tlsPrivateKey;
+
+  @Option(
+      name = "tls_ca_certificate",
+      defaultValue = "null",
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      help =
+          "Specify a CA certificate to use for authenticating clients; setting this implicitly "
+              + "requires client authentication (aka mTLS).")
+  public String tlsCaCertificate;
+
   private static final int MAX_JOBS = 16384;
 
-  /** Converter for jobs: [0, MAX_JOBS] or "auto". */
-  public static class JobsConverter extends RangeConverter {
+  /**
+   * Converter for jobs. Takes {@value FLAG_SYNTAX}. Values must be between 1 and {@value MAX_JOBS}.
+   * Values higher than {@value MAX_JOBS} will be set to {@value MAX_JOBS}.
+   */
+  public static class JobsConverter extends ResourceConverter {
     public JobsConverter() {
-      super(0, MAX_JOBS);
+      super(
+          () -> (int) Math.ceil(LocalHostCapacity.getLocalHostCapacity().getCpuUsage()),
+          1,
+          MAX_JOBS);
     }
 
     @Override
-    public Integer convert(String input) throws OptionsParsingException {
-      if (input.equals("auto")) {
-        int autoJobs = (int) Math.ceil(LocalHostCapacity.getLocalHostCapacity().getCpuUsage());
-        return Math.min(autoJobs, MAX_JOBS);
-      } else {
-        return super.convert(input);
+    public int checkAndLimit(int value) throws OptionsParsingException {
+      if (value < minValue) {
+        throw new OptionsParsingException(
+            String.format("Value '(%d)' must be at least %d.", value, minValue));
       }
-    }
-
-    @Override
-    public String getTypeDescription() {
-      return "\"auto\" or " + super.getTypeDescription();
+      if (value > maxValue) {
+        logger.atWarning().log(
+            "Flag remoteWorker \"jobs\" ('%d') was set too high. "
+                + "This is a result of passing large values to --local_resources or --jobs. "
+                + "Using '%d' jobs",
+            value, maxValue);
+        value = maxValue;
+      }
+      return value;
     }
   }
 }

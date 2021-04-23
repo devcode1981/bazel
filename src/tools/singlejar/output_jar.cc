@@ -77,7 +77,7 @@ OutputJar::OutputJar()
       "Created-By: singlejar\r\n");
 }
 
-static std::string Basename(const std::string& path) {
+static std::string Basename(const std::string &path) {
   size_t pos = path.rfind('/');
   if (pos == std::string::npos) {
     return path;
@@ -100,6 +100,8 @@ int OutputJar::Doit(Options *options) {
                            EntryInfo{&build_properties_});
   }
 
+  // TODO(b/28294322): do we need to resolve the path to be absolute or
+  // canonical?
   build_properties_.AddProperty("build.target", options_->output_jar.c_str());
   if (options_->verbose) {
     fprintf(stderr, "combined_file_name=%s\n", options_->output_jar.c_str());
@@ -120,28 +122,7 @@ int OutputJar::Doit(Options *options) {
 
   // Copy launcher if it is set.
   if (!options_->java_launcher.empty()) {
-    const char *const launcher_path = options_->java_launcher.c_str();
-    int in_fd = open(launcher_path, O_RDONLY);
-    struct stat statbuf;
-    if (file_ == nullptr || fstat(in_fd, &statbuf)) {
-      diag_err(1, "%s", launcher_path);
-    }
-    // TODO(asmundak):  Consider going back to sendfile() or reflink
-    // (BTRFS_IOC_CLONE/XFS_IOC_CLONE) here.  The launcher preamble can
-    // be very large for targets with many native deps.
-    ssize_t byte_count = AppendFile(in_fd, 0, statbuf.st_size);
-    if (byte_count < 0) {
-      diag_err(1, "%s:%d: Cannot copy %s to %s", __FILE__, __LINE__,
-               launcher_path, options_->output_jar.c_str());
-    } else if (byte_count != statbuf.st_size) {
-      diag_err(1, "%s:%d: Copied only %zu bytes out of %" PRIu64 " from %s",
-               __FILE__, __LINE__, byte_count, statbuf.st_size, launcher_path);
-    }
-    close(in_fd);
-    if (options_->verbose) {
-      fprintf(stderr, "Prepended %s (%" PRIu64 " bytes)\n", launcher_path,
-              statbuf.st_size);
-    }
+    AppendFile(options_, options_->java_launcher.c_str());
   }
 
   if (!options_->main_class.empty()) {
@@ -149,6 +130,11 @@ int OutputJar::Doit(Options *options) {
     manifest_.Append("Main-Class: ");
     manifest_.Append(options_->main_class);
     manifest_.Append("\r\n");
+  }
+
+  // Copy CDS archive file (.jsa) if it is set.
+  if (!options_->cds_archive.empty()) {
+    AppendCDSArchive(options->cds_archive);
   }
 
   for (auto &manifest_line : options_->manifest_lines) {
@@ -217,16 +203,16 @@ int OutputJar::Doit(Options *options) {
   // Ready to write zip entries. Decide whether created entries should be
   // compressed.
   bool compress = options_->force_compression || options_->preserve_compression;
-  // First, write a directory entry for the META-INF, followed by the manifest
-  // file, followed by the build properties file.
+
+  // Write a directory entry for the META-INF
   WriteMetaInf();
-  manifest_.Append("\r\n");
-  WriteEntry(manifest_.OutputEntry(compress));
+
+  // Write the build properties file.
   if (!options_->exclude_build_data) {
     WriteEntry(build_properties_.OutputEntry(compress));
   }
 
-  // Then classpath resources.
+  // Write classpath resources.
   for (auto &classpath_resource : classpath_resources_) {
     bool do_compress = compress;
     if (do_compress && !options_->nocompress_suffixes.empty()) {
@@ -254,12 +240,15 @@ int OutputJar::Doit(Options *options) {
     WriteEntry(classpath_resource->OutputEntry(do_compress));
   }
 
-  // Then copy source files' contents.
+  // Copy source files' contents.
   for (size_t ix = 0; ix < options_->input_jars.size(); ++ix) {
     if (!AddJar(ix)) {
       exit(1);
     }
   }
+
+  // Write the manifest file
+  WriteEntry(manifest_.OutputEntry(compress));
 
   // All entries written, write Central Directory and close.
   Close();
@@ -274,21 +263,44 @@ OutputJar::~OutputJar() {
 
 // Try to perform I/O in units of this size.
 // (128KB is the default max request size for fuse filesystems.)
-static const size_t kBufferSize = 128<<10;
+static constexpr size_t kBufferSize = 128 << 10;
 
 bool OutputJar::Open() {
   if (file_) {
     diag_errx(1, "%s:%d: Cannot open output archive twice", __FILE__, __LINE__);
   }
 
-  // Set execute bits since we may produce an executable output file.
   int mode = O_CREAT | O_WRONLY | O_TRUNC;
+
 #ifdef _WIN32
+  std::wstring wpath;
+  std::string error;
+  if (!blaze_util::AsAbsoluteWindowsPath(path(), &wpath, &error)) {
+    diag_warn("%s:%d: AsAbsoluteWindowsPath failed: %s", __FILE__, __LINE__,
+              error.c_str());
+    return false;
+  }
+
+  HANDLE hFile =
+      CreateFileW(wpath.c_str(), GENERIC_READ | GENERIC_WRITE,
+                  // Must share for reading, otherwise
+                  // symlink-following file existence checks (e.g.
+                  // java.nio.file.Files.exists()) fail.
+                  FILE_SHARE_READ, nullptr, CREATE_ALWAYS, 0, nullptr);
+  if (hFile == INVALID_HANDLE_VALUE) {
+    diag_warn("%s:%d: CreateFileW failed for %S", __FILE__, __LINE__,
+              wpath.c_str());
+    return false;
+  }
+
   // Make sure output file is in binary mode, or \r\n will be converted to \n.
   mode |= _O_BINARY;
+  int fd = _open_osfhandle(reinterpret_cast<intptr_t>(hFile), mode);
+#else
+  // Set execute bits since we may produce an executable output file.
+  int fd = open(path(), mode, 0777);
 #endif
 
-  int fd = open(path(), mode, 0777);
   if (fd < 0) {
     diag_warn("%s:%d: %s", __FILE__, __LINE__, path());
     return false;
@@ -344,7 +356,7 @@ bool OutputJar::AddJar(int jar_path_index) {
 
     bool include_entry = true;
     if (!options_->include_prefixes.empty()) {
-      for (auto& prefix : options_->include_prefixes) {
+      for (auto &prefix : options_->include_prefixes) {
         if ((include_entry =
                  (prefix.size() <= file_name_length &&
                   0 == strncmp(file_name, prefix.c_str(), prefix.size())))) {
@@ -370,7 +382,7 @@ bool OutputJar::AddJar(int jar_path_index) {
         known_members_.emplace(service_path, EntryInfo{service_handler});
       }
     } else {
-      ExtraHandler(jar_entry, &input_jar_aux_label);
+      ExtraHandler(input_jar_path, jar_entry, &input_jar_aux_label);
     }
 
     if (options_->check_desugar_deps &&
@@ -388,7 +400,7 @@ bool OutputJar::AddJar(int jar_path_index) {
     auto got =
         known_members_.emplace(std::string(file_name, file_name_length),
                                EntryInfo{is_file ? nullptr : &null_combiner_,
-                                         is_file ? jar_path_index: -1});
+                                         is_file ? jar_path_index : -1});
     if (!got.second) {
       auto &entry_info = got.first->second;
       // Handle special entries (the ones that have a combiner).
@@ -412,6 +424,20 @@ bool OutputJar::AddJar(int jar_path_index) {
       } else {
         duplicate_entries_++;
         continue;
+      }
+    }
+
+    // Add any missing parent directory entries (first) if requested.
+    if (options_->add_missing_directories) {
+      // Ignore very last character in case this entry is a directory itself.
+      for (size_t pos = 0; pos < static_cast<size_t>(file_name_length - 1);
+           ++pos) {
+        if (file_name[pos] == '/') {
+          std::string dir(file_name, 0, pos + 1);
+          if (NewEntry(dir)) {
+            WriteDirEntry(dir, nullptr, 0);
+          }
+        }
       }
     }
 
@@ -827,7 +853,7 @@ bool OutputJar::Close() {
     }
     {
       ECD64Locator *ecd64_locator =
-        reinterpret_cast<ECD64Locator *>(ReserveCdh(sizeof(ECD64Locator)));
+          reinterpret_cast<ECD64Locator *>(ReserveCdh(sizeof(ECD64Locator)));
       ecd64_locator->signature();
       ecd64_locator->ecd64_offset(output_position + cen_size);
       ecd64_locator->total_disks(1);
@@ -921,11 +947,11 @@ void OutputJar::ClasspathResource(const std::string &resource_name,
   }
 }
 
-ssize_t OutputJar::AppendFile(int in_fd, off64_t offset, size_t count) {
+ssize_t OutputJar::CopyAppendData(int in_fd, off64_t offset, size_t count) {
   if (count == 0) {
     return 0;
   }
-  std::unique_ptr<void, decltype(free)*> buffer(malloc(kBufferSize), free);
+  std::unique_ptr<void, decltype(free) *> buffer(malloc(kBufferSize), free);
   if (buffer == nullptr) {
     diag_err(1, "%s:%d: malloc", __FILE__, __LINE__);
   }
@@ -936,7 +962,7 @@ ssize_t OutputJar::AppendFile(int in_fd, off64_t offset, size_t count) {
   while (static_cast<size_t>(total_written) < count) {
     ssize_t len = std::min(kBufferSize, count - total_written);
     DWORD n_read;
-    if (!::ReadFile(hFile, buffer.get(), len, &n_read, NULL)) {
+    if (!::ReadFile(hFile, buffer.get(), len, &n_read, nullptr)) {
       return -1;
     }
     if (n_read == 0) {
@@ -967,6 +993,73 @@ ssize_t OutputJar::AppendFile(int in_fd, off64_t offset, size_t count) {
   return total_written;
 }
 
+void OutputJar::AppendFile(Options *options, const char *const file_path) {
+  int in_fd = open(file_path, O_RDONLY);
+  struct stat statbuf;
+  if (fstat(in_fd, &statbuf)) {
+    diag_err(1, "%s", file_path);
+  }
+  // TODO(asmundak):  Consider going back to sendfile() or reflink
+  // (BTRFS_IOC_CLONE/XFS_IOC_CLONE) here.  The launcher preamble can
+  // be very large for targets with many native deps.
+  ssize_t byte_count = CopyAppendData(in_fd, 0, statbuf.st_size);
+  if (byte_count < 0) {
+    diag_err(1, "%s:%d: Cannot copy %s to %s", __FILE__, __LINE__,
+             file_path, options->output_jar.c_str());
+  } else if (byte_count != statbuf.st_size) {
+    diag_err(1, "%s:%d: Copied only %zu bytes out of %" PRIu64 " from %s",
+             __FILE__, __LINE__, byte_count, statbuf.st_size, file_path);
+  }
+  close(in_fd);
+  if (options->verbose) {
+    fprintf(stderr, "Prepended %s (%" PRIu64 " bytes)\n", file_path,
+            statbuf.st_size);
+  }
+}
+
+void OutputJar::AppendCDSArchive(const std::string &cds_archive) {
+  // Align the shared archive start offset at page alignment, which is
+  // required by mmap.
+  off64_t cur_offset = Position();
+  size_t pagesize;
+#ifdef _WIN32
+  SYSTEM_INFO si;
+  GetSystemInfo(&si);
+  pagesize = si.dwPageSize;
+#else
+  pagesize = sysconf(_SC_PAGESIZE);
+#endif
+  off64_t aligned_offset = (cur_offset + (pagesize - 1)) & ~(pagesize - 1);
+  size_t gap = aligned_offset - cur_offset;
+  size_t written;
+  if (gap > 0) {
+    char *zeros = (char *)malloc(gap);
+    if (!zeros) {
+      return;
+    }
+    memset(zeros, 0, gap);
+    written = fwrite(zeros, 1, gap, file_);
+    outpos_ += written;
+    free(zeros);
+  }
+
+  // Copy archived data
+  AppendFile(options_, cds_archive.c_str());
+
+  // Write the file offset of the shared archive section as a manifest
+  // attribute.
+  char cds_manifest_attr[50];
+  snprintf( cds_manifest_attr, sizeof(cds_manifest_attr),
+    "Jsa-Offset: %ld", (long)aligned_offset); // NOLINT(runtime/int,
+                                              // google-runtime-int)
+  manifest_.Append(cds_manifest_attr);
+  manifest_.Append("\r\n");
+
+  // Add to build_properties
+  build_properties_.AddProperty("cds.archive",
+                                cds_archive.c_str());
+}
+
 void OutputJar::ExtraCombiner(const std::string &entry_name,
                               Combiner *combiner) {
   extra_combiners_.emplace_back(combiner);
@@ -979,4 +1072,5 @@ bool OutputJar::WriteBytes(const void *buffer, size_t count) {
   return written == count;
 }
 
-void OutputJar::ExtraHandler(const CDH *, const std::string *) {}
+void OutputJar::ExtraHandler(const std::string &input_jar_path, const CDH *,
+                             const std::string *) {}

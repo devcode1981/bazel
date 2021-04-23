@@ -16,7 +16,7 @@ package com.google.devtools.build.lib.skyframe.serialization.testutils;
 
 import static com.google.common.truth.Truth.assertThat;
 
-import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableClassToInstanceMap;
 import com.google.devtools.build.lib.skyframe.serialization.AutoRegistry;
 import com.google.devtools.build.lib.skyframe.serialization.DeserializationContext;
 import com.google.devtools.build.lib.skyframe.serialization.ObjectCodec;
@@ -24,15 +24,12 @@ import com.google.devtools.build.lib.skyframe.serialization.ObjectCodecRegistry;
 import com.google.devtools.build.lib.skyframe.serialization.ObjectCodecs;
 import com.google.devtools.build.lib.skyframe.serialization.SerializationContext;
 import com.google.devtools.build.lib.skyframe.serialization.SerializationException;
-import com.google.devtools.build.lib.syntax.Environment.Frame;
-import com.google.devtools.build.lib.syntax.Environment.GlobalFrame;
-import com.google.devtools.build.lib.syntax.Mutability;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.CodedInputStream;
 import com.google.protobuf.CodedOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import javax.annotation.Nullable;
+import net.starlark.java.eval.Module;
 
 /** Helpers for serialization tests. */
 public class TestUtils {
@@ -47,11 +44,6 @@ public class TestUtils {
     codec.serialize(context, value, codedOut);
     codedOut.flush();
     return bytes.toByteArray();
-  }
-
-  public static <T> ByteString toBytes(T value, ImmutableMap<Class<?>, Object> dependencies)
-      throws IOException, SerializationException {
-    return toBytes(new SerializationContext(dependencies), value);
   }
 
   public static <T> ByteString toBytes(SerializationContext serializationContext, T value)
@@ -76,12 +68,13 @@ public class TestUtils {
 
   public static <T> T roundTrip(T value, ObjectCodecRegistry registry)
       throws IOException, SerializationException {
-    return new DeserializationContext(registry, ImmutableMap.of())
+    return new DeserializationContext(registry, ImmutableClassToInstanceMap.of())
         .deserialize(
-            toBytes(new SerializationContext(registry, ImmutableMap.of()), value).newCodedInput());
+            toBytes(new SerializationContext(registry, ImmutableClassToInstanceMap.of()), value)
+                .newCodedInput());
   }
 
-  public static <T> T roundTrip(T value, ImmutableMap<Class<?>, Object> dependencies)
+  public static <T> T roundTrip(T value, ImmutableClassToInstanceMap<Object> dependencies)
       throws IOException, SerializationException {
     ObjectCodecRegistry.Builder builder = AutoRegistry.get().getBuilder();
     for (Object constant : dependencies.values()) {
@@ -94,31 +87,19 @@ public class TestUtils {
   }
 
   public static <T> T roundTrip(T value) throws IOException, SerializationException {
-    return TestUtils.roundTrip(value, ImmutableMap.of());
-  }
-
-  public static void assertFramesEqual(Frame frame1, Frame frame2) {
-    assertThat(frame1.getTransitiveBindings())
-        .containsExactlyEntriesIn(frame2.getTransitiveBindings())
-        .inOrder();
+    return TestUtils.roundTrip(value, ImmutableClassToInstanceMap.of());
   }
 
   /**
-   * Asserts that two {@link GlobalFrame}s have the same structure. Needed because
-   * {@link GlobalFrame} doesn't override {@link Object#equals}.
+   * Asserts that two {@link Module}s have the same structure. Needed because {@link Module} doesn't
+   * override {@link Object#equals}.
    */
-  public static void assertGlobalFramesEqual(GlobalFrame frame1, GlobalFrame frame2) {
-    assertThat(frame1.mutability().getAnnotation())
-        .isEqualTo(frame2.mutability().getAnnotation());
-    assertThat(frame1.getLabel()).isEqualTo(frame2.getLabel());
-    assertThat(frame1.getTransitiveBindings())
-        .containsExactlyEntriesIn(frame2.getTransitiveBindings()).inOrder();
-    if (frame1.getParent() == null || frame2.getParent() == null) {
-      assertThat(frame1.getParent()).isNull();
-      assertThat(frame2.getParent()).isNull();
-    } else {
-      assertFramesEqual(frame1.getParent(), frame2.getParent());
-    }
+  public static void assertModulesEqual(Module module1, Module module2) {
+    assertThat(module1.getClientData()).isEqualTo(module2.getClientData());
+    assertThat(module1.getGlobals()).containsExactlyEntriesIn(module2.getGlobals()).inOrder();
+    assertThat(module1.getPredeclaredBindings())
+        .containsExactlyEntriesIn(module2.getPredeclaredBindings())
+        .inOrder();
   }
 
   public static ByteString toBytesMemoized(Object original, ObjectCodecRegistry registry)
@@ -131,7 +112,7 @@ public class TestUtils {
   }
 
   public static Object fromBytesMemoized(ByteString bytes, ObjectCodecRegistry registry)
-      throws IOException, SerializationException {
+      throws SerializationException {
     return new ObjectCodecs(registry).deserializeMemoized(bytes.newCodedInput());
   }
 
@@ -144,12 +125,6 @@ public class TestUtils {
   }
 
   public static <T> T roundTripMemoized(T original, ObjectCodec<?>... codecs)
-      throws IOException, SerializationException {
-    return roundTripMemoized(original, getBuilderWithAdditionalCodecs(codecs).build());
-  }
-
-  public static <T> T roundTripMemoized(
-      T original, @Nullable Mutability mutability, ObjectCodec<?>... codecs)
       throws IOException, SerializationException {
     return roundTripMemoized(original, getBuilderWithAdditionalCodecs(codecs).build());
   }

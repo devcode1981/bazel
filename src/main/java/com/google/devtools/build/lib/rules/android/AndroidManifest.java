@@ -15,19 +15,20 @@ package com.google.devtools.build.lib.rules.android;
 
 import static com.google.common.base.Strings.isNullOrEmpty;
 
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSortedMap;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.RuleErrorConsumer;
 import com.google.devtools.build.lib.analysis.actions.ActionConstructionContext;
 import com.google.devtools.build.lib.analysis.actions.SymlinkAction;
-import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.packages.RuleClass.ConfiguredTargetFactory.RuleErrorException;
-import com.google.devtools.build.lib.packages.RuleErrorConsumer;
+import com.google.devtools.build.lib.packages.Type;
 import com.google.devtools.build.lib.rules.android.AndroidConfiguration.AndroidManifestMerger;
 import com.google.devtools.build.lib.rules.java.JavaUtil;
-import com.google.devtools.build.lib.syntax.Type;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.util.Map;
 import java.util.Objects;
@@ -80,7 +81,7 @@ public class AndroidManifest {
     Artifact rawManifest = null;
     if (AndroidResources.definesAndroidResources(ruleContext.attributes())) {
       AndroidResources.validateRuleContext(ruleContext);
-      rawManifest = ruleContext.getPrerequisiteArtifact("manifest", Mode.TARGET);
+      rawManifest = ruleContext.getPrerequisiteArtifact("manifest");
     }
 
     return from(
@@ -220,7 +221,10 @@ public class AndroidManifest {
       ResourceDependencies resourceDeps,
       Map<String, String> manifestValues,
       @Nullable String manifestMerger) {
-    Map<Artifact, Label> mergeeManifests = getMergeeManifests(resourceDeps.getResourceContainers());
+    Map<Artifact, Label> mergeeManifests =
+        getMergeeManifests(
+            resourceDeps.getResourceContainers(),
+            dataContext.getAndroidConfig().getManifestMergerOrder());
 
     Artifact newManifest;
     if (useLegacyMerging(errorConsumer, dataContext.getAndroidConfig(), manifestMerger)) {
@@ -257,6 +261,10 @@ public class AndroidManifest {
       RuleErrorConsumer errorConsumer,
       AndroidConfiguration androidConfig,
       @Nullable String mergerString) {
+    if (androidConfig.getManifestMerger() == AndroidManifestMerger.FORCE_ANDROID) {
+      return false;
+    }
+
     AndroidManifestMerger merger = AndroidManifestMerger.fromString(mergerString);
     if (merger == null) {
       merger = androidConfig.getManifestMerger();
@@ -272,15 +280,23 @@ public class AndroidManifest {
   }
 
   private static Map<Artifact, Label> getMergeeManifests(
-      Iterable<ValidatedAndroidResources> transitiveData) {
-    ImmutableSortedMap.Builder<Artifact, Label> builder =
-        ImmutableSortedMap.orderedBy(Artifact.EXEC_PATH_COMPARATOR);
-    for (ValidatedAndroidResources d : transitiveData) {
+      NestedSet<ValidatedAndroidResources> transitiveData,
+      AndroidConfiguration.ManifestMergerOrder manifestMergerOrder) {
+    ImmutableMap.Builder<Artifact, Label> builder = new ImmutableMap.Builder<>();
+    for (ValidatedAndroidResources d : transitiveData.toList()) {
       if (d.isManifestExported()) {
         builder.put(d.getManifest(), d.getLabel());
       }
     }
-    return builder.build();
+    switch (manifestMergerOrder) {
+      case ALPHABETICAL:
+        return ImmutableSortedMap.copyOf(builder.build(), Artifact.EXEC_PATH_COMPARATOR);
+      case ALPHABETICAL_BY_CONFIGURATION:
+        return ImmutableSortedMap.copyOf(builder.build(), Artifact.ROOT_RELATIVE_PATH_COMPARATOR);
+      case DEPENDENCY:
+        return builder.build();
+    }
+    throw new AssertionError(manifestMergerOrder);
   }
 
   public Artifact getManifest() {

@@ -40,4 +40,40 @@ public class BuildEventProtocolOptions extends OptionsBase {
     help = "Selects how to upload artifacts referenced in the build event protocol."
   )
   public String buildEventUploadStrategy;
+
+  @Option(
+      name = "experimental_stream_log_file_uploads",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.LOGGING,
+      effectTags = {OptionEffectTag.AFFECTS_OUTPUTS},
+      help =
+          "Stream log file uploads directly to the remote storage rather than writing them to"
+              + " disk.")
+  public boolean streamingLogFileUploads;
+
+  @Option(
+      name = "experimental_build_event_expand_filesets",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.LOGGING,
+      effectTags = {OptionEffectTag.AFFECTS_OUTPUTS},
+      help = "If true, expand Filesets in the BEP when presenting output files.")
+  public boolean expandFilesets;
+
+  @Option(
+      name = "experimental_build_event_fully_resolve_fileset_symlinks",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.LOGGING,
+      effectTags = {OptionEffectTag.AFFECTS_OUTPUTS},
+      help =
+          "If true, fully resolve relative Fileset symlinks in the BEP when presenting output"
+              + " files. Requires --experimental_build_event_expand_filesets.")
+  public boolean fullyResolveFilesetSymlinks;
+
+  @Option(
+      name = "experimental_bep_target_summary",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.LOGGING,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      help = "Whether to publish TargetSummary events.")
+  public boolean publishTargetSummary;
 }

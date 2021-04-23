@@ -1,9 +1,11 @@
+load("@rules_java//java:defs.bzl", "java_library")
+
 package(default_visibility = ["//src:__subpackages__"])
 
 filegroup(
     name = "srcs",
     srcs = glob(["**"]),
-    visibility = ["//src/main/java/com/google/devtools/build/lib:__pkg__"],
+    visibility = ["//src:__subpackages__"],
 )
 
 java_library(
@@ -14,11 +16,8 @@ java_library(
         "//third_party:netty_tcnative",
     ],
     deps = [
-        "//src/main/java/com/google/devtools/build/lib:util",
-        "//third_party:auth",
         "//third_party:guava",
         "//third_party:jsr305",
-        "//third_party:netty",
         "//third_party/grpc:grpc-jar",
         "@googleapis//:google_devtools_build_v1_publish_build_event_java_grpc",
         "@googleapis//:google_devtools_build_v1_publish_build_event_java_proto",

@@ -14,10 +14,12 @@
 package com.google.devtools.build.lib.skyframe;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSortedSet;
 import com.google.common.collect.Interner;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
+import com.google.devtools.build.lib.analysis.config.Fragment;
 import com.google.devtools.build.lib.analysis.config.FragmentClassSet;
 import com.google.devtools.build.lib.concurrent.BlazeInterners;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
@@ -26,10 +28,10 @@ import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec.
 import com.google.devtools.build.skyframe.SkyFunctionName;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
+import com.google.devtools.common.options.OptionsParsingException;
 import java.io.Serializable;
 import java.util.Objects;
 import java.util.Set;
-import java.util.logging.Logger;
 
 /** A Skyframe value representing a {@link BuildConfiguration}. */
 // TODO(bazel-team): mark this immutable when BuildConfiguration is immutable.
@@ -37,7 +39,6 @@ import java.util.logging.Logger;
 @AutoCodec
 @ThreadSafe
 public class BuildConfigurationValue implements SkyValue {
-  private static final Logger logger = Logger.getLogger(BuildConfigurationValue.class.getName());
   private final BuildConfiguration configuration;
 
   BuildConfigurationValue(BuildConfiguration configuration) {
@@ -49,15 +50,62 @@ public class BuildConfigurationValue implements SkyValue {
   }
 
   /**
+   * Creates a new configuration key based on the given diff, after applying a platform mapping
+   * transformation.
+   *
+   * @param platformMappingValue sky value that can transform a configuration key based on a
+   *     platform mapping
+   * @param defaultBuildOptions set of native build options without modifications based on parsing
+   *     flags
+   * @param fragments set of options fragments this configuration should cover
+   * @param optionsDiff diff between the default options and the desired configuration
+   * @throws OptionsParsingException if the platform mapping cannot be parsed
+   */
+  public static Key keyWithPlatformMapping(
+      PlatformMappingValue platformMappingValue,
+      BuildOptions defaultBuildOptions,
+      FragmentClassSet fragments,
+      BuildOptions.OptionsDiffForReconstruction optionsDiff)
+      throws OptionsParsingException {
+    return platformMappingValue.map(
+        keyWithoutPlatformMapping(fragments, optionsDiff), defaultBuildOptions);
+  }
+
+  /**
+   * Creates a new configuration key based on the given diff, after applying a platform mapping
+   * transformation.
+   *
+   * @param platformMappingValue sky value that can transform a configuration key based on a
+   *     platform mapping
+   * @param defaultBuildOptions set of native build options without modifications based on parsing
+   *     flags
+   * @param fragments set of options fragments this configuration should cover
+   * @param optionsDiff diff between the default options and the desired configuration
+   * @throws OptionsParsingException if the platform mapping cannot be parsed
+   */
+  public static Key keyWithPlatformMapping(
+      PlatformMappingValue platformMappingValue,
+      BuildOptions defaultBuildOptions,
+      Set<Class<? extends Fragment>> fragments,
+      BuildOptions.OptionsDiffForReconstruction optionsDiff)
+      throws OptionsParsingException {
+    return platformMappingValue.map(
+        keyWithoutPlatformMapping(fragments, optionsDiff), defaultBuildOptions);
+  }
+
+  /**
    * Returns the key for a requested configuration.
+   *
+   * <p>Callers are responsible for applying the platform mapping or ascertaining that a platform
+   * mapping is not required.
    *
    * @param fragments the fragments the configuration should contain
    * @param optionsDiff the {@link BuildOptions.OptionsDiffForReconstruction} object the {@link
    *     BuildOptions} should be rebuilt from
    */
   @ThreadSafe
-  public static Key key(
-      Set<Class<? extends BuildConfiguration.Fragment>> fragments,
+  static Key keyWithoutPlatformMapping(
+      Set<Class<? extends Fragment>> fragments,
       BuildOptions.OptionsDiffForReconstruction optionsDiff) {
     return Key.create(
         FragmentClassSet.of(
@@ -65,13 +113,23 @@ public class BuildConfigurationValue implements SkyValue {
         optionsDiff);
   }
 
-  public static Key key(
+  private static Key keyWithoutPlatformMapping(
       FragmentClassSet fragmentClassSet, BuildOptions.OptionsDiffForReconstruction optionsDiff) {
     return Key.create(fragmentClassSet, optionsDiff);
   }
 
+  /**
+   * Returns a configuration key for the given configuration.
+   *
+   * <p>Note that this key creation method does not apply a platform mapping, it is assumed that the
+   * passed configuration was created with one such and thus its key does not need to be mapped
+   * again.
+   *
+   * @param buildConfiguration configuration whose key is requested
+   */
   public static Key key(BuildConfiguration buildConfiguration) {
-    return key(buildConfiguration.fragmentClasses(), buildConfiguration.getBuildOptionsDiff());
+    return keyWithoutPlatformMapping(
+        buildConfiguration.fragmentClasses(), buildConfiguration.getBuildOptionsDiff());
   }
 
   /** {@link SkyKey} for {@link BuildConfigurationValue}. */
@@ -80,9 +138,8 @@ public class BuildConfigurationValue implements SkyValue {
     private static final Interner<Key> keyInterner = BlazeInterners.newWeakInterner();
 
     private final FragmentClassSet fragments;
-    final BuildOptions.OptionsDiffForReconstruction optionsDiff;
-    // If hashCode really is -1, we'll recompute it from scratch each time. Oh well.
-    private volatile int hashCode = -1;
+    private final BuildOptions.OptionsDiffForReconstruction optionsDiff;
+    private final int hashCode;
 
     @AutoCodec.Instantiator
     @VisibleForSerialization
@@ -92,17 +149,22 @@ public class BuildConfigurationValue implements SkyValue {
     }
 
     private Key(FragmentClassSet fragments, BuildOptions.OptionsDiffForReconstruction optionsDiff) {
-      this.fragments = fragments;
-      this.optionsDiff = optionsDiff;
+      this.fragments = Preconditions.checkNotNull(fragments);
+      this.optionsDiff = Preconditions.checkNotNull(optionsDiff);
+      this.hashCode = Objects.hash(fragments, optionsDiff);
     }
 
     @VisibleForTesting
-    public ImmutableSortedSet<Class<? extends BuildConfiguration.Fragment>> getFragments() {
+    public ImmutableSortedSet<Class<? extends Fragment>> getFragments() {
       return fragments.fragmentClasses();
     }
 
     public BuildOptions.OptionsDiffForReconstruction getOptionsDiff() {
       return optionsDiff;
+    }
+
+    public String checksum() {
+      return optionsDiff.getChecksum();
     }
 
     @Override
@@ -119,21 +181,48 @@ public class BuildConfigurationValue implements SkyValue {
         return false;
       }
       Key otherConfig = (Key) o;
-      return optionsDiff.equals(otherConfig.optionsDiff)
-          && Objects.equals(fragments, otherConfig.fragments);
+      return optionsDiff.equals(otherConfig.optionsDiff) && fragments.equals(otherConfig.fragments);
     }
 
     @Override
     public int hashCode() {
-      if (hashCode == -1) {
-        hashCode = Objects.hash(fragments, optionsDiff);
-      }
       return hashCode;
     }
 
     @Override
     public String toString() {
-      return "BuildConfigurationValue.Key[" + optionsDiff.getChecksum() + "]";
+      // This format is depended on by integration tests.
+      // TODO(blaze-configurability-team): This should at least include the length of fragments.
+      // to at least remind devs that this Key has TWO key parts.
+      return "BuildConfigurationValue.Key[" + checksum() + "]";
+    }
+
+    /**
+     * Return a string representation that can be safely used for comparison purposes.
+     *
+     * <p>Unlike toString, which is short and good for printing in debug contexts, this is long
+     * because it includes sufficient information in optionsDiff and fragments. toString alone is
+     * insufficient because multiple Keys can have the same options checksum (and thus same
+     * toString) but different fragments.
+     *
+     * <p>This function is meant to address two potential, trimming-related scenarios: 1. If
+     * trimming by only trimming BuildOptions (e.g. --trim_test_configuration), then after the
+     * initial trimming, fragments has extra classes (corresponding to those trimmed). Notably,
+     * dependencies of trimmed targets will create Keys with a properly trimmed set of fragments.
+     * Thus, will easily have two Keys with the same (trimmed) BuildOptions but different fragments
+     * yet corresponding to the same (trimmed) BuildConfigurationValue.
+     *
+     * <p>2. If trimming by only trimming fragments (at time of this comment, unsure whether this is
+     * ever done in active code), then BuildOptions has extra classes. The returned
+     * BuildConfigurationValue is properly trimmed (with the extra classes BuildOptions removed)
+     * although notably with a different checksum compared to the Key checksum. Note that given a
+     * target that is doing trimming like this, the reverse dependency of the target (i.e. without
+     * trimming) could easily involve a Key with the same (untrimmed!) BuildOptions but different
+     * fragments. However, unlike in case 1, they will correspond to different
+     * BuildConfigurationValue.
+     */
+    public String toComparableString() {
+      return "BuildConfigurationValue.Key[" + optionsDiff.getChecksum() + ", " + fragments + "]";
     }
   }
 }

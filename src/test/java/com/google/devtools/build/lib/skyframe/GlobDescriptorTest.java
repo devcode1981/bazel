@@ -19,7 +19,6 @@ import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.skyframe.serialization.testutils.FsUtils;
 import com.google.devtools.build.lib.skyframe.serialization.testutils.SerializationTester;
-import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
 import org.junit.Test;
@@ -32,26 +31,27 @@ public class GlobDescriptorTest {
 
   @Test
   public void testSerialization() throws Exception {
-    new SerializationTester(
-            GlobDescriptor.create(
-                PackageIdentifier.create("@foo", PathFragment.create("//bar")),
-                Root.fromPath(FsUtils.TEST_FILESYSTEM.getPath("/packageRoot")),
-                PathFragment.create("subdir"),
-                "pattern",
-                /*excludeDirs=*/ false),
-            GlobDescriptor.create(
-                PackageIdentifier.create("@bar", PathFragment.create("//foo")),
-                Root.fromPath(FsUtils.TEST_FILESYSTEM.getPath("/anotherPackageRoot")),
-                PathFragment.create("anotherSubdir"),
-                "pattern",
-                /*excludeDirs=*/ true))
-        .addDependency(FileSystem.class, FsUtils.TEST_FILESYSTEM)
-        .setVerificationFunction(GlobDescriptorTest::verifyEquivalent)
-        .runTests();
+    SerializationTester serializationTester =
+        new SerializationTester(
+                GlobDescriptor.create(
+                    PackageIdentifier.create("@foo", PathFragment.create("//bar")),
+                    Root.fromPath(FsUtils.TEST_FILESYSTEM.getPath("/packageRoot")),
+                    PathFragment.create("subdir"),
+                    "pattern",
+                    /*excludeDirs=*/ false),
+                GlobDescriptor.create(
+                    PackageIdentifier.create("@bar", PathFragment.create("//foo")),
+                    Root.fromPath(FsUtils.TEST_FILESYSTEM.getPath("/anotherPackageRoot")),
+                    PathFragment.create("anotherSubdir"),
+                    "pattern",
+                    /*excludeDirs=*/ true))
+            .setVerificationFunction(GlobDescriptorTest::verifyEquivalent);
+    FsUtils.addDependencies(serializationTester);
+    serializationTester.runTests();
   }
 
   private static void verifyEquivalent(GlobDescriptor orig, GlobDescriptor deserialized) {
-    assertThat(deserialized).isSameAs(orig);
+    assertThat(deserialized).isSameInstanceAs(orig);
   }
 
   @Test
@@ -70,7 +70,7 @@ public class GlobDescriptorTest {
         original.getSubdir(),
         original.getPattern(),
         original.excludeDirs());
-    assertThat(sameCopy).isSameAs(original);
+    assertThat(sameCopy).isSameInstanceAs(original);
 
     GlobDescriptor diffCopy = GlobDescriptor.create(
         original.getPackageId(),

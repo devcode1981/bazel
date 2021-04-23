@@ -15,21 +15,35 @@ package com.google.devtools.build.lib.analysis;
 
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
+import static org.junit.Assert.assertThrows;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
+import com.google.devtools.build.lib.actions.ActionLookupKey;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ArtifactRoot;
+import com.google.devtools.build.lib.actions.ArtifactRoot.RootType;
+import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.cmdline.LabelConstants;
 import com.google.devtools.build.lib.events.EventKind;
+import com.google.devtools.build.lib.packages.semantics.BuildLanguageOptions;
 import com.google.devtools.build.lib.testutil.FoundationTestCase;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
+import com.google.devtools.build.skyframe.SkyFunctionName;
+import com.google.devtools.common.options.Options;
+import com.google.devtools.common.options.OptionsParsingException;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import javax.annotation.Nullable;
+import net.starlark.java.eval.EvalException;
+import net.starlark.java.eval.Mutability;
+import net.starlark.java.eval.StarlarkList;
+import net.starlark.java.eval.StarlarkThread;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -48,15 +62,21 @@ public class RunfilesTest extends FoundationTestCase {
     assertThat(Iterables.getOnlyElement(eventCollector).getKind()).isEqualTo(EventKind.WARNING);
   }
 
+  private static StarlarkThread newStarlarkThread(String... options)
+      throws OptionsParsingException {
+    return new StarlarkThread(
+        Mutability.create("test"),
+        Options.parse(BuildLanguageOptions.class, options).getOptions().toStarlarkSemantics());
+  }
+
   @Test
   public void testFilterListForObscuringSymlinksCatchesBadObscurer() throws Exception {
     Map<PathFragment, Artifact> obscuringMap = new HashMap<>();
     PathFragment pathA = PathFragment.create("a");
     ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
-    Artifact artifactA = new Artifact(PathFragment.create("x"), root);
+    Artifact artifactA = ActionsTestUtil.createArtifact(root, "x");
     obscuringMap.put(pathA, artifactA);
-    obscuringMap.put(PathFragment.create("a/b"), new Artifact(PathFragment.create("c/b"),
-        root));
+    obscuringMap.put(PathFragment.create("a/b"), ActionsTestUtil.createArtifact(root, "c/b"));
     assertThat(Runfiles.filterListForObscuringSymlinks(reporter, null, obscuringMap).entrySet())
         .containsExactly(Maps.immutableEntry(pathA, artifactA)).inOrder();
     checkWarning();
@@ -67,10 +87,9 @@ public class RunfilesTest extends FoundationTestCase {
     Map<PathFragment, Artifact> obscuringMap = new HashMap<>();
     PathFragment pathA = PathFragment.create("a");
     ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
-    Artifact artifactA = new Artifact(PathFragment.create("x"), root);
+    Artifact artifactA = ActionsTestUtil.createArtifact(root, "x");
     obscuringMap.put(pathA, artifactA);
-    obscuringMap.put(PathFragment.create("a/b/c"), new Artifact(PathFragment.create("b/c"),
-                                                         root));
+    obscuringMap.put(PathFragment.create("a/b/c"), ActionsTestUtil.createArtifact(root, "b/c"));
     assertThat(Runfiles.filterListForObscuringSymlinks(reporter, null, obscuringMap).entrySet())
         .containsExactly(Maps.immutableEntry(pathA, artifactA)).inOrder();
     checkWarning();
@@ -81,11 +100,9 @@ public class RunfilesTest extends FoundationTestCase {
     Map<PathFragment, Artifact> obscuringMap = new HashMap<>();
     PathFragment pathA = PathFragment.create("a");
     ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
-    Artifact artifactA = new Artifact(PathFragment.create("a"),
-                                          root);
+    Artifact artifactA = ActionsTestUtil.createArtifact(root, "a");
     obscuringMap.put(pathA, artifactA);
-    obscuringMap.put(PathFragment.create("a/b"), new Artifact(PathFragment.create("c/b"),
-        root));
+    obscuringMap.put(PathFragment.create("a/b"), ActionsTestUtil.createArtifact(root, "c/b"));
     assertThat(Runfiles.filterListForObscuringSymlinks(null, null, obscuringMap).entrySet())
         .containsExactly(Maps.immutableEntry(pathA, artifactA)).inOrder();
   }
@@ -95,11 +112,9 @@ public class RunfilesTest extends FoundationTestCase {
     Map<PathFragment, Artifact> obscuringMap = new HashMap<>();
     PathFragment pathA = PathFragment.create("a");
     ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
-    Artifact artifactA = new Artifact(PathFragment.create("a"),
-                                          root);
+    Artifact artifactA = ActionsTestUtil.createArtifact(root, "a");
     obscuringMap.put(pathA, artifactA);
-    obscuringMap.put(PathFragment.create("a/b"), new Artifact(PathFragment.create("a/b"),
-                                                         root));
+    obscuringMap.put(PathFragment.create("a/b"), ActionsTestUtil.createArtifact(root, "a/b"));
 
     assertThat(Runfiles.filterListForObscuringSymlinks(reporter, null, obscuringMap).entrySet())
         .containsExactly(Maps.immutableEntry(pathA, artifactA)).inOrder();
@@ -111,12 +126,10 @@ public class RunfilesTest extends FoundationTestCase {
     Map<PathFragment, Artifact> obscuringMap = new HashMap<>();
     PathFragment pathA = PathFragment.create("a");
     ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
-    Artifact artifactA = new Artifact(PathFragment.create("a"),
-                                          root);
+    Artifact artifactA = ActionsTestUtil.createArtifact(root, "a");
     obscuringMap.put(pathA, artifactA);
     PathFragment pathBC = PathFragment.create("b/c");
-    Artifact artifactBC = new Artifact(PathFragment.create("a/b"),
-                                       root);
+    Artifact artifactBC = ActionsTestUtil.createArtifact(root, "a/b");
     obscuringMap.put(pathBC, artifactBC);
     assertThat(Runfiles.filterListForObscuringSymlinks(reporter, null, obscuringMap)
         .entrySet()).containsExactly(Maps.immutableEntry(pathA, artifactA),
@@ -140,12 +153,80 @@ public class RunfilesTest extends FoundationTestCase {
     assertThat(Iterables.getOnlyElement(eventCollector).getKind()).isEqualTo(EventKind.ERROR);
   }
 
+  private static final class SimpleActionLookupKey implements ActionLookupKey {
+    private final String name;
+
+    SimpleActionLookupKey(String name) {
+      this.name = name;
+    }
+
+    @Override
+    public SkyFunctionName functionName() {
+      return SkyFunctionName.createHermetic(name);
+    }
+
+    @Nullable
+    @Override
+    public Label getLabel() {
+      return null;
+    }
+  }
+
+  @Test
+  public void testPutDerivedArtifactWithDifferentOwnerDoesNotConflict() throws Exception {
+    ArtifactRoot root =
+        ArtifactRoot.asDerivedRoot(scratch.dir("/workspace"), RootType.Output, "out");
+    PathFragment path = PathFragment.create("src/foo.cc");
+
+    SimpleActionLookupKey owner1 = new SimpleActionLookupKey("//owner1");
+    SimpleActionLookupKey owner2 = new SimpleActionLookupKey("//owner2");
+    Artifact artifact1 =
+        new Artifact.DerivedArtifact(root, root.getExecPath().getRelative(path), owner1);
+    Artifact artifact2 =
+        new Artifact.DerivedArtifact(root, root.getExecPath().getRelative(path), owner2);
+
+    Map<PathFragment, Artifact> map = new LinkedHashMap<>();
+
+    Runfiles.ConflictChecker checker =
+        new Runfiles.ConflictChecker(Runfiles.ConflictPolicy.WARN, reporter, null);
+    checker.put(map, path, artifact1);
+    assertThat(map.entrySet()).containsExactly(Maps.immutableEntry(path, artifact1));
+    checker.put(map, path, artifact2);
+    assertThat(map.entrySet()).containsExactly(Maps.immutableEntry(path, artifact2));
+    assertNoEvents();
+  }
+
+  @Test
+  public void testPutDerivedArtifactWithDifferentPathConflicts() throws Exception {
+    ArtifactRoot root =
+        ArtifactRoot.asDerivedRoot(scratch.dir("/workspace"), RootType.Output, "out");
+    PathFragment path = PathFragment.create("src/foo.cc");
+    PathFragment path2 = PathFragment.create("src/bar.cc");
+
+    SimpleActionLookupKey owner1 = new SimpleActionLookupKey("//owner1");
+    SimpleActionLookupKey owner2 = new SimpleActionLookupKey("//owner2");
+    Artifact artifact1 =
+        new Artifact.DerivedArtifact(root, root.getExecPath().getRelative(path), owner1);
+    Artifact artifact2 =
+        new Artifact.DerivedArtifact(root, root.getExecPath().getRelative(path2), owner2);
+
+    Map<PathFragment, Artifact> map = new LinkedHashMap<>();
+
+    Runfiles.ConflictChecker checker =
+        new Runfiles.ConflictChecker(Runfiles.ConflictPolicy.WARN, reporter, null);
+    checker.put(map, path, artifact1);
+    assertThat(map.entrySet()).containsExactly(Maps.immutableEntry(path, artifact1));
+    checker.put(map, path, artifact2);
+    assertThat(map.entrySet()).containsExactly(Maps.immutableEntry(path, artifact2));
+    checkConflictWarning();
+  }
+
   @Test
   public void testPutCatchesConflict() {
     ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
     PathFragment pathA = PathFragment.create("a");
-    Artifact artifactB = new Artifact(PathFragment.create("b"), root);
-    Artifact artifactC = new Artifact(PathFragment.create("c"), root);
+    Artifact artifactB = ActionsTestUtil.createArtifact(root, "b");
+    Artifact artifactC = ActionsTestUtil.createArtifact(root, "c");
     Map<PathFragment, Artifact> map = new LinkedHashMap<>();
 
     Runfiles.ConflictChecker checker =
@@ -161,8 +242,8 @@ public class RunfilesTest extends FoundationTestCase {
   public void testPutReportsError() {
     ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
     PathFragment pathA = PathFragment.create("a");
-    Artifact artifactB = new Artifact(PathFragment.create("b"), root);
-    Artifact artifactC = new Artifact(PathFragment.create("c"), root);
+    Artifact artifactB = ActionsTestUtil.createArtifact(root, "b");
+    Artifact artifactC = ActionsTestUtil.createArtifact(root, "c");
     Map<PathFragment, Artifact> map = new LinkedHashMap<>();
 
     // Same as above but with ERROR not WARNING
@@ -179,7 +260,7 @@ public class RunfilesTest extends FoundationTestCase {
   public void testPutCatchesConflictBetweenNullAndNotNull() {
     ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
     PathFragment pathA = PathFragment.create("a");
-    Artifact artifactB = new Artifact(PathFragment.create("b"), root);
+    Artifact artifactB = ActionsTestUtil.createArtifact(root, "b");
     Map<PathFragment, Artifact> map = new LinkedHashMap<>();
 
     Runfiles.ConflictChecker checker =
@@ -194,7 +275,7 @@ public class RunfilesTest extends FoundationTestCase {
   public void testPutCatchesConflictBetweenNotNullAndNull() {
     ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
     PathFragment pathA = PathFragment.create("a");
-    Artifact artifactB = new Artifact(PathFragment.create("b"), root);
+    Artifact artifactB = ActionsTestUtil.createArtifact(root, "b");
     Map<PathFragment, Artifact> map = new LinkedHashMap<>();
 
     // Same as above but opposite order
@@ -210,8 +291,8 @@ public class RunfilesTest extends FoundationTestCase {
   public void testPutIgnoresConflict() {
     ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
     PathFragment pathA = PathFragment.create("a");
-    Artifact artifactB = new Artifact(PathFragment.create("b"), root);
-    Artifact artifactC = new Artifact(PathFragment.create("c"), root);
+    Artifact artifactB = ActionsTestUtil.createArtifact(root, "b");
+    Artifact artifactC = ActionsTestUtil.createArtifact(root, "c");
     Map<PathFragment, Artifact> map = new LinkedHashMap<>();
 
     Runfiles.ConflictChecker checker =
@@ -226,8 +307,8 @@ public class RunfilesTest extends FoundationTestCase {
   public void testPutIgnoresConflictNoListener() {
     ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
     PathFragment pathA = PathFragment.create("a");
-    Artifact artifactB = new Artifact(PathFragment.create("b"), root);
-    Artifact artifactC = new Artifact(PathFragment.create("c"), root);
+    Artifact artifactB = ActionsTestUtil.createArtifact(root, "b");
+    Artifact artifactC = ActionsTestUtil.createArtifact(root, "c");
     Map<PathFragment, Artifact> map = new LinkedHashMap<>();
 
     Runfiles.ConflictChecker checker =
@@ -242,8 +323,8 @@ public class RunfilesTest extends FoundationTestCase {
   public void testPutIgnoresSameArtifact() {
     ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
     PathFragment pathA = PathFragment.create("a");
-    Artifact artifactB = new Artifact(PathFragment.create("b"), root);
-    Artifact artifactB2 = new Artifact(PathFragment.create("b"), root);
+    Artifact artifactB = ActionsTestUtil.createArtifact(root, "b");
+    Artifact artifactB2 = ActionsTestUtil.createArtifact(root, "b");
     assertThat(artifactB2).isEqualTo(artifactB);
     Map<PathFragment, Artifact> map = new LinkedHashMap<>();
 
@@ -275,8 +356,8 @@ public class RunfilesTest extends FoundationTestCase {
     PathFragment pathA = PathFragment.create("a");
     PathFragment pathB = PathFragment.create("b");
     PathFragment pathC = PathFragment.create("c");
-    Artifact artifactA = new Artifact(PathFragment.create("a"), root);
-    Artifact artifactB = new Artifact(PathFragment.create("b"), root);
+    Artifact artifactA = ActionsTestUtil.createArtifact(root, "a");
+    Artifact artifactB = ActionsTestUtil.createArtifact(root, "b");
     Map<PathFragment, Artifact> map = new LinkedHashMap<>();
 
     Runfiles.ConflictChecker checker =
@@ -327,20 +408,23 @@ public class RunfilesTest extends FoundationTestCase {
   public void testLegacyRunfilesStructure() {
     ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
     PathFragment workspaceName = PathFragment.create("wsname");
-    PathFragment pathB = PathFragment.create("external/repo/b");
-    Artifact artifactB = new Artifact(pathB, root);
+    PathFragment pathB = PathFragment.create("repo/b");
+    PathFragment legacyPathB = LabelConstants.EXTERNAL_PATH_PREFIX.getRelative(pathB);
+    PathFragment runfilesPathB = LabelConstants.EXTERNAL_RUNFILES_PATH_PREFIX.getRelative(pathB);
+    Artifact artifactB = ActionsTestUtil.createArtifactWithRootRelativePath(root, legacyPathB);
 
     Runfiles.ManifestBuilder builder = new Runfiles.ManifestBuilder(workspaceName, true);
 
     Map<PathFragment, Artifact> inputManifest = Maps.newHashMap();
-    inputManifest.put(pathB, artifactB);
+    inputManifest.put(runfilesPathB, artifactB);
     Runfiles.ConflictChecker checker = new Runfiles.ConflictChecker(
         Runfiles.ConflictPolicy.WARN, reporter, null);
     builder.addUnderWorkspace(inputManifest, checker);
 
-    assertThat(builder.build().entrySet()).containsExactly(
-        Maps.immutableEntry(workspaceName.getRelative(pathB), artifactB),
-        Maps.immutableEntry(PathFragment.create("repo/b"), artifactB));
+    assertThat(builder.build().entrySet())
+        .containsExactly(
+            Maps.immutableEntry(workspaceName.getRelative(legacyPathB), artifactB),
+            Maps.immutableEntry(PathFragment.create("repo/b"), artifactB));
     assertNoEvents();
   }
 
@@ -348,14 +432,14 @@ public class RunfilesTest extends FoundationTestCase {
   public void testRunfileAdded() {
     ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
     PathFragment workspaceName = PathFragment.create("wsname");
-    PathFragment pathB = PathFragment.create("external/repo/b");
-    Artifact artifactB = new Artifact(pathB, root);
+    PathFragment pathB = PathFragment.create("repo/b");
+    PathFragment legacyPathB = LabelConstants.EXTERNAL_PATH_PREFIX.getRelative(pathB);
+    PathFragment runfilesPathB = LabelConstants.EXTERNAL_RUNFILES_PATH_PREFIX.getRelative(pathB);
+    Artifact artifactB = ActionsTestUtil.createArtifactWithRootRelativePath(root, legacyPathB);
 
     Runfiles.ManifestBuilder builder = new Runfiles.ManifestBuilder(workspaceName, false);
 
-    Map<PathFragment, Artifact> inputManifest = ImmutableMap.<PathFragment, Artifact>builder()
-        .put(pathB, artifactB)
-        .build();
+    Map<PathFragment, Artifact> inputManifest = ImmutableMap.of(runfilesPathB, artifactB);
     Runfiles.ConflictChecker checker = new Runfiles.ConflictChecker(
         Runfiles.ConflictPolicy.WARN, reporter, null);
     builder.addUnderWorkspace(inputManifest, checker);
@@ -371,17 +455,18 @@ public class RunfilesTest extends FoundationTestCase {
   public void testConflictWithExternal() {
     ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
     PathFragment pathB = PathFragment.create("repo/b");
-    PathFragment externalPathB = Label.EXTERNAL_PACKAGE_NAME.getRelative(pathB);
-    Artifact artifactB = new Artifact(pathB, root);
-    Artifact artifactExternalB = new Artifact(externalPathB, root);
+    PathFragment externalLegacyPath = LabelConstants.EXTERNAL_PATH_PREFIX.getRelative(pathB);
+    PathFragment externalRunfilesPathB =
+        LabelConstants.EXTERNAL_RUNFILES_PATH_PREFIX.getRelative(pathB);
+    Artifact artifactB = ActionsTestUtil.createArtifactWithRootRelativePath(root, pathB);
+    Artifact artifactExternalB =
+        ActionsTestUtil.createArtifactWithRootRelativePath(root, externalLegacyPath);
 
     Runfiles.ManifestBuilder builder = new Runfiles.ManifestBuilder(
         PathFragment.EMPTY_FRAGMENT, false);
 
-    Map<PathFragment, Artifact> inputManifest = ImmutableMap.<PathFragment, Artifact>builder()
-        .put(pathB, artifactB)
-        .put(externalPathB, artifactExternalB)
-        .build();
+    Map<PathFragment, Artifact> inputManifest =
+        ImmutableMap.of(pathB, artifactB, externalRunfilesPathB, artifactExternalB);
     Runfiles.ConflictChecker checker = new Runfiles.ConflictChecker(
         Runfiles.ConflictPolicy.WARN, reporter, null);
     builder.addUnderWorkspace(inputManifest, checker);
@@ -392,10 +477,10 @@ public class RunfilesTest extends FoundationTestCase {
   }
 
   @Test
-  public void testMergeWithSymlinks() {
+  public void testMergeWithSymlinks() throws Exception {
     ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
-    Artifact artifactA = new Artifact(PathFragment.create("a/target"), root);
-    Artifact artifactB = new Artifact(PathFragment.create("b/target"), root);
+    Artifact artifactA = ActionsTestUtil.createArtifact(root, "a/target");
+    Artifact artifactB = ActionsTestUtil.createArtifact(root, "b/target");
     PathFragment sympathA = PathFragment.create("a/symlink");
     PathFragment sympathB = PathFragment.create("b/symlink");
     Runfiles runfilesA = new Runfiles.Builder("TESTING")
@@ -404,17 +489,118 @@ public class RunfilesTest extends FoundationTestCase {
     Runfiles runfilesB = new Runfiles.Builder("TESTING")
         .addSymlink(sympathB, artifactB)
         .build();
+    StarlarkThread thread = newStarlarkThread();
 
-    Runfiles runfilesC = runfilesA.merge(runfilesB);
+    Runfiles runfilesC = runfilesA.merge(runfilesB, thread);
     assertThat(runfilesC.getSymlinksAsMap(null).get(sympathA)).isEqualTo(artifactA);
     assertThat(runfilesC.getSymlinksAsMap(null).get(sympathB)).isEqualTo(artifactB);
   }
 
   @Test
+  public void mergeAll_symlinks() throws Exception {
+    ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
+    Artifact artifactA = ActionsTestUtil.createArtifact(root, "a/target");
+    Artifact artifactB = ActionsTestUtil.createArtifact(root, "b/target");
+    Artifact artifactC = ActionsTestUtil.createArtifact(root, "c/target");
+    PathFragment sympathA = PathFragment.create("a/symlink");
+    PathFragment sympathB = PathFragment.create("b/symlink");
+    PathFragment sympathC = PathFragment.create("c/symlink");
+    Runfiles runfilesA = new Runfiles.Builder("TESTING").addSymlink(sympathA, artifactA).build();
+    Runfiles runfilesB = new Runfiles.Builder("TESTING").addSymlink(sympathB, artifactB).build();
+    Runfiles runfilesC = new Runfiles.Builder("TESTING").addSymlink(sympathC, artifactC).build();
+    StarlarkThread thread = newStarlarkThread();
+
+    Runfiles runfilesMerged =
+        runfilesA.mergeAll(StarlarkList.immutableOf(runfilesB, runfilesC), thread);
+    assertThat(runfilesMerged.getSymlinksAsMap(null))
+        .containsExactly(sympathA, artifactA, sympathB, artifactB, sympathC, artifactC);
+  }
+
+  @Test
+  public void testMergeEmptyWithNonEmpty() throws Exception {
+    ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
+    Artifact artifactA = ActionsTestUtil.createArtifact(root, "a/target");
+    Runfiles runfilesB = new Runfiles.Builder("TESTING").addArtifact(artifactA).build();
+    StarlarkThread thread = newStarlarkThread();
+
+    assertThat(Runfiles.EMPTY.merge(runfilesB, thread)).isSameInstanceAs(runfilesB);
+    assertThat(runfilesB.merge(Runfiles.EMPTY, thread)).isSameInstanceAs(runfilesB);
+  }
+
+  @Test
+  public void mergeAll_emptyWithNonEmpty() throws Exception {
+    ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
+    Artifact artifact = ActionsTestUtil.createArtifact(root, "target");
+    Runfiles nonEmpty = new Runfiles.Builder("TESTING").addArtifact(artifact).build();
+    StarlarkThread thread = newStarlarkThread();
+
+    assertThat(Runfiles.EMPTY.mergeAll(StarlarkList.immutableOf(nonEmpty), thread))
+        .isSameInstanceAs(nonEmpty);
+    assertThat(
+            Runfiles.EMPTY.mergeAll(
+                StarlarkList.immutableOf(Runfiles.EMPTY, nonEmpty, Runfiles.EMPTY), thread))
+        .isSameInstanceAs(nonEmpty);
+    assertThat(nonEmpty.mergeAll(StarlarkList.immutableOf(Runfiles.EMPTY, Runfiles.EMPTY), thread))
+        .isSameInstanceAs(nonEmpty);
+    assertThat(nonEmpty.mergeAll(StarlarkList.immutableOf(), thread)).isSameInstanceAs(nonEmpty);
+  }
+
+  @Test
+  public void mergeAll_emptyWithEmpty() throws Exception {
+    StarlarkThread thread = newStarlarkThread();
+    assertThat(Runfiles.EMPTY.mergeAll(StarlarkList.immutableOf(), thread))
+        .isSameInstanceAs(Runfiles.EMPTY);
+    assertThat(
+            Runfiles.EMPTY.mergeAll(
+                StarlarkList.immutableOf(Runfiles.EMPTY, Runfiles.EMPTY), thread))
+        .isSameInstanceAs(Runfiles.EMPTY);
+  }
+
+  @Test
+  public void merge_exceedsDepthLimit_throwsException() throws Exception {
+    ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
+    Artifact artifactA = ActionsTestUtil.createArtifact(root, "a/target");
+    Artifact artifactB = ActionsTestUtil.createArtifact(root, "b/target");
+    Artifact artifactC = ActionsTestUtil.createArtifact(root, "c/target");
+    Runfiles runfilesA = new Runfiles.Builder("TESTING").addArtifact(artifactA).build();
+    Runfiles runfilesB = new Runfiles.Builder("TESTING").addArtifact(artifactB).build();
+    Runfiles runfilesC = new Runfiles.Builder("TESTING").addArtifact(artifactC).build();
+    StarlarkThread thread = newStarlarkThread("--nested_set_depth_limit=2");
+
+    Runfiles mergeAB = runfilesA.merge(runfilesB, thread);
+    EvalException expected =
+        assertThrows(EvalException.class, () -> mergeAB.merge(runfilesC, thread));
+    assertThat(expected).hasMessageThat().contains("artifacts depset depth 3 exceeds limit (2)");
+  }
+
+  @Test
+  public void mergeAll_exceedsDepthLimit_throwsException() throws Exception {
+    ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
+    Artifact artifactA = ActionsTestUtil.createArtifact(root, "a/target");
+    Artifact artifactB = ActionsTestUtil.createArtifact(root, "b/target");
+    Artifact artifactC = ActionsTestUtil.createArtifact(root, "c/target");
+    PathFragment sympathA = PathFragment.create("a/symlink");
+    PathFragment sympathB = PathFragment.create("b/symlink");
+    PathFragment sympathC = PathFragment.create("c/symlink");
+    Runfiles runfilesA = new Runfiles.Builder("TESTING").addSymlink(sympathA, artifactA).build();
+    Runfiles runfilesB = new Runfiles.Builder("TESTING").addSymlink(sympathB, artifactB).build();
+    Runfiles runfilesC = new Runfiles.Builder("TESTING").addSymlink(sympathC, artifactC).build();
+    StarlarkThread thread = newStarlarkThread("--nested_set_depth_limit=2");
+
+    Runfiles mergeAllAB = runfilesA.mergeAll(StarlarkList.immutableOf(runfilesB), thread);
+    EvalException expected =
+        assertThrows(
+            EvalException.class,
+            () -> mergeAllAB.mergeAll(StarlarkList.immutableOf(runfilesC), thread));
+    assertThat(expected).hasMessageThat().contains("symlinks depset depth 3 exceeds limit (2)");
+  }
+
+  @Test
   public void testOnlyExtraMiddlemenNotConsideredEmpty() {
     ArtifactRoot root =
-        ArtifactRoot.middlemanRoot(scratch.resolve("execroot"), scratch.resolve("execroot/out"));
-    Artifact mm = new Artifact(PathFragment.create("a-middleman"), root);
+        ArtifactRoot.asDerivedRoot(
+            scratch.resolve("execroot"), RootType.Middleman, PathFragment.create("out"));
+    Artifact mm = ActionsTestUtil.createArtifact(root, "a-middleman");
     Runfiles runfiles = new Runfiles.Builder("TESTING").addLegacyExtraMiddleman(mm).build();
     assertThat(runfiles.isEmpty()).isFalse();
   }
@@ -422,21 +608,21 @@ public class RunfilesTest extends FoundationTestCase {
   @Test
   public void testMergingExtraMiddlemen() {
     ArtifactRoot root =
-        ArtifactRoot.middlemanRoot(scratch.resolve("execroot"), scratch.resolve("execroot/out"));
-    Artifact mm1 = new Artifact(PathFragment.create("middleman-1"), root);
-    Artifact mm2 = new Artifact(PathFragment.create("middleman-2"), root);
+        ArtifactRoot.asDerivedRoot(
+            scratch.resolve("execroot"), RootType.Middleman, PathFragment.create("out"));
+    Artifact mm1 = ActionsTestUtil.createArtifact(root, "middleman-1");
+    Artifact mm2 = ActionsTestUtil.createArtifact(root, "middleman-2");
     Runfiles runfiles1 = new Runfiles.Builder("TESTING").addLegacyExtraMiddleman(mm1).build();
     Runfiles runfiles2 = new Runfiles.Builder("TESTING").addLegacyExtraMiddleman(mm2).build();
     Runfiles runfilesMerged =
         new Runfiles.Builder("TESTING").merge(runfiles1).merge(runfiles2).build();
-    assertThat(runfilesMerged.getExtraMiddlemen())
-        .containsExactlyElementsIn(ImmutableList.of(mm1, mm2));
+    assertThat(runfilesMerged.getExtraMiddlemen().toList()).containsExactly(mm1, mm2);
   }
 
   @Test
   public void testGetEmptyFilenames() {
     ArtifactRoot root = ArtifactRoot.asSourceRoot(Root.fromPath(scratch.resolve("/workspace")));
-    Artifact artifact = new Artifact(PathFragment.create("my-artifact"), root);
+    Artifact artifact = ActionsTestUtil.createArtifact(root, "my-artifact");
     Runfiles runfiles =
         new Runfiles.Builder("TESTING")
             .addArtifact(artifact)
@@ -449,7 +635,7 @@ public class RunfilesTest extends FoundationTestCase {
                         .map((f) -> f.replaceName(f.getBaseName() + "-empty"))
                         .collect(ImmutableList.toImmutableList()))
             .build();
-    assertThat(runfiles.getEmptyFilenames())
+    assertThat(runfiles.getEmptyFilenames().toList())
         .containsExactly("my-artifact-empty", "my-symlink-empty");
   }
 }

@@ -15,6 +15,7 @@ package com.google.devtools.build.lib.skyframe;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Maps;
+import com.google.common.flogger.GoogleLogger;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.skyframe.DiffAwareness.View;
@@ -22,7 +23,6 @@ import com.google.devtools.build.lib.vfs.ModifiedFileSet;
 import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.common.options.OptionsProvider;
 import java.util.Map;
-import java.util.logging.Logger;
 import javax.annotation.Nullable;
 
 /**
@@ -31,7 +31,7 @@ import javax.annotation.Nullable;
  */
 public final class DiffAwarenessManager {
 
-  private static final Logger logger = Logger.getLogger(DiffAwarenessManager.class.getName());
+  private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
 
   // The manager attempts to instantiate these in the order in which they are passed to the
   // constructor; this is critical in the case where a factory always succeeds.
@@ -69,6 +69,9 @@ public final class DiffAwarenessManager {
   public interface ProcessableModifiedFileSet {
     ModifiedFileSet getModifiedFileSet();
 
+    @Nullable
+    WorkspaceInfoFromDiff getWorkspaceInfo();
+
     /**
      * This should be called when the changes have been noted. Otherwise, the result from the next
      * call to {@link #getDiff} will be from the baseline of the old, unprocessed, diff.
@@ -97,14 +100,14 @@ public final class DiffAwarenessManager {
 
     View baselineView = diffAwarenessState.baselineView;
     if (baselineView == null) {
-      logger.info("Initial baseline view for " + pathEntry + " is " + newView);
+      logger.atInfo().log("Initial baseline view for %s is %s", pathEntry, newView);
       diffAwarenessState.baselineView = newView;
-      return BrokenProcessableModifiedFileSet.INSTANCE;
+      return new InitialModifiedFileSet(newView.getWorkspaceInfo());
     }
 
     ModifiedFileSet diff;
-    logger.info(
-        "About to compute diff between " + baselineView + " and " + newView + " for " + pathEntry);
+    logger.atInfo().log(
+        "About to compute diff between %s and %s for %s", baselineView, newView, pathEntry);
     try {
       diff = diffAwareness.getDiff(baselineView, newView);
     } catch (BrokenDiffAwarenessException e) {
@@ -122,7 +125,7 @@ public final class DiffAwarenessManager {
   private void handleBrokenDiffAwareness(
       EventHandler eventHandler, Root pathEntry, BrokenDiffAwarenessException e) {
     currentDiffAwarenessStates.remove(pathEntry);
-    logger.info("Broken diff awareness for " + pathEntry + ": " + e);
+    logger.atInfo().withCause(e).log("Broken diff awareness for %s", pathEntry);
     eventHandler.handle(Event.warn(e.getMessage() + "... temporarily falling back to manually "
         + "checking files for changes"));
   }
@@ -140,8 +143,8 @@ public final class DiffAwarenessManager {
     for (DiffAwareness.Factory factory : diffAwarenessFactories) {
       DiffAwareness newDiffAwareness = factory.maybeCreate(pathEntry);
       if (newDiffAwareness != null) {
-        logger.info(
-            "Using " + newDiffAwareness.name() + " DiffAwareness strategy for " + pathEntry);
+        logger.atInfo().log(
+            "Using %s DiffAwareness strategy for %s", newDiffAwareness.name(), pathEntry);
         diffAwarenessState = new DiffAwarenessState(newDiffAwareness, /*baselineView=*/null);
         currentDiffAwarenessStates.put(pathEntry, diffAwarenessState);
         return diffAwarenessState;
@@ -172,6 +175,12 @@ public final class DiffAwarenessManager {
       return modifiedFileSet;
     }
 
+    @Nullable
+    @Override
+    public WorkspaceInfoFromDiff getWorkspaceInfo() {
+      return nextView.getWorkspaceInfo();
+    }
+
     @Override
     public void markProcessed() {
       DiffAwarenessState diffAwarenessState = currentDiffAwarenessStates.get(pathEntry);
@@ -189,6 +198,36 @@ public final class DiffAwarenessManager {
     @Override
     public ModifiedFileSet getModifiedFileSet() {
       return ModifiedFileSet.EVERYTHING_MODIFIED;
+    }
+
+    @Nullable
+    @Override
+    public WorkspaceInfoFromDiff getWorkspaceInfo() {
+      return null;
+    }
+
+    @Override
+    public void markProcessed() {}
+  }
+
+  /** Modified file set for a clean build. */
+  private static class InitialModifiedFileSet implements ProcessableModifiedFileSet {
+
+    @Nullable private final WorkspaceInfoFromDiff workspaceInfo;
+
+    InitialModifiedFileSet(@Nullable WorkspaceInfoFromDiff workspaceInfo) {
+      this.workspaceInfo = workspaceInfo;
+    }
+
+    @Override
+    public ModifiedFileSet getModifiedFileSet() {
+      return ModifiedFileSet.EVERYTHING_MODIFIED;
+    }
+
+    @Nullable
+    @Override
+    public WorkspaceInfoFromDiff getWorkspaceInfo() {
+      return workspaceInfo;
     }
 
     @Override

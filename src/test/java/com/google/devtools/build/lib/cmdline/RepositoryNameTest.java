@@ -15,7 +15,7 @@
 package com.google.devtools.build.lib.cmdline;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
 import com.google.devtools.build.lib.vfs.PathFragment;
 import org.junit.Test;
@@ -29,12 +29,9 @@ import org.junit.runners.JUnit4;
 public class RepositoryNameTest {
 
   public void assertNotValid(String name, String expectedMessage) {
-    try {
-      RepositoryName.create(name);
-      fail();
-    } catch (LabelSyntaxException expected) {
-      assertThat(expected).hasMessageThat().contains(expectedMessage);
-    }
+    LabelSyntaxException expected =
+        assertThrows(LabelSyntaxException.class, () -> RepositoryName.create(name));
+    assertThat(expected).hasMessageThat().contains(expectedMessage);
   }
 
   @Test
@@ -66,4 +63,10 @@ public class RepositoryNameTest {
         .isEqualTo(PathFragment.EMPTY_FRAGMENT);
   }
 
+  @Test
+  public void testGetDefaultCanonicalForm() throws Exception {
+    assertThat(RepositoryName.create("").getCanonicalForm()).isEqualTo("");
+    assertThat(RepositoryName.create("@").getCanonicalForm()).isEqualTo("");
+    assertThat(RepositoryName.create("@foo").getCanonicalForm()).isEqualTo("@foo");
+  }
 }

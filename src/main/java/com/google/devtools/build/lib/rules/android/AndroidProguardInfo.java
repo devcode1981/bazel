@@ -19,9 +19,9 @@ import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.packages.BuiltinProvider;
 import com.google.devtools.build.lib.packages.NativeInfo;
 import com.google.devtools.build.lib.rules.java.ProguardLibrary;
-import com.google.devtools.build.lib.skylarkbuildapi.android.AndroidProguardInfoApi;
-import com.google.devtools.build.lib.syntax.EvalException;
-import com.google.devtools.build.lib.syntax.SkylarkList;
+import com.google.devtools.build.lib.starlarkbuildapi.android.AndroidProguardInfoApi;
+import net.starlark.java.eval.EvalException;
+import net.starlark.java.eval.Sequence;
 
 /**
  * A target that can provide local proguard specifications, returned by the {@link
@@ -38,8 +38,12 @@ public final class AndroidProguardInfo extends NativeInfo
   private final ImmutableList<Artifact> localProguardSpecs;
 
   public AndroidProguardInfo(ImmutableList<Artifact> localProguardSpecs) {
-    super(PROVIDER);
     this.localProguardSpecs = localProguardSpecs;
+  }
+
+  @Override
+  public Provider getProvider() {
+    return PROVIDER;
   }
 
   @Override
@@ -51,13 +55,15 @@ public final class AndroidProguardInfo extends NativeInfo
   public static class Provider extends BuiltinProvider<AndroidProguardInfo>
       implements AndroidProguardInfoApi.Provider<Artifact> {
     private Provider() {
-      super(PROVIDER_NAME, AndroidProguardInfo.class);
+      super(NAME, AndroidProguardInfo.class);
     }
 
     @Override
-    public AndroidProguardInfo createInfo(SkylarkList<Artifact> localProguardSpecs)
+    public AndroidProguardInfo createInfo(Sequence<?> localProguardSpecs) // <Artifact>
         throws EvalException {
-      return new AndroidProguardInfo(localProguardSpecs.getImmutableList());
+      return new AndroidProguardInfo(
+          ImmutableList.copyOf(
+              Sequence.cast(localProguardSpecs, Artifact.class, "local_proguard_specs")));
     }
   }
 }

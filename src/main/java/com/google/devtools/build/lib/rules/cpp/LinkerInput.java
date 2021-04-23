@@ -15,18 +15,21 @@
 package com.google.devtools.build.lib.rules.cpp;
 
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.skylarkbuildapi.cpp.LinkerInputApi;
 
 /**
  * Something that appears on the command line of the linker. Since we sometimes expand archive files
  * to their constituent object files, we need to keep information whether a certain file contains
  * embedded objects and if so, the list of the object files themselves.
  */
-public interface LinkerInput extends LinkerInputApi {
+public interface LinkerInput {
+
   /**
    * Returns the type of the linker input.
    */
   ArtifactCategory getArtifactCategory();
+
+  /** Returns the artifact that is the input of the linker. */
+  Artifact getArtifact();
 
   /**
    * Returns the original library to link. If this library is a solib symlink, returns the
@@ -39,10 +42,9 @@ public interface LinkerInput extends LinkerInputApi {
    */
   boolean containsObjectFiles();
 
-  /**
-   * Returns whether the input artifact is a fake object file or not.
-   */
-  boolean isFake();
+  default boolean isLinkstamp() {
+    return false;
+  }
 
   /**
    * Return the list of object files included in the input artifact, if there are any. It is
@@ -57,4 +59,11 @@ public interface LinkerInput extends LinkerInputApi {
 
   /** If true, Bazel will not wrap this input in whole-archive block. */
   boolean disableWholeArchive();
+
+  /**
+   * Return the identifier for the library. This is used for de-duplication of linker inputs: two
+   * libraries should have the same identifier iff they are in fact the same library but linked in a
+   * different way (e.g. static/dynamic, PIC/no-PIC)
+   */
+  String getLibraryIdentifier();
 }

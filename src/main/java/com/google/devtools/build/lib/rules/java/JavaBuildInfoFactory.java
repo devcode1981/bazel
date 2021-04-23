@@ -20,8 +20,12 @@ import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ArtifactRoot;
 import com.google.devtools.build.lib.analysis.buildinfo.BuildInfoCollection;
 import com.google.devtools.build.lib.analysis.buildinfo.BuildInfoFactory;
+import com.google.devtools.build.lib.analysis.buildinfo.BuildInfoKey;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.rules.java.WriteBuildInfoPropertiesAction.TimestampFormatter;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec.VisibleForSerialization;
@@ -69,38 +73,34 @@ public abstract class JavaBuildInfoFactory implements BuildInfoFactory {
       BuildInfoContext context,
       BuildConfiguration config,
       Artifact stableStatus,
-      Artifact volatileStatus,
-      RepositoryName repositoryName) {
+      Artifact volatileStatus) {
     WriteBuildInfoPropertiesAction redactedInfo =
         getHeader(
             context,
             config,
             BUILD_INFO_REDACTED_PROPERTIES_NAME,
-            Artifact.NO_ARTIFACTS,
+            NestedSetBuilder.emptySet(Order.STABLE_ORDER),
             createRedactedTranslator(),
             true,
-            true,
-            repositoryName);
+            true);
     WriteBuildInfoPropertiesAction nonvolatileInfo =
         getHeader(
             context,
             config,
             BUILD_INFO_NONVOLATILE_PROPERTIES_NAME,
-            ImmutableList.of(stableStatus),
+            NestedSetBuilder.create(Order.STABLE_ORDER, stableStatus),
             createNonVolatileTranslator(),
             false,
-            true,
-            repositoryName);
+            true);
     WriteBuildInfoPropertiesAction volatileInfo =
         getHeader(
             context,
             config,
             BUILD_INFO_VOLATILE_PROPERTIES_NAME,
-            ImmutableList.of(volatileStatus),
+            NestedSetBuilder.create(Order.STABLE_ORDER, volatileStatus),
             createVolatileTranslator(),
             true,
-            false,
-            repositoryName);
+            false);
     List<Action> actions = new ArrayList<>(3);
     actions.add(redactedInfo);
     actions.add(nonvolatileInfo);
@@ -132,12 +132,11 @@ public abstract class JavaBuildInfoFactory implements BuildInfoFactory {
       BuildInfoContext context,
       BuildConfiguration config,
       PathFragment propertyFileName,
-      ImmutableList<Artifact> inputs,
+      NestedSet<Artifact> inputs,
       BuildInfoPropertiesTranslator translator,
       boolean includeVolatile,
-      boolean includeNonVolatile,
-      RepositoryName repositoryName) {
-    ArtifactRoot outputPath = config.getIncludeDirectory(repositoryName);
+      boolean includeNonVolatile) {
+    ArtifactRoot outputPath = config.getIncludeDirectory(RepositoryName.MAIN);
     final Artifact output =
         context.getBuildInfoArtifact(
             propertyFileName,

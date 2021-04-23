@@ -1,33 +1,19 @@
 ---
 layout: documentation
-title: Configuring Bazel CI for Testing Rules Against Remote Execution
+title: Configuring Bazel CI to test rules for remote execution
 ---
 
-# Configuring Bazel CI to Test Bazel Rules for Remote Execution
+# Configuring Bazel CI to Test Rules for Remote Execution
 
-*  [Overview](#overview)
-*  [Prerequisites](#prerequisites)
-*  [Setting up the Bazel CI for testing](#setting-up-the-bazel-ci-for-testing)
-*  [Troubleshooting failed builds and tests](#troubleshooting-failed-builds-and-tests)
-*  [Using a custom container in the `rbe_ubuntu1604` CI config](#using-a-custom-container-in-the-rbe_ubuntu1604-ci-config)
-   *  [Pulling the `rbe-ubuntu16-04` from Container Registry](#pulling-the-rbe-ubuntu16-04-from-container-registry)
-   *  [Building the `rbe-ubuntu16-04` container from source](#building-the-rbe-ubuntu16-04-container-from-source)
-   *  [Running the custom container](#running-the-custom-container)
-   *  [Adding resources to the custom container](#adding-resources-to-the-custom-container)
-   *  [Specifying the build platform definition](#specifying-the-build-platform-definition)
-   *  [Configuring Buildkite](#configuring-buildkite)
-
-## Overview
-
-This document is for owners and maintainers of Bazel rule repositories. It
-describes how to configure the Bazel Continuous Integration (CI) system for your
-repository to test your rules for compatibility against a remote execution
-scenario. The instructions in this document apply to projects stored in GitHub
-repositories.
+This page is for owners and maintainers of Bazel rule repositories. It
+describes how to configure the Bazel Continuous Integration (CI) system for
+your repository to test your rules for compatibility against a remote execution
+scenario. The instructions on this page apply to projects stored in
+GitHub repositories.
 
 ## Prerequisites
 
-Before completing the steps in this document, ensure the following:
+Before completing the steps on this page, ensure the following:
 
 *   Your GitHub repository is part of the
     [Bazel GitHub organization](https://github.com/bazelbuild).
@@ -44,7 +30,16 @@ Before completing the steps in this document, ensure the following:
 
 2.  Add the[`bazel-toolchains`](https://github.com/bazelbuild/bazel-toolchains)
     GitHub repository to your `WORKSPACE` file, pinned to the
-    [latest release](https://releases.bazel.build/bazel-toolchains.html).
+    [latest release](https://releases.bazel.build/bazel-toolchains.html). Also
+    add an `rbe_autoconfig` target with name `buildkite_config`:
+
+```
+load("@bazel_toolchains//rules:rbe_repo.bzl", "rbe_autoconfig")
+
+# Creates toolchain configuration for remote execution with BuildKite CI
+# for rbe_ubuntu1604.
+rbe_autoconfig(name = "buildkite_config")
+```
 
 3.  Send a pull request with your changes to the `presubmit.yml` file. (See
     [example pull request](https://github.com/bazelbuild/rules_rust/commit/db141526d89d00748404856524cedd7db8939c35).)
@@ -70,17 +65,17 @@ If your build or tests fail, it's likely due to the following:
 
 *   **Required build or test tools are not installed in the default container.**
     Builds using the `rbe_ubuntu1604` config run by default inside an
-    [`rbe-ubuntu16-04`](https://pantheon.corp.google.com/marketplace/details/google/rbe-ubuntu16-04)
+    [`rbe-ubuntu16-04`](https://console.cloud.google.com/marketplace/details/google/rbe-ubuntu16-04)
     container, which includes tools common to many Bazel builds. However, if
     your rules require tools not present in the default container, you must
     create a custom container based on the
-    [`rbe-ubuntu16-04`](https://pantheon.corp.google.com/marketplace/details/google/rbe-ubuntu16-04)
-    container and include those tools as described later in this document.
+    [`rbe-ubuntu16-04`](https://console.cloud.google.com/marketplace/details/google/rbe-ubuntu16-04)
+    container and include those tools as described later.
 
 *   **Build or test targets are using rules that are incompatible with remote
     execution.** See
-    [Adapting Bazel Rules for Remote Execution](https://docs.bazel.build/versions/master/remote-execution-rules.html)
-    for details about compatibility wtih remote execution.
+    [Adapting Bazel Rules for Remote Execution](remote-execution-rules.html) for
+    details about compatibility with remote execution.
 
 ## Using a custom container in the `rbe_ubuntu1604` CI config
 
@@ -107,7 +102,7 @@ gcloud docker -- pull gcr.io/cloud-marketplace/google/rbe-ubuntu16-04@sha256:<sh
 ```
 
 Replace `<sha256-checksum>` with the SHA256 checksum value for
-[the latest container](https://pantheon.corp.google.com/gcr/images/cloud-marketplace/GLOBAL/google/rbe-ubuntu16-04).
+[the latest container](https://console.cloud.google.com/gcr/images/cloud-marketplace/GLOBAL/google/rbe-ubuntu16-04).
 
 ### Building the `rbe-ubuntu16-04` container from source
 
@@ -140,7 +135,7 @@ To run the custom container, do one of the following:
     ```
 
     Replace `sha256-checksum` with the SHA256 checksum value for the
-    [latest container](https://pantheon.corp.google.com/gcr/images/cloud-marketplace/GLOBAL/google/rbe-ubuntu16-04).
+    [latest container](https://console.cloud.google.com/gcr/images/cloud-marketplace/GLOBAL/google/rbe-ubuntu16-04).
 
 *   If you built the container from source, run the following command:
 
@@ -173,7 +168,8 @@ Container Registry as follows:
 1. Build the container image:
 
     ```
-    docker build -t <custom-container-name> .docker tag <custom-container-name> gcr.io/<project-id>/<custom-container-name>
+    docker build -t <custom-container-name> .
+    docker tag <custom-container-name> gcr.io/<project-id>/<custom-container-name>
     ```
 
 2.  Push the container image to Container Registry:
@@ -189,7 +185,7 @@ Container Registry as follows:
     ````
 
 4.  Take note of the SHA256 checksum of your custom container. You will need to
-    provide it in your build platform definition later in this document.
+    provide it in your build platform definition later.
 
 5.  Configure the container for public access as described in  publicly
     accessible as explained in
@@ -201,38 +197,10 @@ Container Registry as follows:
 
 ### Specifying the build platform definition
 
-You must include a
-[Bazel platform](https://docs.bazel.build/versions/master/platforms.html)
-configuration in your custom toolchain configuration, which allows Bazel to
-select a toolchain appropriate to the desired hardware/software platform. See
-this [example platform configuration](https://github.com/tensorflow/tensorflow/blob/master/third_party/toolchains/BUILD)
-for the TensorFlow `ubuntu16-04` container.
-
-Create a similar configuration (that is, using the same constraints) but replace
-the value of the `container-image` property with the name of your custom
-container, as well as your GCR project ID and container image checksum. For
-example:
-
-```
-docker://gcr.io/<project-id>/<custom-container-name> @sha256:<sha256sum>
-```
-
-Once you have created a `BUILD` file with the platform rule, place it within
-your project tree. For example, `/platforms/BUILD`.
-
-### Configuring Buildkite
-
-Add the appropriate `build_flag` and `test_flag` entries to the
-`.bazelci/presubmit.yml` file in your `rbe_ubuntu1604 `config to switch your
-builds to using your custom container.
-See [example](https://github.com/bazelbuild/rules_docker/pull/484).
-
-**Note:** The example linked above uses a platform definition from the
-`@bazel_toolchains` repo. If your platform rule is in `/platforms/BUILD`, the
-entries would look as follows:
-
-```
-"--extra_execution_platforms=//platforms:<your_platform_target>"
-"--host_platform=//platforms:<your_platform_target>"
-"--platforms=//platforms:<your_platform_target>"
-```
+You must include a [Bazel platform](platforms.html) configuration in your
+custom toolchain configuration, which allows Bazel to select a toolchain
+appropriate to the desired hardware/software platform. To generate
+automatically a valid platform, you can add  to your `WORKSPACE` an
+`rbe_autoconfig` target with name `buildkite_config` which includes additional
+attrs to select your custom container. For details on this setup please read
+the up-to-date documentation for [`rbe_autoconfig`](https://github.com/bazelbuild/bazel-toolchains/blob/master/rules/rbe_repo.bzl)

@@ -13,39 +13,31 @@
 // limitations under the License.
 package com.google.devtools.build.lib.rules.android;
 
-import com.google.common.base.Optional;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Collections2;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Iterables;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.MultimapBuilder;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.analysis.PlatformConfiguration;
 import com.google.devtools.build.lib.analysis.RuleContext;
-import com.google.devtools.build.lib.analysis.Runfiles;
-import com.google.devtools.build.lib.analysis.SourceManifestAction;
-import com.google.devtools.build.lib.analysis.SourceManifestAction.ManifestType;
-import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.analysis.actions.FileWriteAction;
-import com.google.devtools.build.lib.analysis.actions.SymlinkTreeAction;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
-import com.google.devtools.build.lib.rules.cpp.CcLinkParams;
+import com.google.devtools.build.lib.packages.RuleClass.ConfiguredTargetFactory.RuleErrorException;
+import com.google.devtools.build.lib.rules.cpp.CcInfo;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainProvider;
-import com.google.devtools.build.lib.rules.cpp.CppFileTypes;
-import com.google.devtools.build.lib.rules.cpp.CppHelper;
 import com.google.devtools.build.lib.rules.cpp.CppSemantics;
-import com.google.devtools.build.lib.rules.cpp.LinkerInput;
+import com.google.devtools.build.lib.rules.cpp.LibraryToLink;
 import com.google.devtools.build.lib.rules.nativedeps.NativeDepsHelper;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetAndData;
-import com.google.devtools.build.lib.vfs.PathFragment;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import javax.annotation.Nullable;
@@ -55,32 +47,67 @@ import javax.annotation.Nullable;
 public final class NativeLibs {
   public static final NativeLibs EMPTY = new NativeLibs(ImmutableMap.of(), null);
 
+  private static String getLibDirName(ConfiguredTargetAndData dep) {
+    BuildConfiguration configuration = dep.getConfiguration();
+    AndroidConfiguration androidConfiguration =
+        configuration.getFragment(AndroidConfiguration.class);
+    String name;
+    if (androidConfiguration.incompatibleUseToolchainResolution()) {
+      name = configuration.getFragment(PlatformConfiguration.class).getTargetPlatform().getName();
+    } else {
+      // Legacy builds use the CPU as the name.
+      name = androidConfiguration.getCpu();
+    }
+
+    if (androidConfiguration.isHwasan()) {
+      name += "-hwasan";
+    }
+    return name;
+  }
+
   public static NativeLibs fromLinkedNativeDeps(
       RuleContext ruleContext,
       ImmutableList<String> depsAttributes,
       String nativeDepsFileName,
       CppSemantics cppSemantics)
-      throws InterruptedException {
-    Map<String, CcToolchainProvider> toolchainsByCpu = getToolchainsByCpu(ruleContext);
-    Map<String, BuildConfiguration> configurationMap = getBuildConfigurationsByCpu(ruleContext);
-    Map<String, NestedSet<Artifact>> result = new LinkedHashMap<>();
+      throws InterruptedException, RuleErrorException {
+    Map<String, ConfiguredTargetAndData> toolchainsByLibDir = new LinkedHashMap<>();
+    for (ConfiguredTargetAndData toolchainDep :
+        ruleContext.getConfiguredTargetAndDataMap().get("$cc_toolchain_split")) {
+      toolchainsByLibDir.put(getLibDirName(toolchainDep), toolchainDep);
+    }
+
+    // treeKeys() means that the resulting map sorts the entries by key, which is necessary to
+    // ensure determinism.
+    Multimap<String, ConfiguredTargetAndData> depsByLibDir =
+        MultimapBuilder.treeKeys().arrayListValues().build();
+    for (String depsAttr : depsAttributes) {
+      for (ConfiguredTargetAndData dep :
+          ruleContext.getConfiguredTargetAndDataMap().get(depsAttr)) {
+        depsByLibDir.put(getLibDirName(dep), dep);
+      }
+    }
+
     String nativeDepsLibraryBasename = null;
-    for (Map.Entry<String, Collection<TransitiveInfoCollection>> entry :
-        getSplitDepsByArchitecture(ruleContext, depsAttributes).asMap().entrySet()) {
-      CcLinkParams linkParams =
+    Map<String, NestedSet<Artifact>> result = new LinkedHashMap<>();
+    for (Map.Entry<String, Collection<ConfiguredTargetAndData>> entry :
+        depsByLibDir.asMap().entrySet()) {
+      ConfiguredTargetAndData toolchainDep = toolchainsByLibDir.get(entry.getKey());
+      // Get the actual cc toolchain from the dependency.
+      CcToolchainProvider toolchain =
+          toolchainDep.getConfiguredTarget().get(CcToolchainProvider.PROVIDER);
+
+      CcInfo ccInfo =
           AndroidCommon.getCcInfo(
-                  entry.getValue(),
-                  ImmutableList.of("-Wl,-soname=lib" + ruleContext.getLabel().getName()))
-              .getCcLinkingInfo()
-              .getStaticModeParamsForDynamicLibrary();
+              Collections2.transform(
+                  entry.getValue(), ConfiguredTargetAndData::getConfiguredTarget),
+              ImmutableList.of("-Wl,-soname=lib" + ruleContext.getLabel().getName()),
+              ruleContext.getLabel(),
+              ruleContext.getSymbolGenerator());
 
       Artifact nativeDepsLibrary =
           NativeDepsHelper.linkAndroidNativeDepsIfPresent(
-              ruleContext,
-              linkParams,
-              configurationMap.get(entry.getKey()),
-              toolchainsByCpu.get(entry.getKey()),
-              cppSemantics);
+              ruleContext, ccInfo, toolchainDep.getConfiguration(), toolchain, cppSemantics);
 
       NestedSetBuilder<Artifact> librariesBuilder = NestedSetBuilder.stableOrder();
       if (nativeDepsLibrary != null) {
@@ -88,7 +115,8 @@ public final class NativeLibs {
         nativeDepsLibraryBasename = nativeDepsLibrary.getExecPath().getBaseName();
       }
       librariesBuilder.addAll(
-          filterUniqueSharedLibraries(ruleContext, nativeDepsLibrary, linkParams.getLibraries()));
+          filterUniqueSharedLibraries(
+              ruleContext, nativeDepsLibrary, ccInfo.getCcLinkingContext().getLibraries()));
       NestedSet<Artifact> libraries = librariesBuilder.build();
 
       if (!libraries.isEmpty()) {
@@ -131,67 +159,6 @@ public final class NativeLibs {
     return nativeLibs;
   }
 
-  public ImmutableSet<Artifact> getAllNativeLibs() {
-    ImmutableSet.Builder<Artifact> result = ImmutableSet.builder();
-
-    for (Iterable<Artifact> libs : nativeLibs.values()) {
-      result.addAll(libs);
-    }
-
-    return result.build();
-  }
-
-  static class ManifestAndRunfiles {
-    @Nullable public final Artifact manifest;
-    public final Runfiles runfiles;
-
-    private ManifestAndRunfiles(@Nullable Artifact manifest, Runfiles runfiles) {
-      this.manifest = manifest;
-      this.runfiles = runfiles;
-    }
-  }
-
-  ManifestAndRunfiles createApkBuilderSymlinks(RuleContext ruleContext) {
-    Map<PathFragment, Artifact> symlinks = new LinkedHashMap<>();
-    for (Map.Entry<String, NestedSet<Artifact>> entry : nativeLibs.entrySet()) {
-      String arch = entry.getKey();
-      for (Artifact lib : entry.getValue()) {
-        symlinks.put(PathFragment.create(arch + "/" + lib.getExecPath().getBaseName()), lib);
-      }
-    }
-
-    if (symlinks.isEmpty()) {
-      return null;
-    }
-
-    Runfiles.Builder runfiles =
-        new Runfiles.Builder(
-            ruleContext.getWorkspaceName(),
-            ruleContext.getConfiguration().legacyExternalRunfiles());
-    runfiles.addRootSymlinks(symlinks);
-    if (!ruleContext.getConfiguration().buildRunfilesManifests()) {
-      return new ManifestAndRunfiles(/*manifest=*/ null, runfiles.build());
-    }
-
-    Artifact inputManifest = AndroidBinary.getDxArtifact(ruleContext, "native_symlinks.manifest");
-    SourceManifestAction sourceManifestAction =
-        new SourceManifestAction.Builder(
-                ManifestType.SOURCE_SYMLINKS, ruleContext.getActionOwner(), inputManifest, runfiles)
-            .build();
-    ruleContext.registerAction(sourceManifestAction);
-    Artifact outputManifest = AndroidBinary.getDxArtifact(ruleContext, "native_symlinks/MANIFEST");
-
-    ruleContext.registerAction(
-        new SymlinkTreeAction(
-            ruleContext.getActionOwner(),
-            inputManifest,
-            outputManifest,
-            false,
-            ruleContext.getConfiguration().getActionEnvironment(),
-            ruleContext.getConfiguration().runfilesEnabled()));
-    return new ManifestAndRunfiles(outputManifest, sourceManifestAction.getGeneratedRunfiles());
-  }
-
   /**
    * Returns the artifact containing the names of the native libraries or null if it does not exist.
    *
@@ -203,62 +170,34 @@ public final class NativeLibs {
     return nativeLibsName;
   }
 
-  private static Multimap<String, TransitiveInfoCollection> getSplitDepsByArchitecture(
-      RuleContext ruleContext, ImmutableList<String> depsAttributes) {
-    // treeKeys() means that the resulting map sorts the entries by key, which is necessary to
-    // ensure determinism.
-    Multimap<String, TransitiveInfoCollection> depsByArchitecture =
-        MultimapBuilder.treeKeys().arrayListValues().build();
-    for (String depsAttribute : depsAttributes) {
-      for (Map.Entry<Optional<String>, ? extends List<? extends TransitiveInfoCollection>> entry :
-          ruleContext.getSplitPrerequisites(depsAttribute).entrySet()) {
-        String cpu = entry.getKey().or(AndroidCommon.getAndroidConfig(ruleContext).getCpu());
-        depsByArchitecture.putAll(cpu, entry.getValue());
-      }
-    }
-    return depsByArchitecture;
-  }
-
-  private static Map<String, BuildConfiguration> getBuildConfigurationsByCpu(
-      RuleContext ruleContext) {
-    Map<String, BuildConfiguration> configurationMap = new LinkedHashMap<>();
-    for (Map.Entry<Optional<String>, ? extends List<ConfiguredTargetAndData>> entry :
-        ruleContext
-            .getSplitPrerequisiteConfiguredTargetAndTargets("$cc_toolchain_split")
-            .entrySet()) {
-      String cpu = entry.getKey().or(AndroidCommon.getAndroidConfig(ruleContext).getCpu());
-      configurationMap.put(cpu, Iterables.getOnlyElement(entry.getValue()).getConfiguration());
-    }
-    return configurationMap;
-  }
-
-  private static Map<String, CcToolchainProvider> getToolchainsByCpu(RuleContext ruleContext) {
-    Map<String, CcToolchainProvider> toolchainMap = new LinkedHashMap<>();
-    for (Map.Entry<Optional<String>, ? extends List<? extends TransitiveInfoCollection>> entry :
-        ruleContext.getSplitPrerequisites("$cc_toolchain_split").entrySet()) {
-      String cpu = entry.getKey().or(AndroidCommon.getAndroidConfig(ruleContext).getCpu());
-      TransitiveInfoCollection dep = Iterables.getOnlyElement(entry.getValue());
-      CcToolchainProvider toolchain = CppHelper.getToolchain(ruleContext, dep);
-      toolchainMap.put(cpu, toolchain);
-    }
-    return toolchainMap;
-  }
-
   private static Iterable<Artifact> filterUniqueSharedLibraries(
-      RuleContext ruleContext, Artifact linkedLibrary, NestedSet<? extends LinkerInput> libraries) {
+      RuleContext ruleContext, Artifact linkedLibrary, NestedSet<LibraryToLink> libraries) {
     Map<String, Artifact> basenames = new HashMap<>();
     Set<Artifact> artifacts = new HashSet<>();
     if (linkedLibrary != null) {
       basenames.put(linkedLibrary.getExecPath().getBaseName(), linkedLibrary);
     }
-    for (LinkerInput linkerInput : libraries) {
-      String name = linkerInput.getArtifact().getFilename();
-      if (!(CppFileTypes.SHARED_LIBRARY.matches(name)
-          || CppFileTypes.VERSIONED_SHARED_LIBRARY.matches(name))) {
+    for (LibraryToLink linkerInput : libraries.toList()) {
+      if (linkerInput.getPicStaticLibrary() != null || linkerInput.getStaticLibrary() != null) {
         // This is not a shared library and will not be loaded by Android, so skip it.
         continue;
       }
-      Artifact artifact = linkerInput.getOriginalLibraryArtifact();
+      Artifact artifact = null;
+      if (linkerInput.getInterfaceLibrary() != null) {
+        if (linkerInput.getResolvedSymlinkInterfaceLibrary() != null) {
+          artifact = linkerInput.getResolvedSymlinkInterfaceLibrary();
+        } else {
+          artifact = linkerInput.getInterfaceLibrary();
+        }
+      } else {
+        if (linkerInput.getResolvedSymlinkDynamicLibrary() != null) {
+          artifact = linkerInput.getResolvedSymlinkDynamicLibrary();
+        } else {
+          artifact = linkerInput.getDynamicLibrary();
+        }
+      }
+      Preconditions.checkNotNull(artifact);
+
       if (!artifacts.add(artifact)) {
         // We have already reached this library, e.g., through a different solib symlink.
         continue;

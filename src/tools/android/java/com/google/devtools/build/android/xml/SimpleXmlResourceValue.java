@@ -14,22 +14,27 @@
 package com.google.devtools.build.android.xml;
 
 import com.android.aapt.Resources.Item;
+import com.android.aapt.Resources.Primitive;
+import com.android.aapt.Resources.Reference;
 import com.android.aapt.Resources.StyledString;
 import com.android.aapt.Resources.StyledString.Span;
 import com.android.aapt.Resources.Value;
 import com.android.resources.ResourceType;
 import com.google.common.base.MoreObjects;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.xml.XmlEscapers;
 import com.google.devtools.build.android.AndroidDataWritingVisitor;
 import com.google.devtools.build.android.AndroidDataWritingVisitor.StartTag;
 import com.google.devtools.build.android.AndroidResourceSymbolSink;
 import com.google.devtools.build.android.DataSource;
+import com.google.devtools.build.android.DependencyInfo;
 import com.google.devtools.build.android.FullyQualifiedName;
 import com.google.devtools.build.android.XmlResourceValue;
 import com.google.devtools.build.android.XmlResourceValues;
 import com.google.devtools.build.android.proto.SerializeFormat;
 import com.google.devtools.build.android.proto.SerializeFormat.DataValueXml;
+import com.google.devtools.build.android.resources.Visibility;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.Arrays;
@@ -42,8 +47,7 @@ import javax.xml.namespace.QName;
 /**
  * Represents a simple Android resource xml value.
  *
- * <p>
- * There is a class of resources that are simple name/value pairs: string
+ * <p>There is a class of resources that are simple name/value pairs: string
  * (http://developer.android.com/guide/topics/resources/string-resource.html), bool
  * (http://developer.android.com/guide/topics/resources/more-resources.html#Bool), color
  * (http://developer.android.com/guide/topics/resources/more-resources.html#Color), and dimen
@@ -53,6 +57,7 @@ import javax.xml.namespace.QName;
  */
 @Immutable
 public class SimpleXmlResourceValue implements XmlResourceValue {
+
   static final QName TAG_BOOL = QName.valueOf("bool");
   static final QName TAG_COLOR = QName.valueOf("color");
   static final QName TAG_DIMEN = QName.valueOf("dimen");
@@ -63,6 +68,7 @@ public class SimpleXmlResourceValue implements XmlResourceValue {
   static final QName TAG_LAYOUT = QName.valueOf("layout");
   static final QName TAG_MENU = QName.valueOf("menu");
   static final QName TAG_MIPMAP = QName.valueOf("mipmap");
+  static final QName TAG_NAVIGATION = QName.valueOf("navigation");
   static final QName TAG_PUBLIC = QName.valueOf("public");
   static final QName TAG_RAW = QName.valueOf("raw");
   static final QName TAG_STRING = QName.valueOf("string");
@@ -80,6 +86,7 @@ public class SimpleXmlResourceValue implements XmlResourceValue {
     LAYOUT(TAG_LAYOUT),
     MENU(TAG_MENU),
     MIPMAP(TAG_MIPMAP),
+    NAVIGATION(TAG_NAVIGATION),
     PUBLIC(TAG_PUBLIC),
     RAW(TAG_RAW),
     STRING(TAG_STRING);
@@ -88,7 +95,6 @@ public class SimpleXmlResourceValue implements XmlResourceValue {
     Type(QName tagName) {
       this.tagName = tagName;
     }
-
 
     public static Type from(ResourceType resourceType) {
       for (Type valueType : values()) {
@@ -101,12 +107,14 @@ public class SimpleXmlResourceValue implements XmlResourceValue {
       throw new IllegalArgumentException(
           String.format(
               "%s resource type not found in available types: %s",
-              resourceType,
-              Arrays.toString(values())));
+              resourceType, Arrays.toString(values())));
     }
   }
 
+  private final Visibility visibility;
+  private final Item item;
   private final ImmutableMap<String, String> attributes;
+  // TODO(b/112848607): remove untyped "value" String in favor of "item" above.
   @Nullable private final String value;
   private final Type valueType;
 
@@ -124,8 +132,7 @@ public class SimpleXmlResourceValue implements XmlResourceValue {
     return of(Type.ITEM, ImmutableMap.of("type", resourceType.getName(), "format", format), value);
   }
 
-  public static XmlResourceValue itemWithValue(
-      ResourceType resourceType, String value) {
+  public static XmlResourceValue itemWithValue(ResourceType resourceType, String value) {
     return of(Type.ITEM, ImmutableMap.of("type", resourceType.getName()), value);
   }
 
@@ -135,12 +142,19 @@ public class SimpleXmlResourceValue implements XmlResourceValue {
 
   public static XmlResourceValue of(
       Type valueType, ImmutableMap<String, String> attributes, @Nullable String value) {
-    return new SimpleXmlResourceValue(valueType, attributes, value);
+    return new SimpleXmlResourceValue(
+        Visibility.UNKNOWN, valueType, Item.getDefaultInstance(), attributes, value);
   }
 
   private SimpleXmlResourceValue(
-      Type valueType, ImmutableMap<String, String> attributes, String value) {
+      Visibility visibility,
+      Type valueType,
+      Item item,
+      ImmutableMap<String, String> attributes,
+      String value) {
+    this.visibility = visibility;
     this.valueType = valueType;
+    this.item = item;
     this.value = value;
     this.attributes = attributes;
   }
@@ -168,11 +182,12 @@ public class SimpleXmlResourceValue implements XmlResourceValue {
   public static XmlResourceValue from(SerializeFormat.DataValueXml proto) {
     return of(
         Type.valueOf(proto.getValueType()),
-        ImmutableMap.copyOf(proto.getAttribute()),
+        ImmutableMap.copyOf(proto.getAttributeMap()),
         proto.hasValue() ? proto.getValue() : null);
   }
 
-  public static XmlResourceValue from(Value proto, ResourceType resourceType) {
+  public static XmlResourceValue from(
+      Value proto, Visibility visibility, ResourceType resourceType) {
     Item item = proto.getItem();
     String stringValue = null;
     ImmutableMap.Builder<String, String> attributes = ImmutableMap.builder();
@@ -191,32 +206,98 @@ public class SimpleXmlResourceValue implements XmlResourceValue {
             String.format(";%s,%d,%d", span.getTag(), span.getFirstChar(), span.getLastChar()));
       }
       stringValue = stringBuilder.toString();
-    } else if ((resourceType == ResourceType.COLOR
-        || resourceType == ResourceType.DRAWABLE) && item.hasPrim()) {
-      stringValue =
-          String.format("#%1$8s", Integer.toHexString(item.getPrim().getData())).replace(' ', '0');
-    } else if (resourceType == ResourceType.INTEGER && item.hasPrim()){
-      stringValue = Integer.toString(item.getPrim().getData());
-    } else if (resourceType == ResourceType.BOOL && item.hasPrim()) {
-      stringValue = item.getPrim().getData() == 0 ? "false" : "true";
-    } else if (resourceType == ResourceType.FRACTION
-        || resourceType == ResourceType.DIMEN
-        || resourceType == ResourceType.STRING) {
-      stringValue = Integer.toString(item.getPrim().getData());
+    } else if (item.hasPrim()) {
+      stringValue = convertPrimitiveToString(item.getPrim());
     } else {
       throw new IllegalArgumentException(
           String.format("'%s' with value %s is not a simple resource type.", resourceType, proto));
     }
 
-    return of(
+    return new SimpleXmlResourceValue(
+        visibility,
         Type.valueOf(resourceType.toString().toUpperCase(Locale.ENGLISH)),
+        item,
         attributes.build(),
         stringValue);
   }
 
+  static String convertPrimitiveToString(Primitive primitive) {
+    switch (primitive.getOneofValueCase()) {
+      case NULL_VALUE:
+        return "(null)";
+      case EMPTY_VALUE:
+        return "(empty)";
+      case FLOAT_VALUE:
+        return Float.toString(primitive.getFloatValue());
+      case INT_DECIMAL_VALUE:
+        return Integer.toString(primitive.getIntDecimalValue());
+      case INT_HEXADECIMAL_VALUE:
+        return String.format(Locale.ROOT, "0x%x", primitive.getIntHexadecimalValue());
+      case BOOLEAN_VALUE:
+        return Boolean.toString(primitive.getBooleanValue());
+      case DIMENSION_VALUE:
+        return ComplexConverter.convertComplexPrimitiveToString(
+            primitive.getDimensionValue(), /*isDimension=*/ true);
+      case FRACTION_VALUE:
+        return ComplexConverter.convertComplexPrimitiveToString(
+            primitive.getFractionValue(), /*isDimension=*/ false);
+
+        // Rendering all colors as normalized 32-bit hex.  No one cares how they were written in the
+        // original XML, and rendering these differently would lead to pointless resouce conflicts
+        // reported if e.g. one XML file uses #123 while another uses #112233.
+      case COLOR_ARGB8_VALUE:
+        return String.format(Locale.ROOT, "#%08X", primitive.getColorArgb8Value());
+      case COLOR_RGB8_VALUE:
+        return String.format(Locale.ROOT, "#%08X", primitive.getColorRgb8Value());
+      case COLOR_ARGB4_VALUE:
+        return String.format(Locale.ROOT, "#%08X", primitive.getColorArgb4Value());
+      case COLOR_RGB4_VALUE:
+        return String.format(Locale.ROOT, "#%08X", primitive.getColorRgb4Value());
+
+      case DIMENSION_VALUE_DEPRECATED:
+      case FRACTION_VALUE_DEPRECATED:
+        // we don't expect to deserialize data from older aapt2 builds
+      case ONEOFVALUE_NOT_SET:
+        break;
+    }
+    throw new IllegalArgumentException("Invalid primitive value " + primitive);
+  }
+
+  // See 'print_complex' defined in:
+  // https://android.googlesource.com/platform/frameworks/base/+/master/libs/androidfw/ResourceTypes.cpp
+  private static final class ComplexConverter {
+    static final String[] DIMENSION_TYPE_STRINGS =
+        new String[] {"px", "dp", "sp", "pt", "in", "mm"};
+    static final String[] FRACTION_TYPE_STRINGS = new String[] {"%", "%p"};
+    static final int[] RADIX_SHIFTS = new int[] {0, 7, 15, 23};
+
+    static String convertComplexPrimitiveToString(int rawValue, boolean isDimension) {
+      String typeString;
+      try {
+        if (isDimension) {
+          typeString = DIMENSION_TYPE_STRINGS[rawValue & 0xF];
+        } else {
+          typeString = FRACTION_TYPE_STRINGS[rawValue & 0xF];
+        }
+      } catch (IndexOutOfBoundsException e) {
+        typeString = " (unknown unit)";
+      }
+
+      int radixIdx = (rawValue >> 4) & 0x3;
+      float value = (rawValue >> 8) * (1.0f / (1 << RADIX_SHIFTS[radixIdx]));
+
+      // Use Float.toString instead of String.format("%f") to avoid excessive trailing zeros.
+      // Strings should never be localized anyway.
+      // * https://stackoverflow.com/a/44202755
+      // * https://issuetracker.google.com/issues/64962882
+      return String.format(Locale.ROOT, "%s%s", Float.toString(value), typeString);
+    }
+  }
+
   @Override
-  public void writeResourceToClass(FullyQualifiedName key, AndroidResourceSymbolSink sink) {
-    sink.acceptSimpleResource(key.type(), key.name());
+  public void writeResourceToClass(
+      DependencyInfo dependencyInfo, FullyQualifiedName key, AndroidResourceSymbolSink sink) {
+    sink.acceptSimpleResource(dependencyInfo, visibility, key.type(), key.name());
   }
 
   @Override
@@ -241,7 +322,7 @@ public class SimpleXmlResourceValue implements XmlResourceValue {
 
   @Override
   public int hashCode() {
-    return Objects.hash(valueType, attributes, value);
+    return Objects.hash(visibility, valueType, attributes, value);
   }
 
   @Override
@@ -250,8 +331,10 @@ public class SimpleXmlResourceValue implements XmlResourceValue {
       return false;
     }
     SimpleXmlResourceValue other = (SimpleXmlResourceValue) obj;
-    return Objects.equals(valueType, other.valueType)
+    return Objects.equals(visibility, other.visibility)
+        && Objects.equals(valueType, other.valueType)
         && Objects.equals(attributes, other.attributes)
+        // TODO(b/112848607): include the "item" proto in comparison; right now it's redundant.
         && Objects.equals(value, other.value);
   }
 
@@ -268,12 +351,27 @@ public class SimpleXmlResourceValue implements XmlResourceValue {
   public XmlResourceValue combineWith(XmlResourceValue value) {
     throw new IllegalArgumentException(this + " is not a combinable resource.");
   }
-  
+
+  @Override
+  public int compareMergePriorityTo(XmlResourceValue value) {
+    return 0;
+  }
+
   @Override
   public String asConflictStringWith(DataSource source) {
     if (value != null) {
       return String.format(" %s (with value %s)", source.asConflictString(), value);
     }
     return source.asConflictString();
+  }
+
+  @Override
+  public Visibility getVisibility() {
+    return visibility;
+  }
+
+  @Override
+  public ImmutableList<Reference> getReferencedResources() {
+    return item.hasRef() ? ImmutableList.of(item.getRef()) : ImmutableList.of();
   }
 }

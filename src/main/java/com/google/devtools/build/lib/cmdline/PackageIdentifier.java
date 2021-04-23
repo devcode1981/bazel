@@ -20,8 +20,6 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Interner;
 import com.google.devtools.build.lib.concurrent.BlazeInterners;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
-import com.google.devtools.build.lib.skylarkinterface.SkylarkPrinter;
-import com.google.devtools.build.lib.skylarkinterface.SkylarkValue;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.io.Serializable;
 import java.util.Objects;
@@ -36,8 +34,7 @@ import javax.annotation.concurrent.Immutable;
  */
 @AutoCodec
 @Immutable
-public final class PackageIdentifier
-    implements Comparable<PackageIdentifier>, Serializable, SkylarkValue {
+public final class PackageIdentifier implements Comparable<PackageIdentifier>, Serializable {
   private static final Interner<PackageIdentifier> INTERNER = BlazeInterners.newWeakInterner();
 
   public static PackageIdentifier create(String repository, PathFragment pkgName)
@@ -79,19 +76,21 @@ public final class PackageIdentifier
    * @throws LabelSyntaxException if the exec path seems to be for an external repository that does
    *     not have a valid repository name (see {@link RepositoryName#create})
    */
-  public static PackageIdentifier discoverFromExecPath(PathFragment execPath, boolean forFiles)
-      throws LabelSyntaxException {
+  public static PackageIdentifier discoverFromExecPath(
+      PathFragment execPath, boolean forFiles, boolean siblingRepositoryLayout) {
     Preconditions.checkArgument(!execPath.isAbsolute(), execPath);
     PathFragment tofind = forFiles
         ? Preconditions.checkNotNull(
             execPath.getParentDirectory(), "Must pass in files, not root directory")
         : execPath;
-    if (tofind.startsWith(Label.EXTERNAL_PATH_PREFIX)) {
-      // TODO(ulfjack): Remove this when kchodorow@'s exec root rearrangement has been rolled out.
-      RepositoryName repository = RepositoryName.create("@" + tofind.getSegment(1));
-      return PackageIdentifier.create(repository, tofind.subFragment(2));
-    } else if (tofind.containsUplevelReferences()) {
-      RepositoryName repository = RepositoryName.create("@" + tofind.getSegment(1));
+    PathFragment prefix =
+        siblingRepositoryLayout
+            ? LabelConstants.EXPERIMENTAL_EXTERNAL_PATH_PREFIX
+            : LabelConstants.EXTERNAL_PATH_PREFIX;
+    if (tofind.startsWith(prefix)) {
+      // Using the path prefix can be either "external" or "..", depending on whether the sibling
+      // repository layout is used.
+      RepositoryName repository = RepositoryName.createFromValidStrippedName(tofind.getSegment(1));
       return PackageIdentifier.create(repository, tofind.subFragment(2));
     } else {
       return PackageIdentifier.createInMainRepo(tofind);
@@ -171,15 +170,28 @@ public final class PackageIdentifier
   }
 
   /**
-   * Returns a relative path to the source code for this package. Returns pkgName if this is in the
-   * main repository or external/[repository name]/[pkgName] if not.
+   * Returns a path to the source code for this package relative to the corresponding source root.
+   * Returns pkgName for all repositories.
    */
   public PathFragment getSourceRoot() {
-    return repository.getSourceRoot().getRelative(pkgName);
+    return pkgName;
   }
 
-  public PathFragment getPathUnderExecRoot() {
-    return repository.getPathUnderExecRoot().getRelative(pkgName);
+  /**
+   * Returns the package path fragment to derived artifacts for this package. Returns pkgName if
+   * this is in the main repository or siblingRepositoryLayout is true. Otherwise, returns
+   * external/[repository name]/[pkgName].
+   */
+  public PathFragment getPackagePath(boolean siblingRepositoryLayout) {
+    return repository.isDefault() || repository.isMain() || siblingRepositoryLayout
+        ? pkgName
+        : LabelConstants.EXTERNAL_PATH_PREFIX
+            .getRelative(repository.strippedName())
+            .getRelative(pkgName);
+  }
+
+  public PathFragment getExecPath(boolean siblingRepositoryLayout) {
+    return repository.getExecPath(siblingRepositoryLayout).getRelative(pkgName);
   }
 
   /**
@@ -198,12 +210,18 @@ public final class PackageIdentifier
     return create(RepositoryName.MAIN, pkgName);
   }
 
+  /** Returns the package in label syntax format. */
+  public String getCanonicalForm() {
+    String repository = getRepository().getCanonicalForm();
+    return repository + "//" + getPackageFragment();
+  }
+
   /**
    * Returns the name of this package.
    *
    * <p>There are certain places that expect the path fragment as the package name ('foo/bar') as a
    * package identifier. This isn't specific enough for packages in other repositories, so their
-   * stringified version is '@baz//foo/bar'.</p>
+   * stringified version is '@baz//foo/bar'.
    */
   @Override
   public String toString() {
@@ -229,15 +247,18 @@ public final class PackageIdentifier
   }
 
   @Override
+  @SuppressWarnings("ReferenceEquality") // Performance optimization.
   public int compareTo(PackageIdentifier that) {
+    // Fast-paths for the common case of the same package or a package in the same repository.
+    if (this == that) {
+      return 0;
+    }
+    if (repository == that.repository) {
+      return pkgName.compareTo(that.pkgName);
+    }
     return ComparisonChain.start()
         .compare(repository.toString(), that.repository.toString())
         .compare(pkgName, that.pkgName)
         .result();
-  }
-
-  @Override
-  public void repr(SkylarkPrinter printer) {
-    printer.repr(toString());
   }
 }

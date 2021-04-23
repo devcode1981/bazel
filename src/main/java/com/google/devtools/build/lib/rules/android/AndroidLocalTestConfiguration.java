@@ -14,22 +14,19 @@
 
 package com.google.devtools.build.lib.rules.android;
 
-import com.google.common.collect.ImmutableSet;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration.Fragment;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
-import com.google.devtools.build.lib.analysis.config.ConfigurationFragmentFactory;
+import com.google.devtools.build.lib.analysis.config.Fragment;
 import com.google.devtools.build.lib.analysis.config.FragmentOptions;
-import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
+import com.google.devtools.build.lib.analysis.config.RequiresOptions;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
-import javax.annotation.Nullable;
 
 /** Configuration fragment for android_local_test. */
 @Immutable
-public class AndroidLocalTestConfiguration extends BuildConfiguration.Fragment {
+@RequiresOptions(options = {AndroidLocalTestConfiguration.Options.class})
+public class AndroidLocalTestConfiguration extends Fragment {
   /** android_local_test specific options */
   public static final class Options extends FragmentOptions {
     @Option(
@@ -43,44 +40,13 @@ public class AndroidLocalTestConfiguration extends BuildConfiguration.Fragment {
               + " for testing purposes."
     )
     public boolean androidLocalTestBinaryResources;
-
-    @Option(
-        name = "android_local_test_uses_java_rule_validation",
-        defaultValue = "false",
-        documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
-        effectTags = {OptionEffectTag.UNKNOWN},
-        help = "This attribute is deprecated and has no effect.")
-    public boolean androidLocalTestUsesJavaRuleValidation;
-  }
-
-  /**
-   * Loader class for {@link
-   * com.google.devtools.build.lib.rules.android.AndroidLocalTestConfiguration}.
-   */
-  public static final class Loader implements ConfigurationFragmentFactory {
-
-    @Nullable
-    @Override
-    public Fragment create(BuildOptions buildOptions)
-        throws InvalidConfigurationException, InterruptedException {
-      return new AndroidLocalTestConfiguration(buildOptions.get(Options.class));
-    }
-
-    @Override
-    public Class<? extends Fragment> creates() {
-      return AndroidLocalTestConfiguration.class;
-    }
-
-    @Override
-    public ImmutableSet<Class<? extends FragmentOptions>> requiredOptions() {
-      return ImmutableSet.of(Options.class);
-    }
   }
 
   private final boolean androidLocalTestBinaryResources;
 
-  private AndroidLocalTestConfiguration(Options options) {
-    this.androidLocalTestBinaryResources = options.androidLocalTestBinaryResources;
+  public AndroidLocalTestConfiguration(BuildOptions buildOptions) {
+    this.androidLocalTestBinaryResources =
+        buildOptions.get(Options.class).androidLocalTestBinaryResources;
   }
 
   public boolean useAndroidLocalTestBinaryResources() {

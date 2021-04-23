@@ -15,7 +15,7 @@
 package com.google.devtools.build.lib.skyframe.serialization;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableClassToInstanceMap;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.CodedInputStream;
 import com.google.protobuf.CodedOutputStream;
@@ -34,13 +34,13 @@ public class ObjectCodecs {
    * ObjectCodec}s.
    */
   public ObjectCodecs(
-      ObjectCodecRegistry codecRegistry, ImmutableMap<Class<?>, Object> dependencies) {
+      ObjectCodecRegistry codecRegistry, ImmutableClassToInstanceMap<Object> dependencies) {
     serializationContext = new SerializationContext(codecRegistry, dependencies);
     deserializationContext = new DeserializationContext(codecRegistry, dependencies);
   }
 
   public ObjectCodecs(ObjectCodecRegistry codecRegistry) {
-    this(codecRegistry, ImmutableMap.of());
+    this(codecRegistry, ImmutableClassToInstanceMap.of());
   }
 
   @VisibleForTesting
@@ -65,6 +65,11 @@ public class ObjectCodecs {
     return serializeToByteString(subject, this::serializeMemoized);
   }
 
+  public void serializeMemoized(Object subject, CodedOutputStream codedOut)
+      throws SerializationException {
+    serializeImpl(subject, codedOut, serializationContext.getMemoizingContext());
+  }
+
   public SerializationResult<ByteString> serializeMemoizedAndBlocking(Object subject)
       throws SerializationException {
     SerializationContext memoizingContext =
@@ -73,11 +78,6 @@ public class ObjectCodecs {
         serializeToByteString(
             subject, (subj, codedOut) -> serializeImpl(subj, codedOut, memoizingContext));
     return SerializationResult.create(byteString, memoizingContext.createFutureToBlockWritingOn());
-  }
-
-  public void serializeMemoized(Object subject, CodedOutputStream codedOut)
-      throws SerializationException {
-    serializeImpl(subject, codedOut, serializationContext.getMemoizingContext());
   }
 
   public Object deserialize(ByteString data) throws SerializationException {
@@ -96,7 +96,7 @@ public class ObjectCodecs {
     return deserializeImpl(codedIn, /*memoize=*/ true);
   }
 
-  private void serializeImpl(
+  private static void serializeImpl(
       Object subject, CodedOutputStream codedOut, SerializationContext serializationContext)
       throws SerializationException {
     try {
@@ -131,7 +131,7 @@ public class ObjectCodecs {
   }
 
   @FunctionalInterface
-  private static interface SerializeCall {
+  private interface SerializeCall {
     void serialize(Object subject, CodedOutputStream codedOut) throws SerializationException;
   }
 

@@ -1,8 +1,12 @@
+load("//:distdir_deps.bzl", "gen_workspace_stanza")
+load("//tools/python:private/defs.bzl", "py_test")
+
 package(default_visibility = ["//visibility:private"])
 
 exports_files([
     "bin/bazel",
-    "testenv.sh",
+    "bin/bazel_jdk_minimal",
+    "bin/bazel_nojdk",
     "integration_test_setup.sh",
     "sandboxing_test_utils.sh",
     "unittest.bash",
@@ -18,22 +22,42 @@ filegroup(
     visibility = ["//src:__pkg__"],
 )
 
-sh_library(
-    name = "bashunit",
-    srcs = ["unittest.bash"],
-    data = [
-        "testenv.sh",
-        "//tools:test_sharding_compliant",
+gen_workspace_stanza(
+    name = "testenv_sh",
+    out = "testenv.sh",
+    repos = [
+        "rules_cc",
+        "rules_java",
+        "rules_proto",
     ],
+    template = "testenv.sh.tmpl",
     visibility = ["//visibility:public"],
 )
 
-sh_test(
+sh_library(
+    name = "bashunit",
+    srcs = [
+        "unittest.bash",
+        "unittest_utils.sh",
+    ],
+    data = [":testenv.sh"],
+    visibility = ["//visibility:public"],
+)
+
+# Test bashunit with python to avoid recursion.
+py_test(
     name = "bashunit_test",
-    srcs = ["unittest_test.sh"],
+    size = "medium",
+    srcs = ["unittest_test.py"],
     data = [
         ":bashunit",
+        # This test relies on writing shell scripts that use bash runfiles
+        # to load the actual copy of unittest.bash being tested.
         "@bazel_tools//tools/bash/runfiles",
+    ],
+    main = "unittest_test.py",
+    tags = [
+        "no_windows",  # test runs bash scripts in a subprocess
     ],
 )
 
@@ -47,9 +71,9 @@ sh_test(
     name = "shell_utils_test",
     srcs = ["shell_utils_test.sh"],
     data = [
-        "testenv.sh",
         ":bashunit",
         ":shell_utils",
+        ":testenv.sh",
         "@bazel_tools//tools/bash/runfiles",
     ],
 )
@@ -58,9 +82,9 @@ sh_test(
     name = "shell_utils_symlinks_test",
     srcs = ["shell_utils_symlinks_test.sh"],
     data = [
-        "testenv.sh",
         ":bashunit",
         ":shell_utils",
+        ":testenv.sh",
         "@bazel_tools//tools/bash/runfiles",
     ],
     tags = [

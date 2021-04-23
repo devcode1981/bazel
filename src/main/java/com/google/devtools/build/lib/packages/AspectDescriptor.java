@@ -16,7 +16,6 @@ package com.google.devtools.build.lib.packages;
 
 import com.google.common.collect.ImmutableMultimap;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
-import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.protobuf.TextFormat;
 import java.util.Map;
 import java.util.Objects;
@@ -27,12 +26,10 @@ import java.util.Objects;
  * <p>Used for dependency resolution.
  */
 @Immutable
-@AutoCodec
 public final class AspectDescriptor {
   private final AspectClass aspectClass;
   private final AspectParameters aspectParameters;
 
-  @AutoCodec.Instantiator
   public AspectDescriptor(AspectClass aspectClass, AspectParameters aspectParameters) {
     this.aspectClass = aspectClass;
     this.aspectParameters = aspectParameters;
@@ -76,11 +73,10 @@ public final class AspectDescriptor {
   }
 
   /**
-   * Creates a presentable description of this aspect, avaliable
-   * to Skylark via "Target.aspects".
+   * Creates a presentable description of this aspect, available to Starlark via "Target.aspects".
    *
-   * The description is designed to be unique for each aspect descriptor,
-   * but not to be parseable.
+   * <p>The description is designed to be unique for each aspect descriptor, but not to be
+   * parseable.
    */
   public String getDescription() {
     if (aspectParameters.isEmpty()) {

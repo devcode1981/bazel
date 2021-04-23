@@ -1,16 +1,17 @@
-// Copyright 2018 The Bazel Authors. All rights reserved.
+// Copyright 2019 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//    http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
 
 package com.google.devtools.build.lib.blackbox.framework;
 
@@ -102,6 +103,21 @@ public final class BlackBoxTestContext {
   }
 
   /**
+   * Writes <code>lines</code> using ISO_8859_1 into the file, specified by the <code>subPath</code>
+   * relative to the working directory. Overrides the file if it exists, creates the file if it does
+   * not exist.
+   *
+   * @param subPath path to file relative to working directory
+   * @param lines lines of text to write. Newlines are added by the method.
+   * @return Path to the file
+   * @throws IOException in case if the file can not be created/overridden, or can not be open for
+   *     writing
+   */
+  public Path write(String subPath, List<String> lines) throws IOException {
+    return PathUtils.writeFileInDir(workDir, subPath, lines);
+  }
+
+  /**
    * Writes <code>lines</code> using ISO_8859_1 into the BUILD file in the directory, specified by
    * the <code>subPath</code> relative to the working directory. Overrides the file if it exists,
    * creates the file if it does not exist.
@@ -135,14 +151,14 @@ public final class BlackBoxTestContext {
    *
    * <p>Calls <code>bazel info bazel-genfiles</code>, caches the result.
    *
+   * @param bazel the instance of BuilderRunner to run info with
    * @param subPathUnderGen path to the file under bazel-gen directory
    * @return full path to the resolved file
    * @throws Exception if <code>bazel info</code> command fails
    */
-  public Path resolveGenPath(String subPathUnderGen) throws Exception {
+  public Path resolveGenPath(BuilderRunner bazel, String subPathUnderGen) throws Exception {
     if (genFilesPath == null) {
-      genFilesPath =
-          PathUtils.resolve(workDir, bazel().info(productName + "-genfiles").outString());
+      genFilesPath = PathUtils.resolve(workDir, getInfoValue(bazel, productName + "-genfiles"));
     }
     return PathUtils.resolve(genFilesPath, subPathUnderGen);
   }
@@ -150,34 +166,56 @@ public final class BlackBoxTestContext {
   /**
    * Resolve a path relative to "bazel-bin".
    *
-   * <p>Calls <code>bazel info bazel-bin</code>, caches the result.
+   * <p>Calls <code>bazel info bazel-bin</code>
    *
+   * @param bazel the instance of BuilderRunner to run info with
    * @param subPathUnderBin path to the file under bazel-bin directory
    * @return full path to the resolved file
    * @throws Exception if <code>bazel info</code> command fails
    */
-  public Path resolveBinPath(String subPathUnderBin) throws Exception {
-    if (binFilesPaths == null) {
-      binFilesPaths = PathUtils.resolve(workDir, bazel().info(productName + "-bin").outString());
-    }
-    return PathUtils.resolve(binFilesPaths, subPathUnderBin);
+  public Path resolveBinPath(BuilderRunner bazel, String subPathUnderBin) throws Exception {
+    Path binPath = PathUtils.resolve(workDir, getInfoValue(bazel, productName + "-bin"));
+    return PathUtils.resolve(binPath, subPathUnderBin);
+  }
+
+  /**
+   * Resolve a path relative to "execution_root". Useful for checking the contents of the generated
+   * external repositories.
+   *
+   * <p>Calls <code>bazel info execution_root</code>
+   *
+   * @param bazel the instance of BuilderRunner to run info with
+   * @param subPathUnderBin path to the file under execution_root directory
+   * @return full path to the resolved file
+   * @throws Exception if <code>bazel info</code> command fails
+   */
+  public Path resolveExecRootPath(BuilderRunner bazel, String subPathUnderBin) throws Exception {
+    Path binPath = PathUtils.resolve(workDir, getInfoValue(bazel, "execution_root"));
+    return PathUtils.resolve(binPath, subPathUnderBin);
+  }
+
+  private String getInfoValue(BuilderRunner bazel, String key) throws Exception {
+    String[] parts = bazel.info(key).outString().trim().split(" ");
+    return parts[parts.length - 1];
   }
 
   /**
    * Runs the built executable. Calls <code>bazel info</code> to get the information about bazel-bin
-   * directory location, caches the result for the subsequent calls.
+   * directory location.
    *
+   * @param bazel the instance of BuilderRunner to run info with
    * @param subPathUnderBin path to the executable relative to bazel-bin directory
    * @param timeoutMillis timeout on the process execution
    * @return ProcessResult result of the execution with the process exit code and strings with
    *     stdout and stderr contents.
    * @throws Exception if <code>bazel info</code> command fails or executable invocation fails.
    */
-  public ProcessResult runBuiltBinary(String subPathUnderBin, long timeoutMillis) throws Exception {
+  public ProcessResult runBuiltBinary(
+      BuilderRunner bazel, String subPathUnderBin, long timeoutMillis) throws Exception {
     if (OS.WINDOWS.equals(OS.getCurrent()) && !subPathUnderBin.endsWith(".exe")) {
       subPathUnderBin += ".exe";
     }
-    Path executable = resolveBinPath(subPathUnderBin);
+    Path executable = resolveBinPath(bazel, subPathUnderBin);
     assertThat(Files.exists(executable)).isTrue();
     assertThat(Files.isRegularFile(executable)).isTrue();
     assertThat(Files.isExecutable(executable)).isTrue();
@@ -200,6 +238,30 @@ public final class BlackBoxTestContext {
   public BuilderRunner bazel() {
     return new BuilderRunner(
         workDir, binaryPath, getProcessTimeoutMillis(-1), commonEnv, executorService);
+  }
+
+  /**
+   * Runs external binary in the specified working directory. See {@link BuilderRunner}
+   *
+   * @param workingDirectory working directory for running the binary
+   * @param processToRun path to the binary to run
+   * @param expectEmptyError if <code>true</code>, no text is expected in the error stream,
+   *     otherwise, ProcessRunnerException is thrown.
+   * @param arguments arguments to pass to the binary
+   * @return ProcessResult execution result
+   */
+  public ProcessResult runBinary(
+      Path workingDirectory, String processToRun, boolean expectEmptyError, String... arguments)
+      throws Exception {
+    ProcessParameters parameters =
+        ProcessParameters.builder()
+            .setWorkingDirectory(workingDirectory.toFile())
+            .setName(processToRun)
+            .setTimeoutMillis(getProcessTimeoutMillis(-1))
+            .setArguments(arguments)
+            .setExpectedEmptyError(expectEmptyError)
+            .build();
+    return new ProcessRunner(parameters, executorService).runSynchronously();
   }
 
   /**

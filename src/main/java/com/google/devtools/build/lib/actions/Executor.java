@@ -13,10 +13,10 @@
 // limitations under the License.
 package com.google.devtools.build.lib.actions;
 
-import com.google.common.eventbus.EventBus;
 import com.google.devtools.build.lib.actions.ActionExecutionContext.ShowSubcommands;
+import com.google.devtools.build.lib.bugreport.BugReport;
+import com.google.devtools.build.lib.bugreport.BugReporter;
 import com.google.devtools.build.lib.clock.Clock;
-import com.google.devtools.build.lib.events.ExtendedEventHandler;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.common.options.OptionsProvider;
@@ -25,8 +25,8 @@ import com.google.devtools.common.options.OptionsProvider;
  * The Executor provides the context for the execution of actions. It is only valid during the
  * execution phase, and references should not be cached.
  *
- * <p>This class provides the actual logic to execute actions. The platonic ideal of this system
- * is that {@link Action}s are immutable objects that tell Blaze <b>what</b> to do and
+ * <p>This class provides the actual logic to execute actions. The platonic ideal of this system is
+ * that {@link Action}s are immutable objects that tell Blaze <b>what</b> to do and
  * <link>ActionContext</link>s tell Blaze <b>how</b> to do it (however, we do have an "execute"
  * method on actions now).
  *
@@ -37,7 +37,7 @@ import com.google.devtools.common.options.OptionsProvider;
  * <p>In theory, we could also merge {@link Executor} with {@link ActionExecutionContext}, since
  * they both provide services to actions being executed and are passed to almost the same places.
  */
-public interface Executor {
+public interface Executor extends ActionContext.ActionContextRegistry {
 
   /** Returns the file system of blaze. */
   FileSystem getFileSystem();
@@ -56,18 +56,13 @@ public interface Executor {
   Clock getClock();
 
   /**
-   * The EventBus for the current build.
+   * Returns {@link BugReporter} instance to use to report bugs.
+   *
+   * <p>To facilitate testing, prefer using this instead of calling {@link BugReport#sendBugReport}.
    */
-  EventBus getEventBus();
+  BugReporter getBugReporter();
 
-  /**
-   * Returns whether failures should have verbose error messages.
-   */
-  boolean getVerboseFailures();
-
-  /**
-   * Returns the command line options of the Blaze command being executed.
-   */
+  /** Returns the command line options of the Blaze command being executed. */
   OptionsProvider getOptions();
 
   /**
@@ -76,15 +71,4 @@ public interface Executor {
    * subcommand string.
    */
   ShowSubcommands reportsSubcommands();
-
-  /**
-   * An event listener to report messages to. Errors that signal a action failure should use
-   * ActionExecutionException.
-   */
-  ExtendedEventHandler getEventHandler();
-
-  /**
-   * Looks up and returns an action context implementation of the given interface type.
-   */
-  <T extends ActionContext> T getContext(Class<? extends T> type);
 }

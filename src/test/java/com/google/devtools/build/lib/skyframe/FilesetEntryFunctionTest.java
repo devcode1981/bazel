@@ -32,6 +32,7 @@ import com.google.devtools.build.lib.actions.FilesetOutputSymlink;
 import com.google.devtools.build.lib.actions.FilesetTraversalParams;
 import com.google.devtools.build.lib.actions.FilesetTraversalParams.PackageBoundaryMode;
 import com.google.devtools.build.lib.actions.FilesetTraversalParamsFactory;
+import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.ServerDirectories;
 import com.google.devtools.build.lib.cmdline.Label;
@@ -49,6 +50,7 @@ import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.RootedPath;
+import com.google.devtools.build.lib.vfs.UnixGlob;
 import com.google.devtools.build.skyframe.EvaluationContext;
 import com.google.devtools.build.skyframe.EvaluationResult;
 import com.google.devtools.build.skyframe.InMemoryMemoizingEvaluator;
@@ -57,6 +59,7 @@ import com.google.devtools.build.skyframe.RecordingDifferencer;
 import com.google.devtools.build.skyframe.SequencedRecordingDifferencer;
 import com.google.devtools.build.skyframe.SequentialBuildDriver;
 import com.google.devtools.build.skyframe.SkyFunction;
+import com.google.devtools.build.skyframe.SkyFunctionException;
 import com.google.devtools.build.skyframe.SkyFunctionName;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
@@ -67,6 +70,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.annotation.Nullable;
+import net.starlark.java.eval.StarlarkSemantics;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -105,12 +109,15 @@ public final class FilesetEntryFunctionTest extends FoundationTestCase {
     skyFunctions.put(
         FileStateValue.FILE_STATE,
         new FileStateFunction(
-            new AtomicReference<TimestampGranularityMonitor>(), externalFilesHelper));
+            new AtomicReference<TimestampGranularityMonitor>(),
+            new AtomicReference<>(UnixGlob.DEFAULT_SYSCALLS),
+            externalFilesHelper));
     skyFunctions.put(FileValue.FILE, new FileFunction(pkgLocator));
     skyFunctions.put(SkyFunctions.DIRECTORY_LISTING, new DirectoryListingFunction());
     skyFunctions.put(
         SkyFunctions.DIRECTORY_LISTING_STATE,
-        new DirectoryListingStateFunction(externalFilesHelper));
+        new DirectoryListingStateFunction(
+            externalFilesHelper, new AtomicReference<>(UnixGlob.DEFAULT_SYSCALLS)));
     skyFunctions.put(
         SkyFunctions.RECURSIVE_FILESYSTEM_TRAVERSAL, new RecursiveFilesystemTraversalFunction());
     skyFunctions.put(
@@ -118,25 +125,30 @@ public final class FilesetEntryFunctionTest extends FoundationTestCase {
         new PackageLookupFunction(
             deletedPackages,
             CrossRepositoryLabelViolationStrategy.ERROR,
-            BazelSkyframeExecutorConstants.BUILD_FILES_BY_PRIORITY));
-    skyFunctions.put(SkyFunctions.BLACKLISTED_PACKAGE_PREFIXES,
-        new BlacklistedPackagePrefixesFunction(
-            /*hardcodedBlacklistedPackagePrefixes=*/ ImmutableSet.of(),
-            /*additionalBlacklistedPackagePrefixesFile=*/ PathFragment.EMPTY_FRAGMENT));
+            BazelSkyframeExecutorConstants.BUILD_FILES_BY_PRIORITY,
+            BazelSkyframeExecutorConstants.EXTERNAL_PACKAGE_HELPER));
     skyFunctions.put(
-        SkyFunctions.FILESET_ENTRY, new FilesetEntryFunction(rootDirectory.asFragment()));
-    skyFunctions.put(SkyFunctions.LOCAL_REPOSITORY_LOOKUP, new LocalRepositoryLookupFunction());
+        SkyFunctions.IGNORED_PACKAGE_PREFIXES,
+        new IgnoredPackagePrefixesFunction(
+            /*ignoredPackagePrefixesFile=*/ PathFragment.EMPTY_FRAGMENT));
+    skyFunctions.put(
+        SkyFunctions.FILESET_ENTRY, new FilesetEntryFunction((unused) -> rootDirectory));
+    skyFunctions.put(SkyFunctions.WORKSPACE_NAME, new TestWorkspaceNameFunction());
+    skyFunctions.put(
+        SkyFunctions.LOCAL_REPOSITORY_LOOKUP,
+        new LocalRepositoryLookupFunction(BazelSkyframeExecutorConstants.EXTERNAL_PACKAGE_HELPER));
 
     differencer = new SequencedRecordingDifferencer();
     evaluator = new InMemoryMemoizingEvaluator(skyFunctions, differencer);
     driver = new SequentialBuildDriver(evaluator);
     PrecomputedValue.BUILD_ID.set(differencer, UUID.randomUUID());
     PrecomputedValue.PATH_PACKAGE_LOCATOR.set(differencer, pkgLocator.get());
+    PrecomputedValue.STARLARK_SEMANTICS.set(differencer, StarlarkSemantics.DEFAULT);
   }
 
   private Artifact getSourceArtifact(String path) throws Exception {
-    return new Artifact(
-        PathFragment.create(path), ArtifactRoot.asSourceRoot(Root.fromPath(rootDirectory)));
+    return ActionsTestUtil.createArtifact(
+        ArtifactRoot.asSourceRoot(Root.fromPath(rootDirectory)), path);
   }
 
   private Artifact createSourceArtifact(String path) throws Exception {
@@ -181,7 +193,7 @@ public final class FilesetEntryFunctionTest extends FoundationTestCase {
         EvaluationContext.newBuilder()
             .setKeepGoing(false)
             .setNumThreads(SkyframeExecutor.DEFAULT_THREAD_COUNT)
-            .setEventHander(NullEventHandler.INSTANCE)
+            .setEventHandler(NullEventHandler.INSTANCE)
             .build();
     return driver.evaluate(ImmutableList.of(key), evaluationContext);
   }
@@ -953,5 +965,21 @@ public final class FilesetEntryFunctionTest extends FoundationTestCase {
             (Set<String>) kwArgs.get("excludes"));
       }
     }.doTest();
+  }
+
+  private static class TestWorkspaceNameFunction implements SkyFunction {
+
+    @Nullable
+    @Override
+    public SkyValue compute(SkyKey skyKey, Environment env)
+        throws SkyFunctionException, InterruptedException {
+      return WorkspaceNameValue.withName("workspace");
+    }
+
+    @Nullable
+    @Override
+    public String extractTag(SkyKey skyKey) {
+      return null;
+    }
   }
 }

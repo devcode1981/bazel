@@ -15,19 +15,19 @@ cc_library(
     name = "blaze_util",
     srcs = [
         "blaze_util.cc",
-        "global_variables.h",
+        "server_process_info.h",
         "startup_options.h",
     ] + select({
         "//src/conditions:darwin": [
             "blaze_util_darwin.cc",
             "blaze_util_posix.cc",
         ],
-        "//src/conditions:darwin_x86_64": [
-            "blaze_util_darwin.cc",
+        "//src/conditions:freebsd": [
+            "blaze_util_bsd.cc",
             "blaze_util_posix.cc",
         ],
-        "//src/conditions:freebsd": [
-            "blaze_util_freebsd.cc",
+        "//src/conditions:openbsd": [
+            "blaze_util_bsd.cc",
             "blaze_util_posix.cc",
         ],
         "//src/conditions:windows": [
@@ -46,10 +46,9 @@ cc_library(
         "//src/conditions:darwin": [
             "-framework CoreFoundation",
         ],
-        "//src/conditions:darwin_x86_64": [
-            "-framework CoreFoundation",
-        ],
         "//src/conditions:freebsd": [
+        ],
+        "//src/conditions:openbsd": [
         ],
         "//src/conditions:windows": WIN_LINK_OPTS,
         "//conditions:default": [
@@ -61,9 +60,30 @@ cc_library(
         "//src/main/cpp/util:blaze_exit_code",
         "//src/main/cpp/util:logging",
     ] + select({
-        "//src/conditions:windows": ["//src/main/native/windows:lib-file"],
+        "//src/conditions:windows": [
+            "//src/main/native/windows:lib-file",
+            "//src/main/native/windows:lib-process",
+        ],
         "//conditions:default": [],
     }),
+)
+
+cc_library(
+    name = "archive_utils",
+    srcs = [
+        "archive_utils.cc",
+    ],
+    hdrs = [
+        "archive_utils.h",
+    ],
+    deps = [
+        ":blaze_util",
+        "//src/main/cpp/util",
+        "//src/main/cpp/util:blaze_exit_code",
+        "//src/main/cpp/util:errors",
+        "//src/main/cpp/util:logging",
+        "//third_party/ijar:zip",
+    ],
 )
 
 cc_binary(
@@ -71,11 +91,11 @@ cc_binary(
     srcs = [
         "blaze.cc",
         "blaze.h",
-        "global_variables.cc",
-        "global_variables.h",
+        "server_process_info.cc",
+        "server_process_info.h",
         "main.cc",
     ] + select({
-        "//src/conditions:windows": ["//src/main/native/windows:resources"],
+        "//src/conditions:windows": ["resources.o"],
         "//conditions:default": [],
     }),
     copts = select({
@@ -85,11 +105,11 @@ cc_binary(
     linkopts = select({
         "//src/conditions:darwin": [
         ],
-        "//src/conditions:darwin_x86_64": [
-        ],
         "//src/conditions:freebsd": [
             "-lprocstat",
             "-lm",
+        ],
+        "//src/conditions:openbsd": [
         ],
         "//src/conditions:windows": [
         ],
@@ -100,6 +120,7 @@ cc_binary(
     }),
     visibility = ["//src:__pkg__"],
     deps = [
+        ":archive_utils",
         ":bazel_startup_options",
         ":blaze_util",
         ":option_processor",
@@ -110,6 +131,7 @@ cc_binary(
         "//src/main/cpp/util:errors",
         "//src/main/cpp/util:logging",
         "//src/main/cpp/util:strings",
+        "//src/main/protobuf:command_server_cc_grpc",
         "//src/main/protobuf:command_server_cc_proto",
         "//third_party/ijar:zip",
     ],
@@ -125,13 +147,18 @@ cc_library(
     # The system bazelrc can be voided by setting BAZEL_SYSTEM_BAZELRC_PATH to
     # /dev/null.
     copts = select({
-        # We need to escape for multiple levels, here, this becomes
+        # For windows platforms, this can include environment
+        # variables in the form %ProgramData%. We need to escape for
+        # multiple levels, here, this becomes
         # /DBAZEL_SYSTEM_BAZELRC_PATH="%%ProgramData%%/bazel.bazelrc"',
-        # and the double % get reduced down to 1 by the compiler. A forward
-        # slash is used because \b is a special character, backspace.
+        # and the double % get reduced down to 1 by the compiler. A
+        # forward slash is used because \b is a special character,
+        # backspace.
         "//src/conditions:windows": [
             "/DBAZEL_SYSTEM_BAZELRC_PATH#\\\"%%ProgramData%%/bazel.bazelrc\\\"",
         ],
+        # For posix platforms, this can include environment variables in the
+        # form ${var_name}. Braces are required.
         "//conditions:default": [
             "-DBAZEL_SYSTEM_BAZELRC_PATH=\\\"/etc/bazel.bazelrc\\\"",
         ],

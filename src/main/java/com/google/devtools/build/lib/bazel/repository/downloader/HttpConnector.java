@@ -15,11 +15,13 @@
 package com.google.devtools.build.lib.bazel.repository.downloader;
 
 import com.google.common.base.Ascii;
+import com.google.common.base.Function;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.io.ByteStreams;
 import com.google.common.math.IntMath;
+import com.google.devtools.build.lib.analysis.BlazeVersionInfo;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
@@ -58,23 +60,40 @@ class HttpConnector {
   private static final int READ_TIMEOUT_MS = 20000;
   private static final ImmutableSet<String> COMPRESSED_EXTENSIONS =
       ImmutableSet.of("bz2", "gz", "jar", "tgz", "war", "xz", "zip");
+  private static final String USER_AGENT_VALUE =
+      "bazel/" + BlazeVersionInfo.instance().getVersion();
 
   private final Locale locale;
   private final EventHandler eventHandler;
   private final ProxyHelper proxyHelper;
   private final Sleeper sleeper;
+  private final float timeoutScaling;
 
   HttpConnector(
-      Locale locale, EventHandler eventHandler, ProxyHelper proxyHelper, Sleeper sleeper) {
+      Locale locale,
+      EventHandler eventHandler,
+      ProxyHelper proxyHelper,
+      Sleeper sleeper,
+      float timeoutScaling) {
     this.locale = locale;
     this.eventHandler = eventHandler;
     this.proxyHelper = proxyHelper;
     this.sleeper = sleeper;
+    this.timeoutScaling = timeoutScaling;
   }
 
-  URLConnection connect(
-      URL originalUrl, ImmutableMap<String, String> requestHeaders)
-          throws IOException {
+  HttpConnector(
+      Locale locale, EventHandler eventHandler, ProxyHelper proxyHelper, Sleeper sleeper) {
+    this(locale, eventHandler, proxyHelper, sleeper, 1.0f);
+  }
+
+  private int scale(int unscaled) {
+    return Math.round(unscaled * timeoutScaling);
+  }
+
+  URLConnection connect(URL originalUrl, Function<URL, ImmutableMap<String, String>> requestHeaders)
+      throws IOException {
+
     if (Thread.interrupted()) {
       throw new InterruptedIOException();
     }
@@ -85,27 +104,32 @@ class HttpConnector {
     List<Throwable> suppressions = new ArrayList<>();
     int retries = 0;
     int redirects = 0;
-    int connectTimeout = MIN_CONNECT_TIMEOUT_MS;
+    int connectTimeout = scale(MIN_CONNECT_TIMEOUT_MS);
     while (true) {
       HttpURLConnection connection = null;
       try {
         connection = (HttpURLConnection)
             url.openConnection(proxyHelper.createProxyIfNeeded(url));
+        // TODO(zecke): Revise once https://bugs.openjdk.java.net/browse/JDK-8163921 is fixed.
+        connection.addRequestProperty("Accept", "text/html, image/gif, image/jpeg, */*");
         boolean isAlreadyCompressed =
             COMPRESSED_EXTENSIONS.contains(HttpUtils.getExtension(url.getPath()))
                 || COMPRESSED_EXTENSIONS.contains(HttpUtils.getExtension(originalUrl.getPath()));
         connection.setInstanceFollowRedirects(false);
-        for (Map.Entry<String, String> entry : requestHeaders.entrySet()) {
+        for (Map.Entry<String, String> entry : requestHeaders.apply(url).entrySet()) {
           if (isAlreadyCompressed && Ascii.equalsIgnoreCase(entry.getKey(), "Accept-Encoding")) {
             // We're not going to ask for compression if we're downloading a file that already
             // appears to be compressed.
             continue;
           }
-          connection.setRequestProperty(entry.getKey(), entry.getValue());
+          connection.addRequestProperty(entry.getKey(), entry.getValue());
+        }
+        if (connection.getRequestProperty("User-Agent") == null) {
+          connection.setRequestProperty("User-Agent", USER_AGENT_VALUE);
         }
         connection.setConnectTimeout(connectTimeout);
         // The read timeout is always large because it stays in effect after this method.
-        connection.setReadTimeout(READ_TIMEOUT_MS);
+        connection.setReadTimeout(scale(READ_TIMEOUT_MS));
         // Java tries to abstract HTTP error responses for us. We don't want that. So we're going
         // to try and undo any IOException that doesn't appear to be a legitimate I/O exception.
         int code;
@@ -167,6 +191,8 @@ class HttpConnector {
         }
       } catch (UnrecoverableHttpException e) {
         throw e;
+      } catch (IllegalArgumentException e) {
+        throw new UnrecoverableHttpException(e.getMessage());
       } catch (IOException e) {
         if (connection != null) {
           // If we got here, it means we might not have consumed the entire payload of the
@@ -182,7 +208,7 @@ class HttpConnector {
         int timeout = IntMath.pow(2, retries) * MIN_RETRY_DELAY_MS;
         if (e instanceof SocketTimeoutException) {
           eventHandler.handle(Event.progress("Timeout connecting to " + url));
-          connectTimeout = Math.min(connectTimeout * 2, MAX_CONNECT_TIMEOUT_MS);
+          connectTimeout = Math.min(connectTimeout * 2, scale(MAX_CONNECT_TIMEOUT_MS));
           // If we got connect timeout, we're already doing exponential backoff, so no point
           // in sleeping too.
           timeout = 1;
@@ -191,7 +217,12 @@ class HttpConnector {
           throw e;
         }
         if (++retries == MAX_RETRIES) {
-          if (!(e instanceof SocketTimeoutException)) {
+          if (e instanceof SocketTimeoutException) {
+            // SocketTimeoutExceptions are InterruptedIOExceptions; however they do not signify
+            // an external interruption, but simply a failed download due to some server timing
+            // out. So rethrow them as ordinary IOExceptions.
+            e = new IOException(e.getMessage(), e);
+          } else {
             eventHandler
                 .handle(Event.progress(format("Error connecting to %s: %s", url, e.getMessage())));
           }

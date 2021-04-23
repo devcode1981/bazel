@@ -14,7 +14,7 @@
 
 package com.google.devtools.coverageoutputgenerator;
 
-import static com.google.devtools.coverageoutputgenerator.Constants.CC_EXTENSIONS;
+import static java.util.Arrays.asList;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
@@ -40,15 +40,30 @@ class Coverage {
     }
   }
 
-  static Coverage merge(Coverage c1, Coverage c2) {
+  static Coverage merge(Coverage... coverages) {
+    return merge(asList(coverages));
+  }
+
+  static Coverage merge(List<Coverage> coverages) {
     Coverage merged = new Coverage();
-    for (SourceFileCoverage sourceFile : c1.getAllSourceFiles()) {
-      merged.add(sourceFile);
-    }
-    for (SourceFileCoverage sourceFile : c2.getAllSourceFiles()) {
-      merged.add(sourceFile);
+    for (Coverage c : coverages) {
+      for (SourceFileCoverage sourceFile : c.getAllSourceFiles()) {
+        merged.add(sourceFile);
+      }
     }
     return merged;
+  }
+
+  static Coverage create(SourceFileCoverage... sourceFilesCoverage) {
+    return create(asList(sourceFilesCoverage));
+  }
+
+  static Coverage create(List<SourceFileCoverage> sourceFilesCoverage) {
+    Coverage coverage = new Coverage();
+    for (SourceFileCoverage sourceFileCoverage : sourceFilesCoverage) {
+      coverage.add(sourceFileCoverage);
+    }
+    return coverage;
   }
 
   /**
@@ -59,7 +74,7 @@ class Coverage {
    * @param coverage The initial coverage.
    * @param sourcesToKeep The filenames of the sources to keep from the initial coverage.
    */
-  static Coverage getOnlyTheseCcSources(Coverage coverage, Set<String> sourcesToKeep) {
+  static Coverage getOnlyTheseSources(Coverage coverage, Set<String> sourcesToKeep) {
     if (coverage == null || sourcesToKeep == null) {
       throw new IllegalArgumentException("Coverage and sourcesToKeep should not be null.");
     }
@@ -71,21 +86,11 @@ class Coverage {
     }
     Coverage finalCoverage = new Coverage();
     for (SourceFileCoverage source : coverage.getAllSourceFiles()) {
-      if (!isCcSourceFile(source.sourceFileName())
-          || sourcesToKeep.contains(source.sourceFileName())) {
+      if (sourcesToKeep.contains(source.sourceFileName())) {
         finalCoverage.add(source);
       }
     }
     return finalCoverage;
-  }
-
-  private static boolean isCcSourceFile(String filename) {
-    for (String ccExtension : CC_EXTENSIONS) {
-      if (filename.endsWith(ccExtension)) {
-        return true;
-      }
-    }
-    return false;
   }
 
   /**

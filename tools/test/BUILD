@@ -33,17 +33,19 @@ filegroup(
     srcs = ["collect_cc_coverage.sh"],
 )
 
-filegroup(
-    name = "coverage_report_generator",
-    srcs = ["@bazel_tools//tools/test/CoverageOutputGenerator/java/com/google/devtools/coverageoutputgenerator:Main"],
-)
-
 # Test wrapper binary to run tests on Windows.
 # This target just wraps the actual code in "tw_lib" to make it into a binary.
 # See https://github.com/bazelbuild/bazel/issues/5508
 cc_binary(
     name = "tw",
     srcs = ["windows/tw_main.cc"],
+    visibility = ["//visibility:private"],
+    deps = [":tw_lib"],
+)
+
+cc_binary(
+    name = "xml",
+    srcs = ["windows/xml_main.cc"],
     visibility = ["//visibility:private"],
     deps = [":tw_lib"],
 )
@@ -72,6 +74,7 @@ cc_library(
             "//src/main/cpp/util:filesystem",
             "//src/main/cpp/util:strings",
             "//src/main/native/windows:lib-file",
+            "//src/main/native/windows:lib-process",
             "//third_party/ijar:zip",
             "@bazel_tools//tools/cpp/runfiles",
         ],
@@ -112,8 +115,11 @@ filegroup(
         "generate-xml.sh",
         "collect_coverage.sh",
         "collect_cc_coverage.sh",
-    ] + glob(["LcovMerger/**"]) + select({
-        "@bazel_tools//src/conditions:windows": ["tw"],
+    ] + select({
+        "@bazel_tools//src/conditions:windows": [
+            "tw",
+            "xml",
+        ],
         "//conditions:default": [],
     }),
     visibility = ["//tools:__pkg__"],

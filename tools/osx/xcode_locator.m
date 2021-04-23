@@ -32,14 +32,18 @@
 // to the appplication.
 @interface XcodeVersionEntry : NSObject
 @property(readonly) NSString *version;
+@property(readonly) NSString *productVersion;
 @property(readonly) NSURL *url;
 @end
 
 @implementation XcodeVersionEntry
 
-- (id)initWithVersion:(NSString *)version url:(NSURL *)url {
+- (id)initWithVersion:(NSString *)version
+       productVersion:(NSString *)productVersion
+                  url:(NSURL *)url {
   if ((self = [super init])) {
     _version = version;
+    _productVersion = productVersion;
     _url = url;
   }
   return self;
@@ -65,14 +69,17 @@
 static void AddEntryToDictionary(
   XcodeVersionEntry *entry,
   NSMutableDictionary<NSString *, XcodeVersionEntry *> *dict) {
-  BOOL inApplications =
-      [entry.url.path rangeOfString:@"/Applications/"].location != NSNotFound;
+  BOOL inApplications = [entry.url.path hasPrefix:@"/Applications/"];
   NSString *entryVersion = entry.version;
+  NSString *entryProductVersion = entry.productVersion;
   NSString *subversion = entryVersion;
   if (dict[entryVersion] && !inApplications) {
     return;
   }
   dict[entryVersion] = entry;
+  if (entryProductVersion) {
+    dict[entryProductVersion] = entry;
+  }
   while (YES) {
     NSRange range = [subversion rangeOfString:@"." options:NSBackwardsSearch];
     if (range.length == 0 || range.location == 0) {
@@ -81,8 +88,9 @@ static void AddEntryToDictionary(
     subversion = [subversion substringToIndex:range.location];
     XcodeVersionEntry *subversionEntry = dict[subversion];
     if (subversionEntry) {
-      BOOL atLeastAsLarge = ([subversionEntry.version compare:entry.version]
-                             == NSOrderedDescending);
+      BOOL atLeastAsLarge =
+          ([subversionEntry.version compare:entry.version
+                                    options:NSNumericSearch] != NSOrderedDescending);
       if (inApplications && atLeastAsLarge) {
         dict[subversion] = entry;
       }
@@ -176,11 +184,19 @@ static NSMutableDictionary<NSString *, XcodeVersionEntry *> *FindXcodes()
     NSLog(@"Version strings for %@: short=%@, expanded=%@",
           url, version, expandedVersion);
 
+    NSURL *versionPlistUrl = [url URLByAppendingPathComponent:@"Contents/version.plist"];
+    NSDictionary *versionPlistContents =
+        [[NSDictionary alloc] initWithContentsOfURL:versionPlistUrl];
+    NSString *productVersion = [versionPlistContents objectForKey:@"ProductBuildVersion"];
+    if (productVersion) {
+      expandedVersion = [expandedVersion stringByAppendingFormat:@".%@", productVersion];
+    }
+
     NSURL *developerDir =
         [url URLByAppendingPathComponent:@"Contents/Developer"];
-    XcodeVersionEntry *entry =
-        [[XcodeVersionEntry alloc] initWithVersion:expandedVersion
-                                               url:developerDir];
+    XcodeVersionEntry *entry = [[XcodeVersionEntry alloc] initWithVersion:expandedVersion
+                                                           productVersion:productVersion
+                                                                      url:developerDir];
     AddEntryToDictionary(entry, dict);
   }
   return errors ? nil : dict;
@@ -217,10 +233,12 @@ static void DumpAsJson(
   FILE *output,
   NSMutableDictionary<NSString *, XcodeVersionEntry *> *dict) {
   fprintf(output, "{\n");
+  int i = 0;
   for (NSString *version in dict) {
     XcodeVersionEntry *entry = dict[version];
-    fprintf(output, "\t\"%s\": \"%s\",\n",
-            version.UTF8String, entry.url.fileSystemRepresentation);
+    fprintf(output, "\t\"%s\": \"%s\"%s\n",
+            version.UTF8String, entry.url.fileSystemRepresentation,
+            ++i == [dict count] ? "" : ",");
   }
   fprintf(output, "}\n");
 }
@@ -259,12 +277,6 @@ int main(int argc, const char * argv[]) {
         versionArg = @"";
       } else {
         versionArg = firstArg;
-        NSCharacterSet *versSet =
-            [NSCharacterSet characterSetWithCharactersInString:@"0123456789."];
-        if ([versionArg rangeOfCharacterFromSet:versSet.invertedSet].length
-            != 0) {
-          versionArg = nil;
-        }
       }
     }
     if (versionArg == nil) {

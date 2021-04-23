@@ -17,41 +17,47 @@ package com.google.devtools.build.lib.analysis;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.test.TestProvider;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet.Node;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.profiler.AutoProfiler;
-import com.google.devtools.build.lib.skyframe.AspectValue;
+import com.google.devtools.build.lib.profiler.GoogleAutoProfilerUtils;
+import com.google.devtools.build.lib.skyframe.AspectValueKey.AspectKey;
 import com.google.devtools.build.lib.util.RegexFilter;
-import java.util.logging.Logger;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import javax.annotation.Nullable;
 
 /**
- * A small static class containing utility methods for handling the inclusion of
- * extra top-level artifacts into the build.
+ * A small static class containing utility methods for handling the inclusion of extra top-level
+ * artifacts into the build.
  */
 public final class TopLevelArtifactHelper {
-  private static Logger logger = Logger.getLogger(TopLevelArtifactHelper.class.getName());
-
   /** Set of {@link Artifact}s in an output group. */
   @Immutable
   public static final class ArtifactsInOutputGroup {
-    private final String outputGroup;
     private final boolean important;
+    private final boolean incomplete;
     private final NestedSet<Artifact> artifacts;
 
     private ArtifactsInOutputGroup(
-        String outputGroup, boolean important, NestedSet<Artifact> artifacts) {
-      this.outputGroup = checkNotNull(outputGroup);
+        boolean important, boolean incomplete, NestedSet<Artifact> artifacts) {
       this.important = important;
+      this.incomplete = incomplete;
       this.artifacts = checkNotNull(artifacts);
-    }
-
-    public String getOutputGroup() {
-      return outputGroup;
     }
 
     public NestedSet<Artifact> getArtifacts() {
@@ -61,6 +67,10 @@ public final class TopLevelArtifactHelper {
     /** Returns {@code true} if the user should know about this output group. */
     public boolean areImportant() {
       return important;
+    }
+
+    public boolean isIncomplete() {
+      return incomplete;
     }
   }
 
@@ -74,18 +84,16 @@ public final class TopLevelArtifactHelper {
    */
   @Immutable
   public static final class ArtifactsToBuild {
-    private NestedSet<ArtifactsInOutputGroup> artifacts;
+    private final ImmutableMap<String, ArtifactsInOutputGroup> artifacts;
 
-    private ArtifactsToBuild(NestedSet<ArtifactsInOutputGroup> artifacts) {
+    private ArtifactsToBuild(ImmutableMap<String, ArtifactsInOutputGroup> artifacts) {
       this.artifacts = checkNotNull(artifacts);
     }
 
-    /**
-     * Returns the artifacts that the user should know about.
-     */
+    /** Returns the artifacts that the user should know about. */
     public NestedSet<Artifact> getImportantArtifacts() {
-      NestedSetBuilder<Artifact> builder = new NestedSetBuilder<>(artifacts.getOrder());
-      for (ArtifactsInOutputGroup artifactsInOutputGroup : artifacts) {
+      NestedSetBuilder<Artifact> builder = NestedSetBuilder.stableOrder();
+      for (ArtifactsInOutputGroup artifactsInOutputGroup : artifacts.values()) {
         if (artifactsInOutputGroup.areImportant()) {
           builder.addTransitive(artifactsInOutputGroup.getArtifacts());
         }
@@ -93,12 +101,10 @@ public final class TopLevelArtifactHelper {
       return builder.build();
     }
 
-    /**
-     * Returns the actual set of artifacts that need to be built.
-     */
+    /** Returns the actual set of artifacts that need to be built. */
     public NestedSet<Artifact> getAllArtifacts() {
-      NestedSetBuilder<Artifact> builder = new NestedSetBuilder<>(artifacts.getOrder());
-      for (ArtifactsInOutputGroup artifactsInOutputGroup : artifacts) {
+      NestedSetBuilder<Artifact> builder = NestedSetBuilder.stableOrder();
+      for (ArtifactsInOutputGroup artifactsInOutputGroup : artifacts.values()) {
         builder.addTransitive(artifactsInOutputGroup.getArtifacts());
       }
       return builder.build();
@@ -110,7 +116,7 @@ public final class TopLevelArtifactHelper {
      * <p>If an {@link Artifact} belongs to two or more output groups, it appears once in each
      * output group.
      */
-    public NestedSet<ArtifactsInOutputGroup> getAllArtifactsByOutputGroup() {
+    public ImmutableMap<String, ArtifactsInOutputGroup> getAllArtifactsByOutputGroup() {
       return artifacts;
     }
   }
@@ -119,44 +125,56 @@ public final class TopLevelArtifactHelper {
     // Prevent instantiation.
   }
 
+  private static final Duration MIN_LOGGING = Duration.ofMillis(10);
+
   @VisibleForTesting
   public static ArtifactsToOwnerLabels makeTopLevelArtifactsToOwnerLabels(
-      AnalysisResult analysisResult, Iterable<AspectValue> aspects) {
-    try (AutoProfiler ignored = AutoProfiler.logged("assigning owner labels", logger, 10)) {
-
+      AnalysisResult analysisResult) {
+    try (AutoProfiler ignored =
+        GoogleAutoProfilerUtils.logged("assigning owner labels", MIN_LOGGING)) {
       ArtifactsToOwnerLabels.Builder artifactsToOwnerLabelsBuilder =
           analysisResult.getTopLevelArtifactsToOwnerLabels().toBuilder();
-    TopLevelArtifactContext artifactContext = analysisResult.getTopLevelContext();
-    for (ConfiguredTarget target : analysisResult.getTargetsToBuild()) {
+      TopLevelArtifactContext artifactContext = analysisResult.getTopLevelContext();
+      for (ConfiguredTarget target : analysisResult.getTargetsToBuild()) {
         addArtifactsWithOwnerLabel(
             getAllArtifactsToBuild(target, artifactContext).getAllArtifacts(),
             null,
             target.getLabel(),
             artifactsToOwnerLabelsBuilder);
-    }
-    for (AspectValue aspect : aspects) {
+      }
+      for (Map.Entry<AspectKey, ConfiguredAspect> aspectEntry :
+          analysisResult.getAspectsMap().entrySet()) {
         addArtifactsWithOwnerLabel(
-            getAllArtifactsToBuild(aspect, artifactContext).getAllArtifacts(),
+            getAllArtifactsToBuild(aspectEntry.getValue(), artifactContext).getAllArtifacts(),
             null,
-            aspect.getLabel(),
+            aspectEntry.getKey().getLabel(),
             artifactsToOwnerLabelsBuilder);
-    }
-    if (analysisResult.getTargetsToTest() != null) {
-      for (ConfiguredTarget target : analysisResult.getTargetsToTest()) {
+      }
+      if (analysisResult.getTargetsToTest() != null) {
+        for (ConfiguredTarget target : analysisResult.getTargetsToTest()) {
           addArtifactsWithOwnerLabel(
               TestProvider.getTestStatusArtifacts(target),
               null,
               target.getLabel(),
               artifactsToOwnerLabelsBuilder);
+        }
       }
-    }
       // TODO(dslomov): Artifacts to test from aspects?
       return artifactsToOwnerLabelsBuilder.build();
     }
   }
 
-  static void addArtifactsWithOwnerLabel(
-      Iterable<Artifact> artifacts,
+  public static void addArtifactsWithOwnerLabel(
+      NestedSet<? extends Artifact> artifacts,
+      @Nullable RegexFilter filter,
+      Label ownerLabel,
+      ArtifactsToOwnerLabels.Builder artifactsToOwnerLabelsBuilder) {
+    addArtifactsWithOwnerLabel(
+        artifacts.toList(), filter, ownerLabel, artifactsToOwnerLabelsBuilder);
+  }
+
+  public static void addArtifactsWithOwnerLabel(
+      Collection<? extends Artifact> artifacts,
       @Nullable RegexFilter filter,
       Label ownerLabel,
       ArtifactsToOwnerLabels.Builder artifactsToOwnerLabelsBuilder) {
@@ -169,36 +187,25 @@ public final class TopLevelArtifactHelper {
 
   /**
    * Returns all artifacts to build if this target is requested as a top-level target. The resulting
-   * set includes the temps and either the files to compile, if
-   * {@code context.compileOnly() == true}, or the files to run.
+   * set includes the temps and either the files to compile, if {@code context.compileOnly() ==
+   * true}, or the files to run.
    *
    * <p>Calls to this method should generally return quickly; however, the runfiles computation can
    * be lazy, in which case it can be expensive on the first call. Subsequent calls may or may not
    * return the same {@code Iterable} instance.
    */
-  public static ArtifactsToBuild getAllArtifactsToBuild(TransitiveInfoCollection target,
-      TopLevelArtifactContext context) {
-    return getAllArtifactsToBuild(
-        OutputGroupInfo.get(target),
-        target.getProvider(FileProvider.class),
-        context
-    );
-  }
-
   public static ArtifactsToBuild getAllArtifactsToBuild(
-      AspectValue aspectValue, TopLevelArtifactContext context) {
-    ConfiguredAspect configuredAspect = aspectValue.getConfiguredAspect();
+      ProviderCollection target, TopLevelArtifactContext context) {
     return getAllArtifactsToBuild(
-        OutputGroupInfo.get(configuredAspect),
-        configuredAspect.getProvider(FileProvider.class),
-        context);
+        OutputGroupInfo.get(target), target.getProvider(FileProvider.class), context);
   }
 
   static ArtifactsToBuild getAllArtifactsToBuild(
       @Nullable OutputGroupInfo outputGroupInfo,
       @Nullable FileProvider fileProvider,
       TopLevelArtifactContext context) {
-    NestedSetBuilder<ArtifactsInOutputGroup> allBuilder = NestedSetBuilder.stableOrder();
+    ImmutableMap.Builder<String, ArtifactsInOutputGroup> allOutputGroups =
+        ImmutableMap.builderWithExpectedSize(context.outputGroups().size());
 
     for (String outputGroup : context.outputGroups()) {
       NestedSetBuilder<Artifact> results = NestedSetBuilder.stableOrder();
@@ -220,11 +227,126 @@ public final class TopLevelArtifactHelper {
           !outputGroup.startsWith(OutputGroupInfo.HIDDEN_OUTPUT_GROUP_PREFIX);
 
       ArtifactsInOutputGroup artifacts =
-          new ArtifactsInOutputGroup(outputGroup, isImportantGroup, results.build());
+          new ArtifactsInOutputGroup(isImportantGroup, /*incomplete=*/ false, results.build());
 
-      allBuilder.add(artifacts);
+      allOutputGroups.put(outputGroup, artifacts);
     }
 
-    return new ArtifactsToBuild(allBuilder.build());
+    return new ArtifactsToBuild(allOutputGroups.build());
+  }
+
+  /**
+   * Recursive procedure filtering a target/aspect's declared {@code
+   * NestedSet<ArtifactsInOutputGroup>} and {@code NestedSet<Artifact>} to only include {@link
+   * Artifact Artifacts} that were produced by successful actions.
+   */
+  public static class SuccessfulArtifactFilter {
+    private final Set<Node> artifactSetCanBeSkipped = new HashSet<>();
+    private final HashMap<Node, NestedSet<Artifact>> artifactSetToFilteredSet = new HashMap<>();
+
+    private final ImmutableSet<Artifact> builtArtifacts;
+
+    public SuccessfulArtifactFilter(ImmutableSet<Artifact> builtArtifacts) {
+      this.builtArtifacts = builtArtifacts;
+    }
+
+    /**
+     * Filters the declared output groups to only include artifacts that were actually built.
+     *
+     * <p>If no filtering is performed then the input NestedSet is returned directly.
+     */
+    public ImmutableMap<String, ArtifactsInOutputGroup> filterArtifactsInOutputGroup(
+        ImmutableMap<String, ArtifactsInOutputGroup> outputGroups) {
+      boolean leavesDirty = false;
+      ImmutableMap.Builder<String, ArtifactsInOutputGroup> resultBuilder = ImmutableMap.builder();
+      for (Map.Entry<String, ArtifactsInOutputGroup> entry : outputGroups.entrySet()) {
+        ArtifactsInOutputGroup artifactsInOutputGroup = entry.getValue();
+        ArtifactsInOutputGroup filteredArtifactsInOutputGroup;
+        NestedSet<Artifact> filteredArtifacts =
+            filterArtifactNestedSetToBuiltArtifacts(artifactsInOutputGroup.getArtifacts());
+        if (filteredArtifacts == null) {
+          filteredArtifactsInOutputGroup = artifactsInOutputGroup;
+        } else {
+          filteredArtifactsInOutputGroup =
+              new ArtifactsInOutputGroup(
+                  artifactsInOutputGroup.areImportant(), /*incomplete=*/ true, filteredArtifacts);
+          leavesDirty = true;
+        }
+        if (!filteredArtifactsInOutputGroup.getArtifacts().isEmpty()) {
+          resultBuilder.put(entry.getKey(), filteredArtifactsInOutputGroup);
+        }
+      }
+      if (!leavesDirty) {
+        return outputGroups;
+      }
+      return resultBuilder.build();
+    }
+
+    /**
+     * Recursively filters the declared artifacts to only include artifacts that were actually
+     * built.
+     *
+     * <p>Returns {@code null} if no artifacts are filtered out of the input.
+     */
+    @Nullable
+    private NestedSet<Artifact> filterArtifactNestedSetToBuiltArtifacts(
+        NestedSet<Artifact> declaredArtifacts) {
+      Node declaredArtifactsNode = declaredArtifacts.toNode();
+      if (artifactSetCanBeSkipped.contains(declaredArtifactsNode)) {
+        return null;
+      }
+      NestedSet<Artifact> memoizedFilteredSet = artifactSetToFilteredSet.get(declaredArtifactsNode);
+      if (memoizedFilteredSet != null) {
+        return memoizedFilteredSet;
+      }
+
+      // Scan the Artifact leaves for any artifact not present in builtArtifacts. If an un-built
+      // artifact is found, exit the loop early, and construct the list of filteredArtifacts later.
+      // This avoids unnecessary allocation in the case where all artifacts are built.
+      boolean leavesDirty = false;
+      ImmutableList<Artifact> leaves = declaredArtifacts.getLeaves();
+      for (Artifact a : leaves) {
+        if (!builtArtifacts.contains(a)) {
+          leavesDirty = true;
+          break;
+        }
+      }
+      // Unconditionally populate filteredNonLeaves by filtering each NestedSet<Artifact> non-leaf
+      // successor, and set nonLeavesDirty if anything is filtered out. The filteredNonLeaves list
+      // will only be used if leavesDirty is true or nonLeavesDirty is true.
+      boolean nonLeavesDirty = false;
+      ImmutableList<NestedSet<Artifact>> nonLeaves = declaredArtifacts.getNonLeaves();
+      List<NestedSet<Artifact>> filteredNonLeaves = new ArrayList<>(nonLeaves.size());
+      for (NestedSet<Artifact> nonLeaf : nonLeaves) {
+        NestedSet<Artifact> filteredNonLeaf = filterArtifactNestedSetToBuiltArtifacts(nonLeaf);
+        // Null indicates no filtering happened and the input may be used as-is.
+        if (filteredNonLeaf != null) {
+          nonLeavesDirty = true;
+        } else {
+          filteredNonLeaf = nonLeaf;
+        }
+        if (!filteredNonLeaf.isEmpty()) {
+          filteredNonLeaves.add(filteredNonLeaf);
+        }
+      }
+      if (!leavesDirty && !nonLeavesDirty) {
+        artifactSetCanBeSkipped.add(declaredArtifactsNode);
+        // Returning null indicates no filtering happened and the input may be used as-is.
+        return null;
+      }
+      NestedSetBuilder<Artifact> newSetBuilder =
+          new NestedSetBuilder<>(declaredArtifacts.getOrder());
+      for (Artifact a : leaves) {
+        if (builtArtifacts.contains(a)) {
+          newSetBuilder.add(a);
+        }
+      }
+      for (NestedSet<Artifact> filteredNonLeaf : filteredNonLeaves) {
+        newSetBuilder.addTransitive(filteredNonLeaf);
+      }
+      NestedSet<Artifact> result = newSetBuilder.build();
+      artifactSetToFilteredSet.put(declaredArtifactsNode, result);
+      return result;
+    }
   }
 }

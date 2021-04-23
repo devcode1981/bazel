@@ -18,9 +18,9 @@ import com.google.auto.value.extension.memoized.Memoized;
 import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSortedSet;
+import com.google.devtools.build.lib.actions.Artifact.ArtifactExpander;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.events.EventHandler;
-import com.google.devtools.build.lib.events.Location;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec.Instantiator;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec.VisibleForSerialization;
@@ -31,6 +31,7 @@ import com.google.devtools.build.lib.vfs.RootedPath;
 import java.io.IOException;
 import java.util.Objects;
 import javax.annotation.Nullable;
+import net.starlark.java.syntax.Location;
 
 /**
  * Parameters of a filesystem traversal requested by a Fileset rule.
@@ -311,8 +312,11 @@ public interface FilesetTraversalParams {
    * Fileset.
    */
   interface LinkSupplier {
-    ImmutableList<FilesetOutputSymlink> getLinks(EventHandler handler, Location location,
-        ArtifactPathResolver pathResolver)
+    ImmutableList<FilesetOutputSymlink> getLinks(
+        EventHandler handler,
+        Location location,
+        ArtifactExpander artifactExpander,
+        MetadataProvider metadataProvider)
         throws IOException;
 
     void fingerprint(Fingerprint fp);

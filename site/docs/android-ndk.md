@@ -6,20 +6,7 @@ title: Using the Android Native Development Kit with Bazel
 # Using the Android Native Development Kit with Bazel
 
 _If you're new to Bazel, please start with the [Building Android with
-Bazel](https://docs.bazel.build/versions/master/tutorial/android-app.html)
-tutorial._
-
-## Table of contents
-
-- [Overview](#overview)
-- [Prerequisites](#prerequisites)
-- [Quick start](#quick-start)
-- [Example setup](#example-setup)
-- [Configuring the STL](#configuring-the-stl)
-- [Configuring the target ABI](#configuring-the-target-abi)
-- [Selecting a C++ standard](#selecting-a-c-standard)
-- [How it works: introducing Android configuration transitions](#how-it-works-introducing-android-configuration-transitions)
-- [Building a `cc_library` for Android without using `android_binary`](#building-a-cc_library-for-android-without-using-android_binary)
+Bazel](tutorial/android-app.html) tutorial._
 
 ## Overview
 
@@ -48,8 +35,7 @@ android_ndk_repository(
 ```
 
 For more information on the `android_ndk_repository` rule, see its the [Build
-Encyclopedia
-entry](https://docs.bazel.build/versions/master/be/android.html#android_ndk_repository).
+Encyclopedia entry](be/android.html#android_ndk_repository).
 
 ## Quick start
 
@@ -118,9 +104,9 @@ ABI](#configuring-the-target-abi).
 ## Example setup
 
 This example is available in the [Bazel examples
-repository](https://github.com/bazelbuild/examples/tree/master/android-ndk).
+repository](https://github.com/bazelbuild/examples/tree/master/android/ndk).
 
-In the `BUILD.bazel` file, we define three targets with the `android_binary`,
+In the `BUILD.bazel` file, three targets are defined with the `android_binary`,
 `android_library` and `cc_library` rules.
 
 The `android_binary` top-level target builds the APK.
@@ -243,8 +229,7 @@ bazel build //:app --cxxopt=-std=c++11
 ```
 
 Read more about passing compiler and linker flags with `--cxxopt`, `--copt`, and
-`--linkopt` in the [User
-Manual](https://docs.bazel.build/versions/master/user-manual.html#flag--cxxopt).
+`--linkopt` in the [User Manual](user-manual.html#flag--cxxopt).
 
 Compiler and linker flags can also be specified as attributes in `cc_library`
 using `copts` and `linkopts`. For example:
@@ -258,6 +243,77 @@ cc_library(
 )
 ```
 
+## Integration with platforms and toolchains
+
+Bazel's configuration model is moving towards
+[platforms](https://docs.bazel.build/versions/master/platforms.html) and
+[toolchains](https://docs.bazel.build/versions/master/toolchains.html). If your
+build uses the `--platforms` flag to select for the architecture or operating system
+to build for, you will need to pass the `--extra_toolchains` flag to Bazel in
+order to use the NDK.
+
+For example, to integrate with the `android_arm64_cgo` toolchain provided by
+the Go rules, pass `--extra_toolchains=@androidndk//:all` in addition to the
+`--platforms` flag.
+
+```
+bazel build //my/cc:lib \
+  --platforms=@io_bazel_rules_go//go/toolchain:android_arm64_cgo \
+  --extra_toolchains=@androidndk//:all
+```
+
+You can also register them directly in the `WORKSPACE` file:
+
+```python
+android_ndk_repository(name = "androidndk")
+register_toolchains("@androidndk//:all")
+```
+
+Registering these toolchains tells Bazel to look for them in the NDK BUILD file
+(for NDK 20) when resolving architecture and operating system constraints:
+
+```python
+toolchain(
+  name = "x86-clang8.0.7-libcpp_toolchain",
+  toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+  target_compatible_with = [
+      "@bazel_tools//platforms:android",
+      "@bazel_tools//platforms:x86_32"
+  ],
+  toolchain = "@androidndk//:x86-clang8.0.7-libcpp",
+)
+
+toolchain(
+  name = "x86_64-clang8.0.7-libcpp_toolchain",
+  toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+  target_compatible_with = [
+      "@bazel_tools//platforms:android",
+      "@bazel_tools//platforms:x86_64"
+  ],
+  toolchain = "@androidndk//:x86_64-clang8.0.7-libcpp",
+)
+
+toolchain(
+  name = "arm-linux-androideabi-clang8.0.7-v7a-libcpp_toolchain",
+  toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+  target_compatible_with = [
+      "@bazel_tools//platforms:android",
+      "@bazel_tools//platforms:arm"
+  ],
+  toolchain = "@androidndk//:arm-linux-androideabi-clang8.0.7-v7a-libcpp",
+)
+
+toolchain(
+  name = "aarch64-linux-android-clang8.0.7-libcpp_toolchain",
+  toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+  target_compatible_with = [
+      "@bazel_tools//platforms:android",
+      "@bazel_tools//platforms:aarch64"
+  ],
+  toolchain = "@androidndk//:aarch64-linux-android-clang8.0.7-libcpp",
+)
+```
+
 ## How it works: introducing Android configuration transitions
 
 The `android_binary` rule can explicitly ask Bazel to build its dependencies in
@@ -266,7 +322,7 @@ any special flags, except for `--fat_apk_cpu` and `--android_crosstool_top` for
 ABI and STL configuration.
 
 Behind the scenes, this automatic configuration uses Android [configuration
-transitions](https://docs.bazel.build/versions/master/skylark/rules.html#configurations).
+transitions](skylark/rules.html#configurations).
 
 A compatible rule, like `android_binary`, automatically changes the
 configuration of its dependencies to an Android configuration, so only
@@ -320,20 +376,19 @@ bazel build //my/cc/jni:target \
       --host_crosstool_top=@bazel_tools//tools/cpp:toolchain
 ```
 
-Here, we specify that top-level `cc_library` and `cc_binary` targets are built
+In this example, the top-level `cc_library` and `cc_binary` targets are built
 using the NDK toolchain. However, this causes Bazel's own host tools to be built
 with the NDK toolchain (and thus for Android), because the host toolchain is
-copied from the target toolchain. To work around this, we specify the value of
-`--host_crosstool_top` to be `@bazel_tools//tools/cpp:toolchain` to explicitly
-set the host's C++ toolchain.
+copied from the target toolchain. To work around this, specify the value of
+`--host_crosstool_top` to be `@bazel_tools//tools/cpp:toolchain` to
+explicitly set the host's C++ toolchain.
 
 With this approach, the entire build tree is affected.
 
 Note that all of the targets on the command line must be compatible with
 building for Android when specifying these flags, which may make it difficult to
-use [Bazel
-wild-cards](https://docs.bazel.build/versions/master/command-line-reference.html#target-pattern-syntax)
-like `/...` and `:all`.
+use [Bazel wild-cards](command-line-reference.html#target-pattern-syntax) like
+`/...` and `:all`.
 
 These flags can be put into a `bazelrc` config (one for each ABI), in
 `<project>/.bazelrc`:

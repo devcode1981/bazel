@@ -5,25 +5,10 @@ title: Migrating from Xcode to Bazel
 
 # Migrating from Xcode to Bazel
 
-This guide describes how to build or test an Xcode project with Bazel. It
-describes the differences between Xcode and Bazel, and provides the steps for
-converting an Xcode project to a Bazel project.
-
-## Contents
-
-- [Differences between Xcode and Bazel](#differences-between-xcode-and-bazel)
-- [Before you begin](#before-you-begin)
-   - [Analyze project dependencies](#analyze-project-dependencies)
-- [Build or test an Xcode project with Bazel](#build-or-test-an-xcode-project-with-bazel)
-   - [Step 1: Create the `WORKSPACE` file](#step-1-create-the-workspace-file)
-   - [Step 2: (Experimental) Integrate CocoaPod dependencies](#step-2-experimental-integrate-cocoapods-dependencies)
-   - [Step 3: Create a `BUILD` file:](#step-3-create-a-build-file)
-      - [Step 3a: Add the application target](#step-3a-add-the-application-target)
-      - [Step 3b: (Optional) Add the test target(s)](#step-3b-optional-add-the-test-target-s)
-      - [Step 3c: Add the library target(s)](#step-3c-add-the-library-target-s)
-   - [Step 4: (Optional) Granularize the build](#step-4-optional-granularize-the-build)
-   - [Step 5: Run the build](#step-5-run-the-build)
-   - [Step 6: Generate the Xcode project with Tulsi](#step-6-generate-the-xcode-project-with-tulsi)
+This page describes how to build or test an Xcode project with Bazel. It
+describes the differences between Xcode and Bazel, and provides the steps
+for converting an Xcode project to a Bazel project. It also provides
+troubleshooting solutions to address common errors.
 
 ## Differences between Xcode and Bazel
 
@@ -63,11 +48,11 @@ converting an Xcode project to a Bazel project.
 
 Before you begin, do the following:
 
-1.  [Install Bazel](https://docs.bazel.build/versions/master/install.html) if
+1.  [Install Bazel](install.html) if
     you have not already done so.
 
 2.  If you're not familiar with Bazel and its concepts, complete the
-    [iOS app tutorial](https://docs.bazel.build/versions/master/tutorial/ios-app.html).
+    [iOS app tutorial](tutorial/ios-app.html).
     You should understand the Bazel workspace, including the `WORKSPACE` and
     `BUILD` files, as well as the concepts of targets, build rules, and Bazel
     packages.
@@ -80,7 +65,7 @@ Unlike Xcode, Bazel requires you to explicitly declare all dependencies for
 every target in the `BUILD` file.
 
 For more information on external dependencies, see
-[Working with external dependencies](https://docs.bazel.build/versions/master/external.html).
+[Working with external dependencies](external.html).
 
 ## Build or test an Xcode project with Bazel
 
@@ -137,7 +122,7 @@ initial build of the project as follows:
 *  [Step 3c: Add the library target(s)](#step-3c-add-the-library-target-s)
 
 **Tip:** To learn more about packages and other Bazel concepts, see
-[Bazel Terminology](https://docs.bazel.build/versions/master/build-ref.html).
+[Bazel Terminology](build-ref.html).
 
 #### Step 3a: Add the application target
 
@@ -193,7 +178,7 @@ simulator, also specify the `ios_application` target name as the value of the
 
 #### Step 3c: Add the library target(s)
 
-Add an [`objc_library`](https://docs.bazel.build/versions/master/be/objective-c.html#objc_library)
+Add an [`objc_library`](be/objective-c.html#objc_library)
 target for each Objective C library and a [`swift_library`](https://github.com/bazelbuild/rules_apple/blob/master/doc/rules-swift.md)
 target for each Swift library on which the application and/or tests depend.
 
@@ -209,7 +194,7 @@ Add the library targets as follows:
 
 *   List the headers in the `hdrs` attribute.
 
-**Note:** You can use the [`glob`](https://docs.bazel.build/versions/master/be/functions.html#glob)
+**Note:** You can use the [`glob`](be/functions.html#glob)
 function to include all sources and/or headers of a certain type. Use it
 carefully as it might include files you do not want Bazel to build.
 
@@ -270,3 +255,25 @@ bazel build //:my-target
 When building with Bazel, the `WORKSPACE` and `BUILD` files become the source
 of truth about the build. To make Xcode aware of this, you must generate a
 Bazel-compatible Xcode project using [Tulsi](http://tulsi.bazel.build/).
+
+### Troubleshooting
+
+Bazel errors can arise when it gets out of sync with the selected Xcode version,
+like when you apply an update. Here are some things to try if you're
+experiencing errors with Xcode, for example "Xcode version must be specified to
+use an Apple CROSSTOOL".
+
+* Manually run Xcode and accept any terms and conditions.
+
+* Use Xcode select to indicate the correct version, accept the license, and
+  clear Bazel's state.
+```
+  sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+  sudo xcodebuild -license
+  bazel sync --configure
+```
+
+* If this does not work, you may also try running `bazel clean --expunge`.
+
+Note: If you've saved your Xcode to a different path, you can use `xcode-select
+-s` to point to that path.

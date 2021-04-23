@@ -15,10 +15,14 @@ package com.google.devtools.build.skyframe;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Sets;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.MoreExecutors;
 import com.google.devtools.build.lib.concurrent.ErrorClassifier;
 import com.google.devtools.build.lib.concurrent.QuiescingExecutor;
 import com.google.devtools.build.skyframe.ParallelEvaluatorContext.RunnableMaker;
 import java.util.Collection;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -86,7 +90,7 @@ class NodeEntryVisitor {
    * graph) also has good results experimentally, since it minimizes sprawl.
    */
   void enqueueEvaluation(SkyKey key, int evaluationPriority) {
-    if (preventNewEvaluations.get()) {
+    if (shouldPreventNewEvaluations()) {
       // If an error happens in nokeep_going mode, we still want to mark these nodes as inflight,
       // otherwise cleanup will not happen properly.
       progressReceiver.enqueueAfterError(key);
@@ -94,6 +98,41 @@ class NodeEntryVisitor {
     }
     progressReceiver.enqueueing(key);
     quiescingExecutor.execute(runnableMaker.make(key, evaluationPriority));
+  }
+
+  /**
+   * Registers a listener with all passed futures that causes the node to be re-enqueued when all
+   * futures are completed.
+   */
+  void registerExternalDeps(SkyKey skyKey, NodeEntry entry, List<ListenableFuture<?>> externalDeps)
+      throws InterruptedException {
+    // Generally speaking, there is no ordering guarantee for listeners registered with a single
+    // listenable future. If we used a listener here, there would be a potential race condition
+    // between re-enqueuing the key and notifying the quiescing executor, in which case the executor
+    // could shut down even though the work is not done yet. That would be bad.
+    //
+    // However, the whenAllComplete + run API guarantees that the Runnable is run before the
+    // returned future completes, i.e., before the quiescing executor is notified.
+    ListenableFuture<?> future =
+        Futures.whenAllComplete(externalDeps)
+            .run(
+                () -> {
+                  if (entry.signalDep(entry.getVersion(), null)) {
+                    enqueueEvaluation(skyKey, Integer.MAX_VALUE);
+                  }
+                },
+                MoreExecutors.directExecutor());
+    quiescingExecutor.dependOnFuture(future);
+  }
+
+  /**
+   * Returns whether any new evaluations should be prevented.
+   *
+   * <p>If called from within node evaluation, the caller may use the return value to determine
+   * whether it is responsible for throwing an exception to halt evaluation at the executor level.
+   */
+  boolean shouldPreventNewEvaluations() {
+    return preventNewEvaluations.get();
   }
 
   /**

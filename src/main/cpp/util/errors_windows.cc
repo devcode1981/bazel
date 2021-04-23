@@ -12,9 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
+
 #include <sstream>
 #include <string>
+
 #include "src/main/cpp/util/errors.h"
 
 namespace blaze_util {
@@ -32,8 +37,8 @@ string GetLastErrorString() {
   size_t size = FormatMessageA(
       FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
           FORMAT_MESSAGE_IGNORE_INSERTS,
-      NULL, last_error, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-      (LPSTR)&message_buffer, 0, NULL);
+      nullptr, last_error, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+      (LPSTR)&message_buffer, 0, nullptr);
 
   stringstream result;
   result << "(error: " << last_error << "): " << message_buffer;

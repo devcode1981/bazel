@@ -1,11 +1,11 @@
 ---
 layout: documentation
-title: Optimizing Performance
+title: Optimizing performance
+category: extending
 ---
 
 # Optimizing Performance
 
-<!-- [TOC] -->
 
 When writing rules, the most common performance pitfall is to traverse or copy
 data that is accumulated from dependencies. When aggregated over the whole
@@ -16,6 +16,7 @@ This can be hard to get right, so Bazel also provides a memory profiler that
 assists you in finding spots where you might have made a mistake. Be warned:
 The cost of writing an inefficient rule may not be evident until it is in
 widespread use.
+
 
 ## Use depsets
 
@@ -88,34 +89,35 @@ accumulated over each level of the build graph. But this is *still* O(N^2) when
 you build a set of targets with overlapping dependencies. This happens when
 building your tests `//foo/tests/...`, or when importing an IDE project.
 
-**Note**: Today it is possible to flatten depsets implicitly by iterating over
-the depset the way you would a list, tuple, or dictionary, or by taking the
-depset's size via `len()`. This functionality is [deprecated](https://docs.bazel.build/versions/master/skylark/backward-compatibility.html#depset-is-no-longer-iterable).
-and will be removed.
+### Reduce the number of calls to `depset`
 
-### Avoid calling `len(depset)`
+Calling `depset` inside a loop is often a mistake. It can lead to depsets with
+very deep nesting, which perform poorly. For example:
 
-It is O(N) to get the number of items in a depset. It is however
-O(1) to check if a depset is empty. This includes checking the truthiness
-of a depset:
-
-```
-def _impl(ctx):
-  args = ctx.actions.args()
-  files = depset(...)
-
-  # Bad, has to iterate over entire depset to get length
-  if len(files) != 0:
-    args.add("--files")
-    args.add_all(files)
-
-  # Good, O(1)
-  if files:
-    args.add("--files")
-    args.add_all(files)
+```python
+x = depset()
+for i in inputs:
+    # Do not do that.
+    x = depset(transitive = [x, i.deps])
 ```
 
-As mentioned above, support for `len(<depset>)` is deprecated.
+This code can be replaced easily. First, collect the transitive depsets and
+merge them all at once:
+
+```python
+transitive = []
+
+for i in inputs:
+    transitive.append(i.deps)
+
+x = depset(transitive = transitive])
+```
+
+This can sometimes be reduced using a list comprehension:
+
+```python
+x = depset(transitive = [i.deps for i in inputs])
+```
 
 ## Use `ctx.actions.args()` for command lines
 
@@ -143,7 +145,7 @@ all instances of your rule.
 * If the args are too long for the command line an `ctx.actions.args()` object
 can be conditionally or unconditionally written to a param file using
 [`ctx.actions.args#use_param_file`](lib/Args.html#use_param_file). This is
-done behind the scenes when the action is executed. If you need to explictly
+done behind the scenes when the action is executed. If you need to explicitly
 control the params file you can write it manually using
 [`ctx.actions.write`](lib/actions.html#write).
 
@@ -152,16 +154,17 @@ Example:
 ```
 def _impl(ctx):
   ...
-  args = ctx.actions.Args()
+  args = ctx.actions.args()
   file = ctx.declare_file(...)
   files = depset(...)
 
   # Bad, constructs a full string "--foo=<file path>" for each rule instance
   args.add("--foo=" + file.path)
 
-  # Good, shares "-foo" among all rule instances, and defers file.path to later
-  args.add("--foo")
-  args.add(file)
+  # Good, shares "--foo" among all rule instances, and defers file.path to later
+  # It will however pass ["--foo", <file path>] to the action command line,
+  # instead of ["--foo=<file_path>"]
+  args.add("--foo", file)
 
   # Use format if you prefer ["--foo=<file path>"] to ["--foo", <file path>]
   args.add(format="--foo=%s", value=file)
@@ -191,24 +194,175 @@ ctx.actions.run(
 )
 ```
 
+## Hanging
+
+If Bazel appears to be hung, you can hit <kbd>Ctrl-&#92;</kbd> or send
+Bazel a `SIGQUIT` signal (`kill -3 $(bazel info server_pid)`) to get a thread
+dump in the file `$(bazel info output_base)/server/jvm.out`.
+
+Since you may not be able to run `bazel info` if bazel is hung, the
+`output_base` directory is usually the parent of the `bazel-<workspace>`
+symlink in your workspace directory.
+
 ## Performance profiling
 
-To profile your code and analyze the performance, use the `--profile` flag:
+Bazel writes a JSON profile to `command.profile.gz` in the output base by
+default. You can configure the location with the
+[`--profile`](user-manual.html#flag--profile) flag, for example
+`--profile=/tmp/profile.gz`. Location ending with `.gz` are compressed with
+GZIP.
+
+To see the results, open `chrome://tracing` in a Chrome browser tab, click
+"Load" and pick the (potentially compressed) profile file. For more detailed
+results, click the boxes in the lower left corner.
+
+You can use these keyboard controls to navigate:
+
+*   Press `1` for "select" mode. In this mode, you can select
+    particular boxes to inspect the event details (see lower left corner).
+    Select multiple events to get a summary and aggregated statistics.
+*   Press `2` for "pan" mode. Then drag the mouse to move the view. You
+    can also use `a`/`d` to move left/right.
+*   Press `3` for "zoom" mode. Then drag the mouse to zoom. You can
+    also use `w`/`s` to zoom in/out.
+*   Press `4` for "timing" mode where you can measure the distance
+    between two events.
+*   Press `?` to learn about all controls.
+
+### Profile information
+
+Example profile:
+<img src="profile.png" alt="Example Profile" />
+
+There are some special rows:
+
+*   `action counters`: Displays how many concurrent actions are in flight. Click
+    on it to see the actual value. Should go up to the value of `--jobs` in
+    clean builds.
+*   `cpu counters`: For each second of the build, displays the amount of CPU
+    that is used by Bazel (a value of 1 equals one core being 100% busy).
+*   `Critical Path`: Displays one block for each action on the critical path.
+*   `grpc-command-1`: Bazel's main thread. Useful to get a high-level picture of
+    what Bazel is doing, for example "Launch Bazel", "evaluateTargetPatterns",
+    and "runAnalysisPhase".
+*   `Service Thread`: Displays minor and major Garbage Collection (GC) pauses.
+
+Other rows represent Bazel threads and show all events on that thread.
+
+### Common performance issues
+
+When analyzing performance profiles, look for:
+
+*   Slower than expected analysis phase (`runAnalysisPhase`), especially on
+    incremental builds. This can be a sign of a poor rule implementation, for
+    example one that flattens depsets. Package loading can be slow by an
+    excessive amount of targets, complex macros or recursive globs.
+*   Individual slow actions, especially those on the critical path. It might be
+    possible to split large actions into multiple smaller actions or reduce the
+    set of (transitive) dependencies to speed them up. Also check for an unusual
+    high non-`PROCESS_TIME` (e.g. `REMOTE_SETUP` or `FETCH`).
+*   Bottlenecks, that is a small number of threads is busy while all others are
+    idling / waiting for the result (see around 15s-30s in above screenshot).
+    Optimizing this will most likely require touching the rule implementations
+    or Bazel itself to introduce more parallelism. This can also happen when
+    there is an unusual amount of GC.
+
+### Profile file format
+
+The top-level object contains metadata (`otherData`) and the actual tracing data
+(`traceEvents`). The metadata contains extra info, for example the invocation ID
+and date of the Bazel invocation.
+
+Example:
+
+```json
+{
+  "otherData": {
+    "build_id": "101bff9a-7243-4c1a-8503-9dc6ae4c3b05",
+    "date": "Tue Jun 16 08:30:21 CEST 2020",
+    "output_base": "/usr/local/google/_bazel_johndoe/573d4be77eaa72b91a3dfaa497bf8cd0"
+  },
+  "traceEvents": [
+    {"name":"thread_name","ph":"M","pid":1,"tid":0,"args":{"name":"Critical Path"}},
+    {"cat":"build phase marker","name":"Launch Bazel","ph":"X","ts":-1824000,"dur":1824000,"pid":1,"tid":60},
+    ...
+    {"cat":"general information","name":"NoSpawnCacheModule.beforeCommand","ph":"X","ts":116461,"dur":419,"pid":1,"tid":60},
+    ...
+    {"cat":"package creation","name":"src","ph":"X","ts":279844,"dur":15479,"pid":1,"tid":838},
+    ...
+    {"name":"thread_name","ph":"M","pid":1,"tid":11,"args":{"name":"Service Thread"}},
+    {"cat":"gc notification","name":"minor GC","ph":"X","ts":334626,"dur":13000,"pid":1,"tid":11},
+
+    ...
+    {"cat":"action processing","name":"Compiling third_party/grpc/src/core/lib/transport/status_conversion.cc","ph":"X","ts":12630845,"dur":136644,"pid":1,"tid":1546}
+ ]
+}
+```
+
+Timestamps (`ts`) and durations (`dur`) in the trace events are given in
+microseconds. The category (`cat`) is one of enum values of `ProfilerTask`.
+Note that some events are merged together if they are very short and close to
+each other; pass `--noslim_json_profile` if you would like to
+prevent event merging.
+
+See also the
+[Chrome Trace Event Format Specification](https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU/preview).
+
+### analyze-profile
+
+This profiling method consists of two steps, first you have to execute your
+build/test with the `--profile` flag, for example
 
 ```
-$ bazel build --nobuild --profile=/tmp/prof //path/to:target
-$ bazel analyze-profile /tmp/prof --html --html_details
+$ bazel build --profile=/tmp/prof //path/to:target
 ```
 
-Then, open the generated HTML file (`/tmp/prof.html` in the example).
+The file generated (in this case `/tmp/prof`) is a binary file, which can be
+postprocessed and analyzed by the `analyze-profile` command:
 
-## Memory Profiling
+```
+$ bazel analyze-profile /tmp/prof
+```
+
+By default, it prints summary analysis information for the specified profile
+datafile. This includes cumulative statistics for different task types for each
+build phase and an analysis of the critical path.
+
+The first section of the default output is an overview of the time spent
+on the different build phases:
+
+```
+INFO: Profile created on Tue Jun 16 08:59:40 CEST 2020, build ID: 0589419c-738b-4676-a374-18f7bbc7ac23, output base: /home/johndoe/.cache/bazel/_bazel_johndoe/d8eb7a85967b22409442664d380222c0
+
+=== PHASE SUMMARY INFORMATION ===
+
+Total launch phase time         1.070 s   12.95%
+Total init phase time           0.299 s    3.62%
+Total loading phase time        0.878 s   10.64%
+Total analysis phase time       1.319 s   15.98%
+Total preparation phase time    0.047 s    0.57%
+Total execution phase time      4.629 s   56.05%
+Total finish phase time         0.014 s    0.18%
+------------------------------------------------
+Total run time                  8.260 s  100.00%
+
+Critical path (4.245 s):
+       Time Percentage   Description
+    8.85 ms    0.21%   _Ccompiler_Udeps for @local_config_cc// compiler_deps
+    3.839 s   90.44%   action 'Compiling external/com_google_protobuf/src/google/protobuf/compiler/php/php_generator.cc [for host]'
+     270 ms    6.36%   action 'Linking external/com_google_protobuf/protoc [for host]'
+    0.25 ms    0.01%   runfiles for @com_google_protobuf// protoc
+     126 ms    2.97%   action 'ProtoCompile external/com_google_protobuf/python/google/protobuf/compiler/plugin_pb2.py'
+    0.96 ms    0.02%   runfiles for //tools/aquery_differ aquery_differ
+```
+
+## Memory profiling
 
 Bazel comes with a built-in memory profiler that can help you check your rule's
 memory use. If there is a problem you can dump the heap to find the
 exact line of code that is causing the problem.
 
-### Enabling Memory Tracking
+### Enabling memory tracking
 
 You must pass these two startup flags to *every* Bazel invocation:
 
@@ -225,22 +379,22 @@ one Bazel invocation the server will restart and you will have to start over.
 
 ### Using the Memory Tracker
 
-Let's have a look at the target `foo` and see what it's up to. We add
-`--nobuild` since it doesn't matter to memory consumption if we actually build
-or not, we just have to run the analysis phase.
+As an example, look at the target `foo` and see what it does. To only
+run the analysis and not run the build execution phase, add the
+`--nobuild` flag.
 
 ```
 $ bazel $(STARTUP_FLAGS) build --nobuild //foo:foo
 ```
 
-Let's see how much memory the whole Bazel instance consumes:
+Next, see how much memory the whole Bazel instance consumes:
 
 ```
 $ bazel $(STARTUP_FLAGS) info used-heap-size-after-gc
 > 2594MB
 ```
 
-Let's break it down by rule class by using `bazel dump --rules`:
+Break it down by rule class by using `bazel dump --rules`:
 
 ```
 $ bazel $(STARTUP_FLAGS) dump --rules
@@ -259,20 +413,20 @@ _check_proto_library_deps              719         668      1,835,288        2,5
 ... (more output)
 ```
 
-And finally let's have a look at where the memory is going by producing a
-`pprof` file using `bazel dump --skylark_memory`:
+Look at where the memory is going by producing a `pprof` file
+using `bazel dump --skylark_memory`:
 
 ```
 $ bazel $(STARTUP_FLAGS) dump --skylark_memory=$HOME/prof.gz
-> Dumping skylark heap to: /usr/local/google/home/$USER/prof.gz
+> Dumping Starlark heap to: /usr/local/google/home/$USER/prof.gz
 ```
 
-Next, we use the `pprof` tool to investigate the heap. A good starting point is
+Use the `pprof` tool to investigate the heap. A good starting point is
 getting a flame graph by using `pprof -flame $HOME/prof.gz`.
 
-  You can get `pprof` from https://github.com/google/pprof.
+Get `pprof` from [https://github.com/google/pprof](https://github.com/google/pprof).
 
-In this case we get a text dump of the hottest call sites annotated with lines:
+Get a text dump of the hottest call sites annotated with lines:
 
 ```
 $ pprof -text -lines $HOME/prof.gz

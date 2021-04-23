@@ -14,27 +14,21 @@
 
 package com.google.devtools.build.lib.rules.objc;
 
-import static com.google.devtools.build.lib.rules.objc.ObjcProvider.TOP_LEVEL_MODULE_MAP;
-
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
-import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.PrerequisiteArtifacts;
 import com.google.devtools.build.lib.analysis.RuleContext;
-import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.packages.BuildType;
+import com.google.devtools.build.lib.packages.Type;
 import com.google.devtools.build.lib.rules.cpp.CcCommon;
-import com.google.devtools.build.lib.rules.cpp.CppModuleMap;
-import com.google.devtools.build.lib.syntax.Type;
 import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import java.util.List;
 
 /**
  * Provides a way to access attributes that are common to all compilation rules.
@@ -49,8 +43,7 @@ final class CompilationAttributes {
     private final NestedSetBuilder<PathFragment> sdkIncludes = NestedSetBuilder.stableOrder();
     private final ImmutableList.Builder<String> copts = ImmutableList.builder();
     private final ImmutableList.Builder<String> linkopts = ImmutableList.builder();
-    private final NestedSetBuilder<CppModuleMap> moduleMapsForDirectDeps =
-        NestedSetBuilder.stableOrder();
+    private final ImmutableList.Builder<String> defines = ImmutableList.builder();
     private final NestedSetBuilder<SdkFramework> sdkFrameworks = NestedSetBuilder.stableOrder();
     private final NestedSetBuilder<SdkFramework> weakSdkFrameworks = NestedSetBuilder.stableOrder();
     private final NestedSetBuilder<String> sdkDylibs = NestedSetBuilder.stableOrder();
@@ -120,12 +113,9 @@ final class CompilationAttributes {
       return this;
     }
 
-    /**
-     * Adds clang module maps for direct dependencies of the rule. These are needed to generate
-     * module maps.
-     */
-    public Builder addModuleMapsForDirectDeps(NestedSet<CppModuleMap> moduleMapsForDirectDeps) {
-      this.moduleMapsForDirectDeps.addTransitive(moduleMapsForDirectDeps);
+    /** Adds defines. */
+    public Builder addDefines(Iterable<String> defines) {
+      this.defines.addAll(defines);
       return this;
     }
 
@@ -188,7 +178,7 @@ final class CompilationAttributes {
           this.packageFragment,
           this.copts.build(),
           this.linkopts.build(),
-          this.moduleMapsForDirectDeps.build(),
+          this.defines.build(),
           this.enableModules);
     }
 
@@ -202,8 +192,7 @@ final class CompilationAttributes {
       }
 
       if (ruleContext.attributes().has("textual_hdrs", BuildType.LABEL_LIST)) {
-        builder.addTextualHdrs(
-            PrerequisiteArtifacts.nestedSet(ruleContext, "textual_hdrs", Mode.TARGET));
+        builder.addTextualHdrs(PrerequisiteArtifacts.nestedSet(ruleContext, "textual_hdrs"));
       }
     }
 
@@ -259,27 +248,14 @@ final class CompilationAttributes {
       if (ruleContext.attributes().has("linkopts", Type.STRING_LIST)) {
         builder.addLinkopts(ruleContext.getExpander().withDataLocations().tokenized("linkopts"));
       }
+
+      if (ruleContext.attributes().has("defines", Type.STRING_LIST)) {
+        builder.addDefines(ruleContext.getExpander().withDataLocations().tokenized("defines"));
+      }
     }
 
     private static void addModuleOptionsFromRuleContext(Builder builder, RuleContext ruleContext) {
-      NestedSetBuilder<CppModuleMap> moduleMaps = NestedSetBuilder.stableOrder();
-      ObjcConfiguration objcConfiguration = ObjcRuleClasses.objcConfiguration(ruleContext);
-      if (objcConfiguration.moduleMapsEnabled()) {
-        // Make sure all dependencies that have headers are included here. If a module map is
-        // missing, its private headers will be treated as public!
-        if (ruleContext.attributes().has("deps", BuildType.LABEL_LIST)) {
-          Iterable<ObjcProvider> providers =
-              ruleContext.getPrerequisites("deps", Mode.TARGET, ObjcProvider.SKYLARK_CONSTRUCTOR);
-          for (ObjcProvider provider : providers) {
-            moduleMaps.addTransitive(provider.get(TOP_LEVEL_MODULE_MAP));
-          }
-        }
-      }
-
-      builder.addModuleMapsForDirectDeps(moduleMaps.build());
-
-      PathFragment packageFragment =
-          ruleContext.getLabel().getPackageIdentifier().getSourceRoot();
+      PathFragment packageFragment = ruleContext.getPackageDirectory();
       if (packageFragment != null) {
         builder.setPackageFragment(packageFragment);
       }
@@ -301,7 +277,7 @@ final class CompilationAttributes {
   private final Optional<PathFragment> packageFragment;
   private final ImmutableList<String> copts;
   private final ImmutableList<String> linkopts;
-  private final NestedSet<CppModuleMap> moduleMapsForDirectDeps;
+  private final ImmutableList<String> defines;
   private final boolean enableModules;
 
   private CompilationAttributes(
@@ -315,7 +291,7 @@ final class CompilationAttributes {
       Optional<PathFragment> packageFragment,
       ImmutableList<String> copts,
       ImmutableList<String> linkopts,
-      NestedSet<CppModuleMap> moduleMapsForDirectDeps,
+      ImmutableList<String> defines,
       boolean enableModules) {
     this.hdrs = hdrs;
     this.textualHdrs = textualHdrs;
@@ -327,7 +303,7 @@ final class CompilationAttributes {
     this.packageFragment = packageFragment;
     this.copts = copts;
     this.linkopts = linkopts;
-    this.moduleMapsForDirectDeps = moduleMapsForDirectDeps;
+    this.defines = defines;
     this.enableModules = enableModules;
   }
 
@@ -387,15 +363,12 @@ final class CompilationAttributes {
   public NestedSet<PathFragment> headerSearchPaths(PathFragment genfilesFragment) {
     NestedSetBuilder<PathFragment> paths = NestedSetBuilder.stableOrder();
     if (packageFragment.isPresent()) {
-      List<PathFragment> rootFragments =
-          ImmutableList.of(
-              packageFragment.get(), genfilesFragment.getRelative(packageFragment.get()));
-
-      Iterable<PathFragment> relativeIncludes =
-          Iterables.filter(includes(), Predicates.not(PathFragment::isAbsolute));
-      for (PathFragment include : relativeIncludes) {
-        for (PathFragment rootFragment : rootFragments) {
-          paths.add(rootFragment.getRelative(include));
+      PathFragment packageFrag = packageFragment.get();
+      PathFragment genfilesFrag = genfilesFragment.getRelative(packageFrag);
+      for (PathFragment include : includes().toList()) {
+        if (!include.isAbsolute()) {
+          paths.add(packageFrag.getRelative(include));
+          paths.add(genfilesFrag.getRelative(include));
         }
       }
     }
@@ -416,12 +389,9 @@ final class CompilationAttributes {
     return this.linkopts;
   }
 
-  /**
-   * Returns the clang module maps of direct dependencies of this rule. These are needed to generate
-   * this rule's module map.
-   */
-  public NestedSet<CppModuleMap> moduleMapsForDirectDeps() {
-    return this.moduleMapsForDirectDeps;
+  /** Returns the defines. */
+  public ImmutableList<String> defines() {
+    return this.defines;
   }
 
   /**

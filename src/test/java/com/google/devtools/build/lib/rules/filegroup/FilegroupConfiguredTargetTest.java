@@ -14,10 +14,11 @@
 package com.google.devtools.build.lib.rules.filegroup;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
+import com.google.devtools.build.lib.analysis.MiddlemanProvider;
 import com.google.devtools.build.lib.analysis.OutputGroupInfo;
 import com.google.devtools.build.lib.analysis.configuredtargets.FileConfiguredTarget;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
@@ -150,20 +151,39 @@ public class FilegroupConfiguredTargetTest extends BuildViewTestCase {
   }
 
   @Test
-  public void testOutputGroupExtractsCorrectArtifacts() throws Exception {
+  public void outputGroupSourceJars_extractsTransitiveSources() throws Exception {
     scratch.file("pkg/a.java");
     scratch.file("pkg/b.java");
-    scratch.file("pkg/in_ouput_group_a");
-    scratch.file("pkg/in_ouput_group_b");
-
+    scratch.file("pkg/c.java");
     scratch.file(
         "pkg/BUILD",
         "java_library(name='lib_a', srcs=['a.java'])",
-        "java_library(name='lib_b', srcs=['b.java'])",
+        "java_library(name='lib_b', srcs=['b.java'], deps = [':lib_c'])",
+        "java_library(name='lib_c', srcs=['c.java'])",
         "filegroup(name='group', srcs=[':lib_a', ':lib_b'],"
             + String.format("output_group='%s')", JavaSemantics.SOURCE_JARS_OUTPUT_GROUP));
 
     ConfiguredTarget group = getConfiguredTarget("//pkg:group");
+
+    assertThat(ActionsTestUtil.prettyArtifactNames(getFilesToBuild(group)))
+        .containsExactly("pkg/liblib_a-src.jar", "pkg/liblib_b-src.jar", "pkg/liblib_c-src.jar");
+  }
+
+  @Test
+  public void outputGroupDirectSourceJars_extractsDirectSources() throws Exception {
+    scratch.file("pkg/a.java");
+    scratch.file("pkg/b.java");
+    scratch.file("pkg/c.java");
+    scratch.file(
+        "pkg/BUILD",
+        "java_library(name='lib_a', srcs=['a.java'])",
+        "java_library(name='lib_b', srcs=['b.java'], deps = [':lib_c'])",
+        "java_library(name='lib_c', srcs=['c.java'])",
+        "filegroup(name='group', srcs=[':lib_a', ':lib_b'],"
+            + String.format("output_group='%s')", JavaSemantics.DIRECT_SOURCE_JARS_OUTPUT_GROUP));
+
+    ConfiguredTarget group = getConfiguredTarget("//pkg:group");
+
     assertThat(ActionsTestUtil.prettyArtifactNames(getFilesToBuild(group)))
         .containsExactly("pkg/liblib_a-src.jar", "pkg/liblib_b-src.jar");
   }
@@ -177,15 +197,28 @@ public class FilegroupConfiguredTargetTest extends BuildViewTestCase {
         String.format(
             "filegroup(name='group', srcs=[':lib_a'], output_group='%s')",
             OutputGroupInfo.HIDDEN_TOP_LEVEL));
-    try {
-      getConfiguredTarget("//pkg:group");
-      fail("Should throw AssertionError");
-    } catch (AssertionError e) {
-      assertThat(e)
-          .hasMessageThat()
-          .contains(
-              String.format(
-                  Filegroup.ILLEGAL_OUTPUT_GROUP_ERROR, OutputGroupInfo.HIDDEN_TOP_LEVEL));
-    }
+    AssertionError e = assertThrows(AssertionError.class, () -> getConfiguredTarget("//pkg:group"));
+    assertThat(e)
+        .hasMessageThat()
+        .contains(
+            String.format(Filegroup.ILLEGAL_OUTPUT_GROUP_ERROR, OutputGroupInfo.HIDDEN_TOP_LEVEL));
+  }
+
+  @Test
+  public void create_disableMiddlemanArtifact() throws Exception {
+    useConfiguration("--noexperimental_enable_aggregating_middleman");
+    scratch.file("foo/BUILD", "filegroup(name = 'foo', srcs = ['foo/spam.txt'])");
+    ConfiguredTarget target = getConfiguredTarget("//foo:foo");
+
+    assertThat(target.getProvider(MiddlemanProvider.class)).isNull();
+  }
+
+  @Test
+  public void create_enableMiddlemanArtifact() throws Exception {
+    useConfiguration("--experimental_enable_aggregating_middleman");
+    scratch.file("foo/BUILD", "filegroup(name = 'foo', srcs = ['foo/spam.txt'])");
+    ConfiguredTarget target = getConfiguredTarget("//foo:foo");
+
+    assertThat(target.getProvider(MiddlemanProvider.class)).isNotNull();
   }
 }

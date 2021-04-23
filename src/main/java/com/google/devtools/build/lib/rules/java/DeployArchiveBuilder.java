@@ -18,8 +18,8 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Streams;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.CommandLine;
 import com.google.devtools.build.lib.actions.ExecutionRequirements;
@@ -29,9 +29,10 @@ import com.google.devtools.build.lib.actions.ResourceSet;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.actions.CustomCommandLine;
 import com.google.devtools.build.lib.analysis.actions.SpawnAction;
-import com.google.devtools.build.lib.collect.IterablesChain;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.packages.RuleClass.ConfiguredTargetFactory.RuleErrorException;
+import com.google.devtools.build.lib.packages.TargetUtils;
 import com.google.devtools.build.lib.rules.cpp.CppHelper;
 import com.google.devtools.build.lib.rules.java.JavaConfiguration.OneVersionEnforcementLevel;
 import java.util.HashSet;
@@ -55,7 +56,7 @@ public class DeployArchiveBuilder {
 
   private final RuleContext ruleContext;
 
-  private final IterablesChain.Builder<Artifact> runtimeJarsBuilder = IterablesChain.builder();
+  private final NestedSetBuilder<Artifact> runtimeJarsBuilder = NestedSetBuilder.stableOrder();
 
   private final JavaSemantics semantics;
 
@@ -70,7 +71,8 @@ public class DeployArchiveBuilder {
   @Nullable private Function<Artifact, Artifact> derivedJars = null;
   private boolean checkDesugarDeps;
   private OneVersionEnforcementLevel oneVersionEnforcementLevel = OneVersionEnforcementLevel.OFF;
-  @Nullable private Artifact oneVersionWhitelistArtifact;
+  @Nullable private Artifact oneVersionAllowlistArtifact;
+  @Nullable private Artifact sharedArchive;
 
   /** Type of compression to apply to output archive. */
   public enum Compression {
@@ -128,14 +130,20 @@ public class DeployArchiveBuilder {
   }
 
   /** Adds additional jars that should be on the classpath at runtime. */
+  public DeployArchiveBuilder addRuntimeJars(NestedSet<Artifact> jars) {
+    this.runtimeJarsBuilder.addTransitive(jars);
+    return this;
+  }
+
+  /** Adds additional jars that should be on the classpath at runtime. */
   public DeployArchiveBuilder addRuntimeJars(Iterable<Artifact> jars) {
-    this.runtimeJarsBuilder.add(jars);
+    this.runtimeJarsBuilder.addAll(jars);
     return this;
   }
 
   /** Sets the list of extra lines to add to the archive's MANIFEST.MF file. */
-  public DeployArchiveBuilder setDeployManifestLines(Iterable<String> deployManifestLines) {
-    this.deployManifestLines = ImmutableList.copyOf(deployManifestLines);
+  public DeployArchiveBuilder setDeployManifestLines(ImmutableList<String> deployManifestLines) {
+    this.deployManifestLines = Preconditions.checkNotNull(deployManifestLines);
     return this;
   }
 
@@ -159,9 +167,14 @@ public class DeployArchiveBuilder {
   /** Whether or not singlejar would attempt to enforce one version of java classes in the jar */
   public DeployArchiveBuilder setOneVersionEnforcementLevel(
       OneVersionEnforcementLevel oneVersionEnforcementLevel,
-      @Nullable Artifact oneVersionWhitelistArtifact) {
+      @Nullable Artifact oneVersionAllowlistArtifact) {
     this.oneVersionEnforcementLevel = oneVersionEnforcementLevel;
-    this.oneVersionWhitelistArtifact = oneVersionWhitelistArtifact;
+    this.oneVersionAllowlistArtifact = oneVersionAllowlistArtifact;
+    return this;
+  }
+
+  public DeployArchiveBuilder setSharedArchive(@Nullable Artifact sharedArchive) {
+    this.sharedArchive = sharedArchive;
     return this;
   }
 
@@ -203,7 +216,7 @@ public class DeployArchiveBuilder {
       Artifact launcher,
       boolean usingNativeSinglejar,
       OneVersionEnforcementLevel oneVersionEnforcementLevel,
-      @Nullable Artifact oneVersionWhitelistArtifact) {
+      @Nullable Artifact oneVersionAllowlistArtifact) {
 
     CustomCommandLine.Builder args = CustomCommandLine.builder();
     args.addExecPath("--output", outputJar);
@@ -245,8 +258,8 @@ public class DeployArchiveBuilder {
       args.add("--enforce_one_version");
       // RuleErrors should have been added in Builder.build() before this command
       // line is invoked.
-      Preconditions.checkNotNull(oneVersionWhitelistArtifact);
-      args.addExecPath("--one_version_whitelist", oneVersionWhitelistArtifact);
+      Preconditions.checkNotNull(oneVersionAllowlistArtifact);
+      args.addExecPath("--one_version_whitelist", oneVersionAllowlistArtifact);
       if (oneVersionEnforcementLevel == OneVersionEnforcementLevel.WARNING) {
         args.add("--succeed_on_found_violations");
       }
@@ -254,21 +267,18 @@ public class DeployArchiveBuilder {
     return args;
   }
 
-  /** Computes input artifacts for a deploy archive based on the given attributes. */
-  public static NestedSet<Artifact> getArchiveInputs(JavaTargetAttributes attributes) {
-    return getArchiveInputs(attributes, null);
-  }
-
   private static NestedSet<Artifact> getArchiveInputs(
-      JavaTargetAttributes attributes, @Nullable Function<Artifact, Artifact> derivedJarFunction) {
+      JavaTargetAttributes attributes,
+      NestedSet<Artifact> runtimeClasspathForArchive,
+      @Nullable Function<Artifact, Artifact> derivedJarFunction) {
     NestedSetBuilder<Artifact> inputs = NestedSetBuilder.stableOrder();
     if (derivedJarFunction != null) {
       inputs.addAll(
-          Streams.stream(attributes.getRuntimeClassPathForArchive())
+          runtimeClasspathForArchive.toList().stream()
               .map(derivedJarFunction)
               .collect(toImmutableList()));
     } else {
-      attributes.addRuntimeClassPathForArchiveToNestedSet(inputs);
+      inputs.addTransitive(runtimeClasspathForArchive);
     }
     // TODO(bazel-team): Remove?  Resources not used as input to singlejar action
     inputs.addAll(attributes.getResources().values());
@@ -290,17 +300,19 @@ public class DeployArchiveBuilder {
       }
     }
 
-    Iterable<Artifact> runtimeJars = runtimeJarsBuilder.build();
+    NestedSet<Artifact> runtimeJars = runtimeJarsBuilder.build();
+
+    NestedSet<Artifact> runtimeClasspathForArchive = attributes.getRuntimeClassPathForArchive();
 
     // TODO(kmb): Consider not using getArchiveInputs, specifically because we don't want/need to
     // transform anything but the runtimeClasspath and b/c we currently do it twice here and below
     NestedSetBuilder<Artifact> inputs = NestedSetBuilder.stableOrder();
-    inputs.addTransitive(getArchiveInputs(attributes, derivedJars));
+    inputs.addTransitive(getArchiveInputs(attributes, runtimeClasspathForArchive, derivedJars));
 
     if (derivedJars != null) {
-      inputs.addAll(Streams.stream(runtimeJars).map(derivedJars).collect(toImmutableList()));
+      inputs.addAll(Iterables.transform(runtimeJars.toList(), derivedJars));
     } else {
-      inputs.addAll(runtimeJars);
+      inputs.addTransitive(runtimeJars);
     }
     if (runfilesMiddleman != null) {
       inputs.add(runfilesMiddleman);
@@ -311,13 +323,12 @@ public class DeployArchiveBuilder {
 
     NestedSetBuilder<Artifact> runtimeClasspath = NestedSetBuilder.stableOrder();
     if (derivedJars != null) {
+      runtimeClasspath.addAll(Iterables.transform(runtimeJars.toList(), derivedJars));
       runtimeClasspath.addAll(
-          Iterables.transform(
-              Iterables.concat(runtimeJars, attributes.getRuntimeClassPathForArchive()),
-              derivedJars));
+          Iterables.transform(runtimeClasspathForArchive.toList(), derivedJars));
     } else {
-      runtimeClasspath.addAll(runtimeJars);
-      attributes.addRuntimeClassPathForArchiveToNestedSet(runtimeClasspath);
+      runtimeClasspath.addTransitive(runtimeJars);
+      runtimeClasspath.addTransitive(runtimeClasspathForArchive);
     }
 
     if (launcher != null) {
@@ -325,12 +336,15 @@ public class DeployArchiveBuilder {
     }
 
     if (oneVersionEnforcementLevel != OneVersionEnforcementLevel.OFF) {
-      if (oneVersionWhitelistArtifact == null) {
+      if (oneVersionAllowlistArtifact == null) {
         OneVersionCheckActionBuilder.addRuleErrorForMissingArtifacts(
             ruleContext, JavaToolchainProvider.from(ruleContext));
         return;
       }
-      inputs.add(oneVersionWhitelistArtifact);
+      inputs.add(oneVersionAllowlistArtifact);
+    }
+    if (sharedArchive != null) {
+      inputs.add(sharedArchive);
     }
     // If singlejar's name ends with .jar, it is Java application, otherwise it is native.
     // TODO(asmundak): once https://github.com/bazelbuild/bazel/issues/2241 is fixed (that is,
@@ -338,10 +352,18 @@ public class DeployArchiveBuilder {
     Artifact singlejar = JavaToolchainProvider.from(ruleContext).getSingleJar();
     boolean usingNativeSinglejar = !singlejar.getFilename().endsWith(".jar");
 
+    String toolchainIdentifier = null;
+    try {
+      toolchainIdentifier =
+          CppHelper.getToolchainUsingDefaultCcToolchainAttribute(ruleContext)
+              .getToolchainIdentifier();
+    } catch (RuleErrorException e) {
+      // Something went wrong loading the toolchain, which is an exceptional condition.
+      throw new IllegalStateException("Unable to load cc toolchain", e);
+    }
     CommandLine commandLine =
         semantics.buildSingleJarCommandLine(
-            CppHelper.getToolchainUsingDefaultCcToolchainAttribute(ruleContext)
-                .getToolchainIdentifier(),
+            toolchainIdentifier,
             outputJar,
             javaStartClass,
             deployManifestLines,
@@ -353,16 +375,23 @@ public class DeployArchiveBuilder {
             launcher,
             usingNativeSinglejar,
             oneVersionEnforcementLevel,
-            oneVersionWhitelistArtifact);
+            oneVersionAllowlistArtifact,
+            sharedArchive);
     if (checkDesugarDeps) {
       commandLine = CommandLine.concat(commandLine, ImmutableList.of("--check_desugar_deps"));
     }
 
     List<String> jvmArgs = ImmutableList.of(SINGLEJAR_MAX_MEMORY);
 
+    ImmutableMap.Builder<String, String> executionInfo = ImmutableMap.builder();
+    executionInfo.putAll(
+        TargetUtils.getExecutionInfo(ruleContext.getRule(), ruleContext.isAllowTagsPropagation()));
+
     if (!usingNativeSinglejar) {
+      executionInfo.putAll(ExecutionRequirements.WORKER_MODE_ENABLED);
       ruleContext.registerAction(
           new SpawnAction.Builder()
+              .useDefaultShellEnvironment()
               .addTransitiveInputs(inputs.build())
               .addTransitiveInputs(JavaRuntimeInfo.forHost(ruleContext).javaBaseInputsMiddleman())
               .addOutput(outputJar)
@@ -373,11 +402,12 @@ public class DeployArchiveBuilder {
                   ParamFileInfo.builder(ParameterFileType.SHELL_QUOTED).setUseAlways(true).build())
               .setProgressMessage("Building deploy jar %s", outputJar.prettyPrint())
               .setMnemonic("JavaDeployJar")
-              .setExecutionInfo(ExecutionRequirements.WORKER_MODE_ENABLED)
+              .setExecutionInfo(executionInfo.build())
               .build(ruleContext));
     } else {
       ruleContext.registerAction(
           new SpawnAction.Builder()
+              .useDefaultShellEnvironment()
               .addTransitiveInputs(inputs.build())
               .addOutput(outputJar)
               .setResources(DEPLOY_ACTION_RESOURCE_SET)
@@ -387,6 +417,7 @@ public class DeployArchiveBuilder {
                   ParamFileInfo.builder(ParameterFileType.SHELL_QUOTED).setUseAlways(true).build())
               .setProgressMessage("Building deploy jar %s", outputJar.prettyPrint())
               .setMnemonic("JavaDeployJar")
+              .setExecutionInfo(executionInfo.build())
               .build(ruleContext));
     }
   }

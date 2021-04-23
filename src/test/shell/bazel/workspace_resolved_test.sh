@@ -53,10 +53,17 @@ EOF
 
   bazel clean --expunge
   bazel build --experimental_repository_resolved_file=../repo.bzl @ext//... \
-      || fail "Expected success"
-  # some of the file systems on our test machines are really slow to
-  # notice the creation of a file---even after the call to sync(1).
-  bazel shutdown; sync; sleep 10
+        > "${TEST_log}" 2>&1 || fail "Expected success"
+  inplace-sed -e "s?$(pwd)?PWD?g" "$TEST_log"
+  bazel shutdown
+
+  # We expect the additional argument to be reported to the user...
+  expect_log 'extra_arg.*foobar'
+  # ...as well as the location of the rule instantiation and definition.
+  expect_log 'Repository ext instantiated at:'
+  expect_log '  PWD/WORKSPACE:2:'
+  expect_log 'Repository rule trivial_rule defined at:'
+  expect_log '  PWD/rule.bzl:5:'
 
   # Verify that bazel can read the generated repo.bzl file and that it contains
   # the expected information
@@ -92,7 +99,7 @@ EOF
 
 test_git_return_value() {
   EXTREPODIR=`pwd`
-  tar xvf ${TEST_SRCDIR}/jdk_WORKSPACE_files/archives.tar
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
 
   export GIT_CONFIG_NOSYSTEM=YES
 
@@ -121,10 +128,8 @@ new_git_repository(
 EOF
 
 
-  bazel sync --distdir=${EXTREPODIR}/jdk_WORKSPACE/distdir --experimental_repository_resolved_file=../repo.bzl
-  # some of the file systems on our test machines are really slow to
-  # notice the creation of a file---even after the call to sync(1).
-  bazel shutdown; sync; sleep 10
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=../repo.bzl
+  bazel shutdown
 
   cd ..
   echo; cat repo.bzl; echo
@@ -172,7 +177,7 @@ EOF
 
 test_git_follow_branch() {
   EXTREPODIR=`pwd`
-  tar xvf ${TEST_SRCDIR}/jdk_WORKSPACE_files/archives.tar
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
 
   export GIT_CONFIG_NOSYSTEM=YES
 
@@ -205,7 +210,7 @@ genrule(
   cmd = "cp $< $@",
 )
 EOF
-  bazel sync --distdir=${EXTREPODIR}/jdk_WORKSPACE/distdir --experimental_repository_resolved_file=../repo.bzl
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=../repo.bzl
   bazel build :out
   grep "CHANGED" `bazel info bazel-genfiles`/out.txt  \
        && fail "Unexpected content in out.txt" || :
@@ -221,11 +226,11 @@ EOF
 
   # First verify that `bazel sync` sees the new commit (we don't record it).
   cd branchcheckout
-  bazel sync --distdir=${EXTREPODIR}/jdk_WORKSPACE/distdir
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir
   bazel build :out
   grep "CHANGED" `bazel info bazel-genfiles`/out.txt  \
        || fail "sync did not update the external repository"
-  bazel shutdown; sync; sleep 10
+  bazel shutdown
   cd ..
   echo
 
@@ -264,7 +269,7 @@ EOF
 
 test_sync_follows_git_branch() {
   EXTREPODIR=`pwd`
-  tar xvf ${TEST_SRCDIR}/jdk_WORKSPACE_files/archives.tar
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
 
   export GIT_CONFIG_NOSYSTEM=YES
 
@@ -314,16 +319,48 @@ EOF
    git commit --author="A U Thor <author@example.com>" -m 'stable commit')
 
   # Verify that sync followed by build gets the correct version
-  (cd followbranch && bazel sync --distdir=${EXTREPODIR}/jdk_WORKSPACE/distdir && bazel build :out \
+  (cd followbranch && bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir && bazel build :out \
        && cat `bazel info bazel-genfiles`/out.txt > "${TEST_log}")
   expect_log 'CHANGED'
   expect_not_log 'Hello Stable World'
 }
 
+test_http_return_value() {
+  EXTREPODIR=`pwd`
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+
+  mkdir -p a
+  touch a/WORKSPACE
+  touch a/BUILD
+  touch a/f.txt
+
+  zip a.zip a/*
+  expected_sha256="$(sha256sum "${EXTREPODIR}/a.zip" | head -c 64)"
+  rm -rf a
+
+  # http_archive rule doesn't specify the sha256 attribute
+  mkdir -p main
+  cat > main/WORKSPACE <<EOF
+workspace(name = "main")
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+http_archive(
+  name="a",
+  strip_prefix="a",
+  urls=["file://${EXTREPODIR}/a.zip"],
+)
+EOF
+  touch main/BUILD
+
+  cd main
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir \
+      --experimental_repository_resolved_file=../repo.bzl
+
+  grep ${expected_sha256} ../repo.bzl || fail "didn't return commit"
+}
 
 test_sync_calls_all() {
   EXTREPODIR=`pwd`
-  tar xvf ${TEST_SRCDIR}/jdk_WORKSPACE_files/archives.tar
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
 
   mkdir sync_calls_all && cd sync_calls_all
   rm -rf fetchrepo
@@ -356,10 +393,8 @@ trivial_rule(name = "d", comment = other)
 EOF
 
   bazel clean --expunge
-  bazel sync --distdir=${EXTREPODIR}/jdk_WORKSPACE/distdir --experimental_repository_resolved_file=../repo.bzl
-  # some of the file systems on our test machines are really slow to
-  # notice the creation of a file---even after the call to sync(1).
-  bazel shutdown; sync; sleep 10
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=../repo.bzl
+  bazel shutdown
 
   cd ..
   echo; cat repo.bzl; echo
@@ -367,7 +402,9 @@ EOF
   cat > BUILD <<'EOF'
 load("//:repo.bzl", "resolved")
 
-names = [entry["original_attributes"]["name"] for entry in resolved]
+names = [entry["original_attributes"]["name"]
+         for entry in resolved
+         if "native" not in entry]
 
 [
   genrule(
@@ -382,7 +419,7 @@ EOF
 
 test_sync_call_invalidates() {
   EXTREPODIR=`pwd`
-  tar xvf ${TEST_SRCDIR}/jdk_WORKSPACE_files/archives.tar
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
 
   mkdir sync_call_invalidates && cd sync_call_invalidates
   rm -rf fetchrepo
@@ -414,10 +451,8 @@ EOF
 
   bazel build @a//... @b//...
   echo; echo sync run; echo
-  bazel sync --distdir=${EXTREPODIR}/jdk_WORKSPACE/distdir --experimental_repository_resolved_file=../repo.bzl
-  # some of the file systems on our test machines are really slow to
-  # notice the creation of a file---even after the call to sync(1).
-  bazel shutdown; sync; sleep 10
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=../repo.bzl
+  bazel shutdown
 
   cd ..
   echo; cat repo.bzl; echo
@@ -425,8 +460,9 @@ EOF
   cat > BUILD <<'EOF'
 load("//:repo.bzl", "resolved")
 
-names = [entry["original_attributes"]["name"] for entry in resolved]
-
+names = [entry["original_attributes"]["name"]
+         for entry in resolved
+         if "native" not in entry]
 [
   genrule(
    name = name,
@@ -440,7 +476,7 @@ EOF
 
 test_sync_load_errors_reported() {
   EXTREPODIR=`pwd`
-  tar xvf ${TEST_SRCDIR}/jdk_WORKSPACE_files/archives.tar
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
 
   rm -rf fetchrepo
   mkdir fetchrepo
@@ -450,7 +486,7 @@ load("//does/not:exist.bzl", "randomfunction")
 
 radomfunction(name="foo")
 EOF
-  bazel sync --distdir=${EXTREPODIR}/jdk_WORKSPACE/distdir > "${TEST_log}" 2>&1 && fail "Expected failure" || :
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir > "${TEST_log}" 2>&1 && fail "Expected failure" || :
   expect_log '//does/not:exist.bzl'
 }
 
@@ -458,7 +494,7 @@ test_sync_reporting() {
   # Verify that debug and error messages in starlark functions are reported.
   # Also verify that the fact that the repository is fetched is reported as well.
   EXTREPODIR=`pwd`
-  tar xvf ${TEST_SRCDIR}/jdk_WORKSPACE_files/archives.tar
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
 
   rm -rf fetchrepo
   mkdir fetchrepo
@@ -474,12 +510,12 @@ broken_rule = repository_rule(
 )
 EOF
   touch BUILD
-  cat > WORKSPACE <<'EOF'
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<'EOF'
 load("//:rule.bzl", "broken_rule")
 
 broken_rule(name = "broken")
 EOF
-  bazel sync --curses=yes --experimental_ui_actions_shown=100 --distdir=${EXTREPODIR}/jdk_WORKSPACE/distdir > "${TEST_log}" 2>&1 && fail "expected failure" || :
+  bazel sync --curses=yes --experimental_ui_actions_shown=100 --distdir=${EXTREPODIR}/test_WORKSPACE/distdir > "${TEST_log}" 2>&1 && fail "expected failure" || :
   expect_log 'Fetching @broken'
   expect_log "DEBUG-message"
   expect_log "Failure-message"
@@ -487,7 +523,7 @@ EOF
 
 test_indirect_call() {
   EXTREPODIR=`pwd`
-  tar xvf ${TEST_SRCDIR}/jdk_WORKSPACE_files/archives.tar
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
 
   rm -rf fetchrepo
   mkdir fetchrepo
@@ -512,8 +548,8 @@ load("//:indirect.bzl", "call")
 
 call(trivial_rule, name="foo")
 EOF
-  bazel sync --distdir=${EXTREPODIR}/jdk_WORKSPACE/distdir --experimental_repository_resolved_file=../repo.bzl
-  bazel shutdown; sync; sleep 10
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=../repo.bzl
+  bazel shutdown
 
   cd ..
   echo; cat repo.bzl; echo
@@ -540,7 +576,7 @@ test_resolved_file_reading() {
   # file works as expected.
   EXTREPODIR=`pwd`
   export GIT_CONFIG_NOSYSTEM=YES
-  tar xvf ${TEST_SRCDIR}/jdk_WORKSPACE_files/archives.tar
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
 
   mkdir extgit
   (cd extgit && git init \
@@ -571,7 +607,7 @@ genrule(
   cmd = "cp $< $@",
 )
 EOF
-  bazel sync --distdir=${EXTREPODIR}/jdk_WORKSPACE/distdir --experimental_repository_resolved_file=resolved.bzl
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=resolved.bzl
   echo; cat resolved.bzl; echo
 
   bazel clean --expunge
@@ -588,7 +624,7 @@ test_label_resolved_value() {
   # Verify that label arguments in a repository rule end up in the resolved
   # file in a parsable form.
   EXTREPODIR=`pwd`
-  tar xvf ${TEST_SRCDIR}/jdk_WORKSPACE_files/archives.tar
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
   mkdir ext
   echo Hello World > ext/file.txt
   zip ext.zip ext/*
@@ -614,8 +650,9 @@ genrule(
 )
 EOF
 
-  bazel sync --distdir=${EXTREPODIR}/jdk_WORKSPACE/distdir --experimental_repository_resolved_file=resolved.bzl
-  rm WORKSPACE; touch WORKSPACE
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=resolved.bzl
+  rm WORKSPACE
+  touch WORKSPACE
   echo; cat resolved.bzl; echo
 
   bazel build --experimental_resolved_file_instead_of_workspace=resolved.bzl \
@@ -628,7 +665,7 @@ test_resolved_file_not_remembered() {
   # Verify that the --experimental_resolved_file_instead_of_workspace option
   # does not leak into a subsequent sync
   EXTREPODIR=`pwd`
-  tar xvf ${TEST_SRCDIR}/jdk_WORKSPACE_files/archives.tar
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
 
   export GIT_CONFIG_NOSYSTEM=YES
 
@@ -663,7 +700,7 @@ genrule(
 )
 EOF
   (cd followbranch \
-    && bazel sync --distdir=${EXTREPODIR}/jdk_WORKSPACE/distdir --experimental_repository_resolved_file=resolved.bzl)
+    && bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=resolved.bzl)
   # New upstream commits on the branch followed
   echo CHANGED > gitdir/hello.txt
   (cd gitdir
@@ -676,7 +713,7 @@ EOF
   cat `bazel info bazel-genfiles`/out.txt > "${TEST_log}"
   expect_log 'Hello Stable World'
   expect_not_log 'CHANGED'
-  bazel sync --distdir=${EXTREPODIR}/jdk_WORKSPACE/distdir --experimental_repository_resolved_file=resolved.bzl
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=resolved.bzl
   bazel build --experimental_resolved_file_instead_of_workspace=resolved.bzl :out
   cat `bazel info bazel-genfiles`/out.txt > "${TEST_log}"
   expect_log 'CHANGED'
@@ -684,7 +721,7 @@ EOF
 }
 
 create_sample_repository() {
-  # Create, in the current direcotry, a repository that creates an external
+  # Create, in the current directory, a repository that creates an external
   # repository `foo` containing
   # - file with fixed data, generated by ctx.file,
   # - a BUILD file linked from the main repository
@@ -717,14 +754,14 @@ test_hash_included_and_reproducible() {
   # - change of the working directory, and
   # - and current time.
   EXTREPODIR=`pwd`
-  tar xvf ${TEST_SRCDIR}/jdk_WORKSPACE_files/archives.tar
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
 
   rm -rf fetchrepoA
   mkdir fetchrepoA
   cd fetchrepoA
   create_sample_repository
-  bazel sync --distdir=${EXTREPODIR}/jdk_WORKSPACE/distdir --experimental_repository_resolved_file=../repo.bzl
-  bazel shutdown; sync; sleep 10
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=../repo.bzl
+  bazel shutdown
 
   cd ..
   echo; cat repo.bzl; echo
@@ -753,8 +790,8 @@ EOF
   mkdir fetchrepoB
   cd fetchrepoB
   create_sample_repository
-  bazel sync --distdir=${EXTREPODIR}/jdk_WORKSPACE/distdir --experimental_repository_resolved_file=../repo.bzl
-  bazel shutdown; sync; sleep 10
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=../repo.bzl
+  bazel shutdown
 
   cd ..
   echo; cat repo.bzl; echo
@@ -766,7 +803,7 @@ EOF
 
 test_non_reproducibility_detected() {
     EXTREPODIR=`pwd`
-    tar xvf ${TEST_SRCDIR}/jdk_WORKSPACE_files/archives.tar
+    tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
     # Verify that a non-reproducible rule is detected by hash verification
     mkdir repo
     cd repo
@@ -780,15 +817,15 @@ time_rule = repository_rule(
   attrs = {},
 )
 EOF
-    cat > WORKSPACE <<'EOF'
+  cat > WORKSPACE <<'EOF'
 load("//:rule.bzl", "time_rule")
 
 time_rule(name="timestamprepo")
 EOF
 
-    bazel sync --distdir=${EXTREPODIR}/jdk_WORKSPACE/distdir --experimental_repository_resolved_file=resolved.bzl
-    sync; sleep 10
-    bazel sync --distdir=${EXTREPODIR}/jdk_WORKSPACE/distdir --experimental_repository_hash_file=`pwd`/resolved.bzl \
+    bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=resolved.bzl
+    cat resolved.bzl > /dev/null || fail "resolved.bzl should exist"
+    bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_hash_file=`pwd`/resolved.bzl \
           --experimental_verify_repository_rules='//:rule.bzl%time_rule' \
           > "${TEST_log}" 2>&1 && fail "expected failure" || :
     expect_log "timestamprepo.*hash"
@@ -798,7 +835,7 @@ test_chain_resolved() {
   # Verify that a cahin of dependencies in external repositories is reflected
   # in the resolved file in such a way, that the resolved file can be used.
   EXTREPODIR=`pwd`
-  tar xvf ${TEST_SRCDIR}/jdk_WORKSPACE_files/archives.tar
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
 
   mkdir rulerepo
   cat > rulerepo/rule.bzl <<'EOF'
@@ -833,7 +870,7 @@ genrule(
   cmd = "cp $< $@",
 )
 EOF
-  bazel sync --distdir=${EXTREPODIR}/jdk_WORKSPACE/distdir \
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir \
         --experimental_repository_resolved_file=resolved.bzl
   bazel clean --expunge
   echo; cat resolved.bzl; echo
@@ -844,10 +881,10 @@ EOF
 
 test_usage_order_respected() {
    # Verify that if one rules uses a file from another (without any load
-   # statement inbetween), then still the resolved file is such that it can
+   # statement between), then still the resolved file is such that it can
    # be used as a workspace replacement.
    EXTREPODIR=`pwd`
-   tar xvf ${TEST_SRCDIR}/jdk_WORKSPACE_files/archives.tar
+   tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
 
    mkdir datarepo
    echo 'Pure data' > datarepo/data.txt
@@ -884,7 +921,7 @@ genrule(
   cmd = "cp $< $@",
 )
 EOF
-  bazel sync --distdir=${EXTREPODIR}/jdk_WORKSPACE/distdir \
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir \
      --experimental_repository_resolved_file=resolved.bzl
   bazel clean --expunge
   echo; cat resolved.bzl; echo
@@ -898,7 +935,7 @@ test_order_reproducible() {
   # Verify that the order of repositories in the resolved file is reproducible
   # and does not depend on the parameters or timing of the actual rules.
   EXTREPODIR=`pwd`
-  tar xvf ${TEST_SRCDIR}/jdk_WORKSPACE_files/archives.tar
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
 
   mkdir main
   cd main
@@ -928,10 +965,10 @@ EOF
 load("//:rule.bzl", "sleep_rule")
 
 sleep_rule(name="a", sleep=1)
-sleep_rule(name="c", sleep=5)
-sleep_rule(name="b", sleep=10)
+sleep_rule(name="c", sleep=3)
+sleep_rule(name="b", sleep=5)
 EOF
-  bazel sync --distdir=${EXTREPODIR}/jdk_WORKSPACE/distdir \
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir \
         --experimental_repository_resolved_file=repo.bzl
   bazel build //:order
   cp `bazel info bazel-genfiles`/order.txt order-first.txt
@@ -940,11 +977,11 @@ EOF
   cat > WORKSPACE <<'EOF'
 load("//:rule.bzl", "sleep_rule")
 
-sleep_rule(name="a", sleep=20)
-sleep_rule(name="c", sleep=10)
+sleep_rule(name="a", sleep=5)
+sleep_rule(name="c", sleep=3)
 sleep_rule(name="b", sleep=1)
 EOF
-  bazel sync --distdir=${EXTREPODIR}/jdk_WORKSPACE/distdir \
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir \
         --experimental_repository_resolved_file=repo.bzl
   bazel build //:order
   cp `bazel info bazel-genfiles`/order.txt order-second.txt
@@ -953,6 +990,278 @@ EOF
 
   diff order-first.txt order-second.txt \
       || fail "expected order to be reproducible"
+}
+
+test_non_starlarkrepo() {
+  # Verify that entries in the WORKSPACE that are not starlark repositoires
+  # are correctly reported in the resolved file.
+  EXTREPODIR=`pwd`
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+
+  mkdir local
+  touch local/WORKSPACE
+  echo Hello World > local/data.txt
+  echo 'exports_files(["data.txt"])' > local/BUILD
+
+  mkdir newlocal
+  echo Pure data > newlocal/data.txt
+
+  mkdir main
+  cd main
+  mkdir target_to_be_bound
+  echo More data > target_to_be_bound/data.txt
+  echo 'exports_files(["data.txt"])' > target_to_be_bound/BUILD
+  cat > WORKSPACE <<'EOF'
+local_repository(name="thisislocal", path="../local")
+new_local_repository(name="newlocal", path="../newlocal",
+                     build_file_content='exports_files(["data.txt"])')
+bind(name="bound", actual="//target_to_be_bound:data.txt")
+EOF
+  cat > BUILD <<'EOF'
+genrule(
+  name = "it",
+  srcs = ["@thisislocal//:data.txt", "@newlocal//:data.txt",
+          "//external:bound"],
+  outs = ["it.txt"],
+  cmd = "cat $(SRCS) > $@",
+)
+EOF
+
+  bazel build //:it || fail "Expected success"
+
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir \
+        --experimental_repository_resolved_file=resolved.bzl
+  echo > WORKSPACE # remove workspace, only work from the resolved file
+  bazel clean --expunge
+  echo; cat resolved.bzl; echo
+  bazel build --experimental_resolved_file_instead_of_workspace=resolved.bzl \
+        //:it || fail "Expected success"
+}
+
+test_hidden_symbols() {
+  # Verify that the resolved file can be used for building, even if it
+  # legitimately contains a private symbol
+  mkdir main
+  cd main
+  cat > BUILD <<'EOF'
+genrule(
+  name = "it",
+  srcs = ["@foo//:data.txt"],
+  outs = ["it.txt"],
+  cmd = "cp $< $@",
+)
+EOF
+
+  cat > repo.bzl <<'EOF'
+_THE_DATA="42"
+
+def _data_impl(ctx):
+  ctx.file("BUILD", "exports_files(['data.txt'])")
+  ctx.file("data.txt", ctx.attr.data)
+
+_repo = repository_rule(
+  implementation = _data_impl,
+  attrs = { "data" : attr.string() },
+)
+
+def data_repo(name):
+  _repo(name=name, data=_THE_DATA)
+
+EOF
+  cat > WORKSPACE <<'EOF'
+load("//:repo.bzl", "data_repo")
+
+data_repo("foo")
+EOF
+
+  bazel build --experimental_repository_resolved_file=resolved.bzl //:it
+  echo > WORKSPACE # remove workspace, only work from the resolved file
+  bazel clean --expunge
+  echo; cat resolved.bzl; echo
+
+  bazel build --experimental_resolved_file_instead_of_workspace=resolved.bzl \
+        //:it || fail "Expected success"
+}
+
+test_toolchain_recorded() {
+  # Verify that the registration of toolchains and execution platforms is
+  # recorded in the resolved file
+  EXTREPODIR=`pwd`
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+
+  mkdir ext
+  touch ext/BUILD
+  cat > ext/toolchains.bzl <<'EOF'
+def ext_toolchains():
+  native.register_toolchains("@ext//:toolchain")
+  native.register_execution_platforms("@ext//:platform")
+EOF
+  tar cvf ext.tar ext
+  rm -rf ext
+
+  mkdir main
+  cd main
+  cat >> WORKSPACE <<EOF
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+http_archive(
+  name="ext",
+  strip_prefix="ext",
+  urls=["file://${EXTREPODIR}/ext.tar"],
+)
+load("@ext//:toolchains.bzl", "ext_toolchains")
+ext_toolchains()
+EOF
+  touch BUILD
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir \
+        --experimental_repository_resolved_file=resolved.bzl
+  echo; cat resolved.bzl; echo
+
+  grep 'register_toolchains.*ext//:toolchain' resolved.bzl \
+      || fail "tool chain not registered in resolved file"
+  grep 'register_execution_platforms.*ext//:platform' resolved.bzl \
+      || fail "execution platform not registered in resolved file"
+}
+
+test_local_config_platform_recorded() {
+  EXTREPODIR=`pwd`
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+
+  # Verify that the auto-generated local_config_platform repo is
+  # recorded in the resolved file
+  mkdir main
+  cd main
+  # Clear out the WORKSPACE.
+  cat >> WORKSPACE <<EOF
+EOF
+  touch BUILD
+  bazel sync \
+      --distdir=${EXTREPODIR}/test_WORKSPACE/distdir \
+      --experimental_repository_resolved_file=resolved.bzl
+  echo; cat resolved.bzl; echo
+
+  grep 'local_config_platform' resolved.bzl \
+      || fail "local_config_platform in resolved file"
+}
+
+test_definition_location_recorded() {
+  # Verify that for Starlark repositories the location of the definition
+  # is recorded in the resolved file.
+  EXTREPODIR=`pwd`
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+
+  mkdir ext
+  touch ext/BUILD
+
+  tar cvf ext.tar ext
+  rm -rf ext
+
+  mkdir main
+  cd main
+  touch BUILD
+  mkdir -p first/path
+  cat > first/path/foo.bzl <<'EOF'
+load("//:another/directory/bar.bzl", "bar")
+
+def foo():
+  bar()
+EOF
+  mkdir -p another/directory
+  cat > another/directory/bar.bzl <<EOF
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+def bar():
+  http_archive(
+    name = "ext",
+    url = "file://${EXTREPODIR}/ext.tar",
+  )
+EOF
+  cat > WORKSPACE <<'EOF'
+load("//:first/path/foo.bzl", "foo")
+
+foo()
+EOF
+
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir \
+        --experimental_repository_resolved_file=resolved.bzl
+
+  echo; cat resolved.bzl; echo
+
+  cat > BUILD <<'EOF'
+load("//:finddef.bzl", "finddef")
+
+genrule(
+  name = "ext_def",
+  outs = ["ext_def.txt"],
+  cmd = "echo '%s' > $@" % (finddef("ext"),),
+)
+EOF
+  cat > finddef.bzl <<'EOF'
+load("//:resolved.bzl", "resolved")
+
+def finddef(name):
+  for repo in resolved:
+    if repo["original_attributes"]["name"] == name:
+      return repo["definition_information"]
+EOF
+
+  bazel build //:ext_def
+
+  cat `bazel info bazel-genfiles`/ext_def.txt > "${TEST_log}"
+  inplace-sed -e "s?$(pwd)/?PWD/?g" -e "s?$TEST_TMPDIR/?TEST_TMPDIR/?g" "${TEST_log}"
+  expect_log "Repository ext instantiated at:"
+  expect_log "  PWD/WORKSPACE:3"
+  expect_log "  PWD/first/path/foo.bzl:4"
+  expect_log "  PWD/another/directory/bar.bzl:4"
+  expect_log "Repository rule http_archive defined at:"
+  expect_log "  TEST_TMPDIR/.*/external/bazel_tools/tools/build_defs/repo/http.bzl:"
+}
+
+# Regression test for #11040.
+#
+# Test that a canonical repo warning is generated for explicitly specified
+# attributes whose values differ, and that it is never generated for implicitly
+# created attributes (in particular, the generator_* attributes).
+test_canonical_warning() {
+  EXTREPODIR=`pwd`
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+
+  mkdir main
+  touch main/BUILD
+  cat > main/reporule.bzl <<EOF
+def _impl(repository_ctx):
+    repository_ctx.file("a.txt", "A")
+    repository_ctx.file("BUILD.bazel", "exports_files(['a.txt'])")
+    # Don't include "name", test that we warn about it below.
+    return {"myattr": "bar"}
+
+reporule = repository_rule(
+    implementation = _impl,
+    attrs = {
+        "myattr": attr.string()
+    })
+
+# We need to use a macro for the generator_* attributes to be defined.
+def instantiate_reporule(name, **kwargs):
+    reporule(name=name, **kwargs)
+EOF
+  cat > main/WORKSPACE <<EOF
+workspace(name = "main")
+load("//:reporule.bzl", "instantiate_reporule")
+instantiate_reporule(
+  name = "myrepo",
+  myattr = "foo"
+)
+EOF
+
+  cd main
+  # We should get a warning for "myattr" having a changed value and for "name"
+  # being dropped, but not for the generator_* attributes.
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir >/dev/null 2>$TEST_log
+  bazel clean --expunge
+  expect_log "Rule 'myrepo' indicated that a canonical reproducible form \
+can be obtained by modifying arguments myattr = \"bar\" and dropping \
+\[.*\"name\".*\]"
+  expect_not_log "Rule 'myrepo' indicated .*generator"
 }
 
 run_suite "workspace_resolved_test tests"

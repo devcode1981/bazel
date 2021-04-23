@@ -1,33 +1,27 @@
 ---
 layout: documentation
 title: Build Tutorial - iOS
+category: getting-started
 ---
 
-Introduction to Bazel: Building an iOS App
-==========
+# Bazel Tutorial: Build an iOS App
 
-In this tutorial, you will learn how to build a simple iOS app. You'll do the
-following:
+This tutorial covers how to build a simple iOS app using Bazel.
 
-*   [Set up your environment](#set-up-your-environment)
-    *   [Install Bazel](#install-bazel)
-    *   [Install Xcode](#install-xcode)
-    *   [Get the sample project](#get-the-sample-project)
-*   [Set up a workspace](#set-up-a-workspace)
-    *   [Create a WORKSPACE file](#create-a-workspace-file)
-    *   [Update the WORKSPACE file](#update-the-workspace-file)
-*   [Review the source files](#review-the-source-files)
-*   [Create a BUILD file](#create-a-build-file)
-    *   [Add the rule load statement](#add-the-rule-load-statement)
-    *   [Add an objc_library rule](#add-an-objc_library-rule)
-    *   [Add an ios_application rule](#add_an-ios_application-rule)
-*   [Build and deploy the app](#build-and-deploy-the-app)
-    *   [Build the app for the simulator](#build-the-app-for-the-simulator)
-    *   [Find the build outputs](#find-the-build-outputs)
-    *   [Run and debug the app in the simulator](#run-and-debug-the-app-in-the-simulator)
-    *   [Build the app for a device](#build-the-app-for-a-device)
-    *   [Install the app on a device](#install-the-app-on-a-device)
-*   [Review  your work](#review-your-work)
+## What you'll learn
+
+In this tutorial, you learn how to:
+
+*   Set up the environment by installing Bazel and Xcode, and downloading the
+    sample project
+*   Set up a Bazel [workspace](workspace.md) that contained the source code
+    for the app and a `WORKSPACE` file that identifies the top level of the
+    workspace directory
+*   Update the `WORKSPACE` file to contain references to the required
+    external dependencies
+*   Create a `BUILD` file
+*   Run Bazel to build the app for the simulator and an iOS device
+*   Run the app in the simulator and on an iOS device
 
 ## Set up your environment
 
@@ -116,16 +110,31 @@ To build applications for Apple devices, Bazel needs to pull the latest
 repository. To enable this, add the following [`git_repository`](../be/workspace.html#git_repository)
 rules to your `WORKSPACE` file:
 
-```
+```python
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
+
 git_repository(
     name = "build_bazel_rules_apple",
     remote = "https://github.com/bazelbuild/rules_apple.git",
-    tag = "0.4.0",
+    tag = "0.19.0",
 )
+
+git_repository(
+    name = "build_bazel_rules_swift",
+    remote = "https://github.com/bazelbuild/rules_swift.git",
+    tag = "0.13.0",
+)
+
+git_repository(
+    name = "build_bazel_apple_support",
+    remote = "https://github.com/bazelbuild/apple_support.git",
+    tag = "0.7.2",
+)
+
 git_repository(
     name = "bazel_skylib",
     remote = "https://github.com/bazelbuild/bazel-skylib.git",
-    tag = "0.3.1",
+    tag = "0.9.0",
 )
 ```
 
@@ -162,8 +171,8 @@ following load statement to the beginning of your `BUILD` file:
 load("@build_bazel_rules_apple//apple:ios.bzl", "ios_application")
 ```
 
-We only need to load the `ios_application` rule because the `objc_library` rule
-is built into the Bazel package.
+You only need to load the `ios_application` rule because the `objc_library`
+rule is built into the Bazel package.
 
 ### Add an objc_library rule
 
@@ -171,7 +180,8 @@ Bazel provides several build rules that you can use to build an app for the
 iOS platform. For this tutorial, you'll first use the
 [`objc_library`](../be/objective-c.html#objc_library) rule to tell Bazel
 how to build a static library from the app source code and Xib files. Then
-you'll use the [`ios_application`](https://github.com/bazelbuild/rules_apple)
+you'll use the
+[`ios_application`](https://github.com/bazelbuild/rules_apple/tree/master/doc)
 rule to tell it how to build the application binary and the `.ipa` bundle.
 
 **NOTE:** This tutorial presents a minimal use case of the Objective-C rules in
@@ -189,7 +199,7 @@ objc_library(
          "UrlGet/main.m",
     ],
     hdrs = glob(["UrlGet/*.h"]),
-    xibs = ["UrlGet/UrlGetViewController.xib"],
+    data = ["UrlGet/UrlGetViewController.xib"],
 )
 ```
 
@@ -197,8 +207,9 @@ Note the name of the rule, `UrlGetClasses`.
 
 ### Add an ios_application rule
 
-The [`ios_application`](../be/objective-c.html#ios_application) rule builds
-the application binary and creates the `.ipa` bundle file.
+The
+[`ios_application`](https://github.com/bazelbuild/rules_apple/tree/master/doc)
+rule builds the application binary and creates the `.ipa` bundle file.
 
 Add the following to your `BUILD` file:
 
@@ -235,6 +246,13 @@ iOS device.
 **NOTE:** The app launches standalone but requires a backend server in order to
 produce output. See the README file in the sample project directory to find out
 how to build the backend server.
+
+The built app is located in the `$WORKSPACE/bazel-bin` directory.
+
+Completed `WORKSPACE` and `BUILD` files for this tutorial are located in the
+[master branch](https://github.com/bazelbuild/examples/tree/master/tutorial)
+of the GitHub repo. You can compare your work to the completed files for
+additional help or troubleshooting.
 
 ### Build the app for the simulator
 
@@ -334,24 +352,9 @@ If your app fails to launch, make sure that your device is part of your
 provisioning profile. The `View Device Logs` button on the `Devices` screen in
 Xcode may provide other information as to what has gone wrong.
 
-## Review your work
+## Further reading
 
-In this tutorial, you used Bazel to build an iOS app. To accomplish that, you:
-
-*   Set up your environment by installing Bazel and Xcode, and downloading the
-    sample project
-*   Set up a Bazel [workspace](workspace.md) that contained the source code
-    for the app and a `WORKSPACE` file that identifies the top level of the
-    workspace directory
-*   Updated the `WORKSPACE` file to contain references to the required
-    external dependencies
-*   Created a `BUILD` file
-*   Ran Bazel to build the app for the simulator and an iOS device
-*   Ran the app in the simulator and on an iOS device
-
-The built app is located in the `$WORKSPACE/bazel-bin` directory.
-
-Completed `WORKSPACE` and `BUILD` files for this tutorial are located in the
+For more details, see
 [master branch](https://github.com/bazelbuild/examples/tree/master/tutorial)
-of the GitHub repo. You can compare your work to the completed files for
-additional help or troubleshooting.
+of the GitHub repo.
+

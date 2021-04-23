@@ -56,6 +56,7 @@ cc_library(
         ":ijar",
         "//src/main/tools:__pkg__",
         "//src/test/cpp/util:__pkg__",
+        "//src/test/native/windows:__pkg__",
         "//src/tools/launcher:__subpackages__",
         "//src/tools/singlejar:__pkg__",
         "//third_party/def_parser:__pkg__",
@@ -150,26 +151,6 @@ cc_library(
 )
 
 cc_library(
-    name = "profiler",
-    srcs = [
-        "profiler.cc",
-    ] + select({
-        "//src/conditions:windows": ["profiler_windows.cc"],
-        "//conditions:default": ["profiler_posix.cc"],
-    }),
-    hdrs = ["profiler.h"],
-    visibility = [
-        "//src/main/cpp:__pkg__",
-        "//src/test/cpp/util:__pkg__",
-    ],
-    deps = [
-        ":blaze_exit_code",
-        ":errors",
-        ":logging",
-    ],
-)
-
-cc_library(
     name = "blaze_exit_code",
     hdrs = ["exit_code.h"],
     visibility = ["//visibility:public"],
@@ -185,4 +166,35 @@ filegroup(
     name = "embedded_tools",
     srcs = glob(["*.cc"]) + glob(["*.h"]) + ["BUILD"],
     visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "embedded_java_tools",
+    srcs = glob(["*.cc"]) + glob(["*.h"]) + ["//src/main/native/windows:embedded_java_tools"],
+    visibility = ["//visibility:public"],
+)
+
+# A zip containing source files used by ijar.
+genrule(
+    name = "cpp_util_with_deps_zip",
+    srcs = [
+        ":cpp_util_zip",
+        "//src/main/native/windows:native_windows_zip",
+    ],
+    outs = ["cpp_util_with_deps.zip"],
+    cmd = "$(location //src:merge_zip_files) - $@ $(SRCS)",
+    tools = ["//src:merge_zip_files"],
+    visibility = [
+        "//src/tools/singlejar:__pkg__",
+        "//third_party/ijar:__pkg__",
+    ],
+)
+
+genrule(
+    name = "cpp_util_zip",
+    srcs = glob(["*.cc"]) + glob(["*.h"]),
+    outs = ["cpp_util.zip"],
+    cmd = "$(location //src:zip_files) src/main/cpp/util $@ $(SRCS)",
+    tools = ["//src:zip_files"],
+    visibility = ["//visibility:private"],
 )

@@ -31,8 +31,11 @@ import com.google.devtools.build.lib.buildeventstream.LocalFilesArtifactUploader
 import com.google.devtools.build.lib.buildeventstream.PathConverter;
 import com.google.devtools.common.options.Options;
 import com.google.protobuf.TextFormat;
+import java.io.BufferedOutputStream;
 import java.io.File;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Paths;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
@@ -40,7 +43,7 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-import org.mockito.Matchers;
+import org.mockito.ArgumentMatchers;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.MockitoAnnotations;
@@ -59,40 +62,46 @@ public class TextFormatFileTransportTest {
   @Mock public ArtifactGroupNamer artifactGroupNamer;
 
   @Before
-  public void initMocks() {
+  public void setUp() throws IOException {
     MockitoAnnotations.initMocks(this);
   }
 
   @After
-  public void validateMocks() {
+  public void tearDown() {
     Mockito.validateMockitoUsage();
   }
 
   @Test
   public void testCreatesFileAndWritesProtoTextFormat() throws Exception {
     File output = tmp.newFile();
+    BufferedOutputStream outputStream =
+        new BufferedOutputStream(
+            java.nio.file.Files.newOutputStream(Paths.get(output.getAbsolutePath())));
 
     BuildEventStreamProtos.BuildEvent started =
         BuildEventStreamProtos.BuildEvent.newBuilder()
             .setStarted(BuildStarted.newBuilder().setCommand("build"))
             .build();
-    when(buildEvent.asStreamProto(Matchers.<BuildEventContext>any())).thenReturn(started);
+    when(buildEvent.asStreamProto(ArgumentMatchers.<BuildEventContext>any())).thenReturn(started);
     TextFormatFileTransport transport =
         new TextFormatFileTransport(
-            output.getAbsolutePath(), defaultOpts, new LocalFilesArtifactUploader(), (e) -> {});
-    transport.sendBuildEvent(buildEvent, artifactGroupNamer);
+            outputStream,
+            defaultOpts,
+            new LocalFilesArtifactUploader(),
+            artifactGroupNamer);
+    transport.sendBuildEvent(buildEvent);
 
     BuildEventStreamProtos.BuildEvent progress =
         BuildEventStreamProtos.BuildEvent.newBuilder().setProgress(Progress.newBuilder()).build();
-    when(buildEvent.asStreamProto(Matchers.<BuildEventContext>any())).thenReturn(progress);
-    transport.sendBuildEvent(buildEvent, artifactGroupNamer);
+    when(buildEvent.asStreamProto(ArgumentMatchers.<BuildEventContext>any())).thenReturn(progress);
+    transport.sendBuildEvent(buildEvent);
 
     BuildEventStreamProtos.BuildEvent completed =
         BuildEventStreamProtos.BuildEvent.newBuilder()
             .setCompleted(TargetComplete.newBuilder().setSuccess(true))
             .build();
-    when(buildEvent.asStreamProto(Matchers.<BuildEventContext>any())).thenReturn(completed);
-    transport.sendBuildEvent(buildEvent, artifactGroupNamer);
+    when(buildEvent.asStreamProto(ArgumentMatchers.<BuildEventContext>any())).thenReturn(completed);
+    transport.sendBuildEvent(buildEvent);
 
     transport.close().get();
     String contents =

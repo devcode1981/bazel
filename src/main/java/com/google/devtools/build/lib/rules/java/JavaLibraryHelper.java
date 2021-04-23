@@ -16,7 +16,6 @@ package com.google.devtools.build.lib.rules.java;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
-import static com.google.devtools.build.lib.analysis.config.BuildConfiguration.StrictDepsMode.OFF;
 import static com.google.devtools.build.lib.rules.java.JavaCommon.collectJavaCompilationArgs;
 
 import com.google.common.base.Preconditions;
@@ -24,9 +23,12 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.RuleContext;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration.StrictDepsMode;
+import com.google.devtools.build.lib.analysis.config.CoreOptionConverters.StrictDepsMode;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.rules.java.JavaConfiguration.JavaClasspathMode;
-import com.google.devtools.build.lib.rules.java.JavaRuleOutputJarsProvider.OutputJar;
+import com.google.devtools.build.lib.rules.java.JavaRuleOutputJarsProvider.JavaOutput;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -53,10 +55,14 @@ public final class JavaLibraryHelper {
    */
   private final List<JavaCompilationArgsProvider> deps = new ArrayList<>();
 
+  /** Contains runtime dependencies. */
+  private final List<JavaCompilationArgsProvider> runtimeDeps = new ArrayList<>();
+
   private final List<JavaCompilationArgsProvider> exports = new ArrayList<>();
   private JavaPluginInfoProvider plugins = JavaPluginInfoProvider.empty();
   private ImmutableList<String> javacOpts = ImmutableList.of();
   private ImmutableList<Artifact> sourcePathEntries = ImmutableList.of();
+  private final List<Artifact> additionalOutputs = new ArrayList<>();
 
   /** @see {@link #setCompilationStrictDepsMode}. */
   private StrictDepsMode strictDepsMode = StrictDepsMode.ERROR;
@@ -108,14 +114,15 @@ public final class JavaLibraryHelper {
     return this;
   }
 
-  /** Adds the given source files to be compiled. */
-  public JavaLibraryHelper addSourceFiles(Iterable<Artifact> sourceFiles) {
-    Iterables.addAll(this.sourceFiles, sourceFiles);
+  public JavaLibraryHelper addRuntimeDep(JavaCompilationArgsProvider provider) {
+    checkNotNull(provider);
+    this.runtimeDeps.add(provider);
     return this;
   }
 
-  public JavaLibraryHelper addAllDeps(Iterable<JavaCompilationArgsProvider> providers) {
-    Iterables.addAll(deps, providers);
+  /** Adds the given source files to be compiled. */
+  public JavaLibraryHelper addSourceFiles(Iterable<Artifact> sourceFiles) {
+    Iterables.addAll(this.sourceFiles, sourceFiles);
     return this;
   }
 
@@ -124,8 +131,8 @@ public final class JavaLibraryHelper {
     return this;
   }
 
-  public JavaLibraryHelper addAllExports(Iterable<JavaCompilationArgsProvider> providers) {
-    Iterables.addAll(exports, providers);
+  public JavaLibraryHelper addAdditionalOutputs(Iterable<Artifact> outputs) {
+    Iterables.addAll(additionalOutputs, outputs);
     return this;
   }
 
@@ -137,13 +144,13 @@ public final class JavaLibraryHelper {
   }
 
   /** Sets the compiler options. */
-  public JavaLibraryHelper setJavacOpts(Iterable<String> javacOpts) {
-    this.javacOpts = ImmutableList.copyOf(javacOpts);
+  public JavaLibraryHelper setJavacOpts(ImmutableList<String> javacOpts) {
+    this.javacOpts = Preconditions.checkNotNull(javacOpts);
     return this;
   }
 
-  public JavaLibraryHelper setSourcePathEntries(List<Artifact> sourcepathEntries) {
-    this.sourcePathEntries = ImmutableList.copyOf(sourcepathEntries);
+  public JavaLibraryHelper setSourcePathEntries(ImmutableList<Artifact> sourcePathEntries) {
+    this.sourcePathEntries = Preconditions.checkNotNull(sourcePathEntries);
     return this;
   }
 
@@ -176,46 +183,45 @@ public final class JavaLibraryHelper {
    *
    * @param semantics implementation specific java rules semantics
    * @param javaToolchainProvider used for retrieving misc java tools
-   * @param hostJavabase the target of the host javabase used to retrieve the java executable and
-   *     its necessary inputs
-   * @param jacocoInstrumental jacoco jars needed when running coverage
    * @param outputJarsBuilder populated with the outputs of the created actions
    * @param outputSourceJar if not-null, the output of an source jar action that will be created
    */
   public JavaCompilationArtifacts build(
       JavaSemantics semantics,
       JavaToolchainProvider javaToolchainProvider,
-      JavaRuntimeInfo hostJavabase,
-      Iterable<Artifact> jacocoInstrumental,
       JavaRuleOutputJarsProvider.Builder outputJarsBuilder,
       boolean createOutputSourceJar,
-      @Nullable Artifact outputSourceJar) {
+      @Nullable Artifact outputSourceJar)
+      throws InterruptedException {
     return build(
         semantics,
         javaToolchainProvider,
-        hostJavabase,
-        jacocoInstrumental,
         outputJarsBuilder,
         createOutputSourceJar,
         outputSourceJar,
         /* javaInfoBuilder= */ null,
-        ImmutableList.of()); // ignored when javaInfoBuilder is null
+        ImmutableList.of(), // ignored when javaInfoBuilder is null
+        ImmutableList.of(),
+        NestedSetBuilder.emptySet(Order.STABLE_ORDER));
   }
 
   public JavaCompilationArtifacts build(
       JavaSemantics semantics,
       JavaToolchainProvider javaToolchainProvider,
-      JavaRuntimeInfo hostJavabase,
-      Iterable<Artifact> jacocoInstrumental,
       JavaRuleOutputJarsProvider.Builder outputJarsBuilder,
       boolean createOutputSourceJar,
       @Nullable Artifact outputSourceJar,
       @Nullable JavaInfo.Builder javaInfoBuilder,
-      Iterable<JavaGenJarsProvider> transitiveJavaGenJars) {
+      List<JavaGenJarsProvider> transitiveJavaGenJars,
+      ImmutableList<Artifact> additionalInputForDatabinding,
+      NestedSet<Artifact> localClassPathEntries)
+      throws InterruptedException {
+
     Preconditions.checkState(output != null, "must have an output file; use setOutput()");
     Preconditions.checkState(
         !createOutputSourceJar || outputSourceJar != null,
         "outputSourceJar cannot be null when createOutputSourceJar is true");
+
     JavaTargetAttributes.Builder attributes = new JavaTargetAttributes.Builder(semantics);
     attributes.addSourceJars(sourceJars);
     attributes.addSourceFiles(sourceFiles);
@@ -225,6 +231,7 @@ public final class JavaLibraryHelper {
     attributes.setInjectingRuleKind(injectingRuleKind);
     attributes.setSourcePath(sourcePathEntries);
     JavaCommon.addPlugins(attributes, plugins);
+    attributes.addAdditionalOutputs(additionalOutputs);
 
     for (Artifact resource : resources) {
       attributes.addResource(
@@ -243,29 +250,11 @@ public final class JavaLibraryHelper {
             javacOpts,
             attributes,
             javaToolchainProvider,
-            hostJavabase,
-            jacocoInstrumental);
-    Artifact outputDepsProto = helper.createOutputDepsProtoArtifact(output, artifactsBuilder);
-
-    Artifact manifestProtoOutput = helper.createManifestProtoOutput(output);
-
-    Artifact genSourceJar = null;
-    Artifact genClassJar = null;
-    if (helper.usesAnnotationProcessing()) {
-      genClassJar = helper.createGenJar(output);
-      genSourceJar = helper.createGensrcJar(output);
-      helper.createGenJarAction(output, manifestProtoOutput, genClassJar, hostJavabase);
-    }
-
-    Artifact nativeHeaderOutput = helper.createNativeHeaderJar(output);
-
-    helper.createCompileAction(
-        output,
-        manifestProtoOutput,
-        genSourceJar,
-        outputDepsProto,
-        /* instrumentationMetadataJar= */ null,
-        nativeHeaderOutput);
+            additionalInputForDatabinding);
+    helper.addLocalClassPathEntries(localClassPathEntries);
+    JavaCompileOutputs<Artifact> outputs = helper.createOutputs(output);
+    artifactsBuilder.setCompileTimeDependencies(outputs.depsProto());
+    helper.createCompileAction(outputs);
 
     Artifact iJar = null;
     if (!sourceJars.isEmpty() || !sourceFiles.isEmpty()) {
@@ -274,24 +263,24 @@ public final class JavaLibraryHelper {
     }
 
     if (createOutputSourceJar) {
-      helper.createSourceJarAction(
-          outputSourceJar, genSourceJar, javaToolchainProvider, hostJavabase);
+      helper.createSourceJarAction(outputSourceJar, outputs.genSource(), javaToolchainProvider);
     }
-    ImmutableList<Artifact> outputSourceJars =
-        outputSourceJar == null ? ImmutableList.of() : ImmutableList.of(outputSourceJar);
-    outputJarsBuilder
-        .addOutputJar(new OutputJar(output, iJar, manifestProtoOutput, outputSourceJars))
-        .setJdeps(outputDepsProto)
-        .setNativeHeaders(nativeHeaderOutput);
-
     JavaCompilationArtifacts javaArtifacts = artifactsBuilder.build();
+    outputJarsBuilder.addJavaOutput(
+        JavaOutput.builder()
+            .fromJavaCompileOutputs(outputs)
+            .setCompileJar(iJar)
+            .setCompileJdeps(javaArtifacts.getCompileTimeDependencyArtifact())
+            .addSourceJar(outputSourceJar)
+            .build());
+
     if (javaInfoBuilder != null) {
       ClasspathConfiguredFragment classpathFragment =
           new ClasspathConfiguredFragment(
               javaArtifacts,
               attributes.build(),
               neverlink,
-              JavaCompilationHelper.getBootClasspath(javaToolchainProvider));
+              javaToolchainProvider.getBootclasspath());
 
       javaInfoBuilder.addProvider(
           JavaCompilationInfoProvider.class,
@@ -304,7 +293,8 @@ public final class JavaLibraryHelper {
 
       javaInfoBuilder.addProvider(
           JavaGenJarsProvider.class,
-          createJavaGenJarsProvider(helper, genClassJar, genSourceJar, transitiveJavaGenJars));
+          createJavaGenJarsProvider(
+              helper, outputs.genClass(), outputs.genSource(), transitiveJavaGenJars));
     }
 
     return javaArtifacts;
@@ -314,7 +304,7 @@ public final class JavaLibraryHelper {
       JavaCompilationHelper helper,
       @Nullable Artifact genClassJar,
       @Nullable Artifact genSourceJar,
-      Iterable<JavaGenJarsProvider> transitiveJavaGenJars) {
+      List<JavaGenJarsProvider> transitiveJavaGenJars) {
     return JavaGenJarsProvider.create(
         helper.usesAnnotationProcessing(),
         genClassJar,
@@ -343,7 +333,7 @@ public final class JavaLibraryHelper {
             /* srcLessDepsExport= */ false,
             artifacts,
             deps,
-            /* runtimeDeps= */ ImmutableList.of(),
+            runtimeDeps,
             exports);
 
     if (!isReportedAsStrict) {
@@ -353,18 +343,19 @@ public final class JavaLibraryHelper {
   }
 
   private void addDepsToAttributes(JavaTargetAttributes.Builder attributes) {
-    JavaCompilationArgsProvider argsProvider = JavaCompilationArgsProvider.merge(deps);
+    JavaCompilationArgsProvider mergedDeps = JavaCompilationArgsProvider.merge(deps);
+    JavaCompilationArgsProvider mergedRuntimeDeps = JavaCompilationArgsProvider.merge(runtimeDeps);
 
     if (isStrict()) {
-      attributes.addDirectJars(argsProvider.getDirectCompileTimeJars());
+      attributes.addDirectJars(mergedDeps.getDirectCompileTimeJars());
     }
 
-    attributes.addCompileTimeClassPathEntries(argsProvider.getTransitiveCompileTimeJars());
-    attributes.addRuntimeClassPathEntries(argsProvider.getRuntimeJars());
-    attributes.addInstrumentationMetadataEntries(argsProvider.getInstrumentationMetadata());
+    attributes.addCompileTimeClassPathEntries(mergedDeps.getTransitiveCompileTimeJars());
+    attributes.addRuntimeClassPathEntries(mergedRuntimeDeps.getRuntimeJars());
+    attributes.addRuntimeClassPathEntries(mergedDeps.getRuntimeJars());
   }
 
   private boolean isStrict() {
-    return strictDepsMode != OFF;
+    return strictDepsMode != StrictDepsMode.OFF;
   }
 }

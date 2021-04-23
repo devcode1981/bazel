@@ -33,9 +33,14 @@ filegroup(
     srcs = ["collect_coverage.sh"],
 )
 
-filegroup(
+alias(
     name = "coverage_report_generator",
-    srcs = ["@bazel_tools//tools/test/CoverageOutputGenerator/java/com/google/devtools/coverageoutputgenerator:Main"],
+    actual = "@remote_coverage_tools//:coverage_report_generator",
+)
+
+alias(
+    name = "lcov_merger",
+    actual = "@remote_coverage_tools//:lcov_merger",
 )
 
 filegroup(
@@ -47,5 +52,16 @@ filegroup(
     srcs = select({
         "@bazel_tools//src/conditions:windows": ["tw.exe"],
         "//conditions:default": ["tw"],
+    }),
+)
+
+filegroup(
+    name = "xml_writer",
+    # "xml" is the Windows-native test XML writer. It has a short name because
+    # paths have short limits on Windows.
+    # On other platforms this binary is a no-op.
+    srcs = select({
+        "@bazel_tools//src/conditions:windows": ["xml.exe"],
+        "//conditions:default": ["xml"],
     }),
 )

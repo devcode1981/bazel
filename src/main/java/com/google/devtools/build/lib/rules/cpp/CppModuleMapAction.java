@@ -24,6 +24,8 @@ import com.google.devtools.build.lib.actions.ActionOwner;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Artifact.ArtifactExpander;
 import com.google.devtools.build.lib.analysis.actions.AbstractFileWriteAction;
+import com.google.devtools.build.lib.analysis.actions.DeterministicWriter;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.util.Fingerprint;
@@ -36,6 +38,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
+import javax.annotation.Nullable;
 
 /**
  * Creates C++ module map artifact genfiles. These are then passed to Clang to do dependency
@@ -62,6 +65,7 @@ public final class CppModuleMapAction extends AbstractFileWriteAction {
   private final ImmutableList<Artifact> publicHeaders;
   private final ImmutableList<CppModuleMap> dependencies;
   private final ImmutableList<PathFragment> additionalExportedHeaders;
+  private final ImmutableList<Artifact> separateModuleHeaders;
   private final boolean compiledModule;
   private final boolean generateSubmodules;
   private final boolean externDependencies;
@@ -73,24 +77,29 @@ public final class CppModuleMapAction extends AbstractFileWriteAction {
       Iterable<Artifact> publicHeaders,
       Iterable<CppModuleMap> dependencies,
       Iterable<PathFragment> additionalExportedHeaders,
+      Iterable<Artifact> separateModuleHeaders,
       boolean compiledModule,
       boolean moduleMapHomeIsCwd,
       boolean generateSubmodules,
       boolean externDependencies) {
     super(
         owner,
-        ImmutableList.<Artifact>builder()
+        NestedSetBuilder.<Artifact>stableOrder()
             .addAll(Iterables.filter(privateHeaders, Artifact::isTreeArtifact))
             .addAll(Iterables.filter(publicHeaders, Artifact::isTreeArtifact))
             .build(),
         cppModuleMap.getArtifact(),
-        /*makeExecutable=*/ false);
+        // In theory, module maps should not be executable but, in practice, we don't care. As
+        // 'executable' is the default (see ActionMetadataHandler.setPathReadOnlyAndExecutable()),
+        // we want to avoid the extra file operation of making this file non-executable.
+        /*makeExecutable=*/ true);
     this.cppModuleMap = cppModuleMap;
     this.moduleMapHomeIsCwd = moduleMapHomeIsCwd;
     this.privateHeaders = ImmutableList.copyOf(privateHeaders);
     this.publicHeaders = ImmutableList.copyOf(publicHeaders);
     this.dependencies = ImmutableList.copyOf(dependencies);
     this.additionalExportedHeaders = ImmutableList.copyOf(additionalExportedHeaders);
+    this.separateModuleHeaders = ImmutableList.copyOf(separateModuleHeaders);
     this.compiledModule = compiledModule;
     this.generateSubmodules = generateSubmodules;
     this.externDependencies = externDependencies;
@@ -106,10 +115,13 @@ public final class CppModuleMapAction extends AbstractFileWriteAction {
         PathFragment fragment = cppModuleMap.getArtifact().getExecPath();
         int segmentsToExecPath = fragment.segmentCount() - 1;
         Optional<Artifact> umbrellaHeader = cppModuleMap.getUmbrellaHeader();
+        String leadingPeriods = moduleMapHomeIsCwd ? "" : Strings.repeat("../", segmentsToExecPath);
+
+        Iterable<Artifact> separateModuleHdrs =
+            expandedHeaders(artifactExpander, separateModuleHeaders);
 
         // For details about the different header types, see:
         // http://clang.llvm.org/docs/Modules.html#header-declaration
-        String leadingPeriods = moduleMapHomeIsCwd ? "" : Strings.repeat("../", segmentsToExecPath);
         content.append("module \"").append(cppModuleMap.getName()).append("\" {\n");
         content.append("  export *\n");
 
@@ -144,6 +156,16 @@ public final class CppModuleMapAction extends AbstractFileWriteAction {
                 deduper,
                 /*isUmbrellaHeader*/ false);
           }
+          for (Artifact artifact : separateModuleHdrs) {
+            appendHeader(
+                content,
+                "",
+                artifact.getExecPath(),
+                leadingPeriods,
+                /*canCompile=*/ false,
+                deduper,
+                /*isUmbrellaHeader*/ false);
+          }
           for (PathFragment additionalExportedHeader : additionalExportedHeaders) {
             appendHeader(
                 content,
@@ -158,7 +180,30 @@ public final class CppModuleMapAction extends AbstractFileWriteAction {
         for (CppModuleMap dep : dependencies) {
           content.append("  use \"").append(dep.getName()).append("\"\n");
         }
+
+        if (!Iterables.isEmpty(separateModuleHdrs)) {
+          String separateName = cppModuleMap.getName() + CppModuleMap.SEPARATE_MODULE_SUFFIX;
+          content.append("  use \"").append(separateName).append("\"\n");
+          content.append("}\n");
+          content.append("module \"").append(separateName).append("\" {\n");
+          content.append("  export *\n");
+          deduper = new HashSet<>();
+          for (Artifact artifact : separateModuleHdrs) {
+            appendHeader(
+                content,
+                "",
+                artifact.getExecPath(),
+                leadingPeriods,
+                /*canCompile=*/ true,
+                deduper,
+                /*isUmbrellaHeader*/ false);
+          }
+          for (CppModuleMap dep : dependencies) {
+            content.append("  use \"").append(dep.getName()).append("\"\n");
+          }
+        }
         content.append("}");
+
         if (externDependencies) {
           for (CppModuleMap dep : dependencies) {
             content
@@ -228,7 +273,10 @@ public final class CppModuleMapAction extends AbstractFileWriteAction {
   }
 
   @Override
-  protected void computeKey(ActionKeyContext actionKeyContext, Fingerprint fp) {
+  protected void computeKey(
+      ActionKeyContext actionKeyContext,
+      @Nullable Artifact.ArtifactExpander artifactExpander,
+      Fingerprint fp) {
     fp.addString(GUID);
     fp.addInt(privateHeaders.size());
     for (Artifact artifact : privateHeaders) {
@@ -236,6 +284,10 @@ public final class CppModuleMapAction extends AbstractFileWriteAction {
     }
     fp.addInt(publicHeaders.size());
     for (Artifact artifact : publicHeaders) {
+      fp.addPath(artifact.getExecPath());
+    }
+    fp.addInt(separateModuleHeaders.size());
+    for (Artifact artifact : separateModuleHeaders) {
       fp.addPath(artifact.getExecPath());
     }
     fp.addInt(dependencies.size());
@@ -264,18 +316,23 @@ public final class CppModuleMapAction extends AbstractFileWriteAction {
   }
 
   @VisibleForTesting
-  public Collection<Artifact> getPublicHeaders() {
+  public ImmutableList<Artifact> getPublicHeaders() {
     return publicHeaders;
   }
 
   @VisibleForTesting
-  public Collection<Artifact> getPrivateHeaders() {
+  public ImmutableList<Artifact> getPrivateHeaders() {
     return privateHeaders;
   }
 
   @VisibleForTesting
   public ImmutableList<PathFragment> getAdditionalExportedHeaders() {
     return additionalExportedHeaders;
+  }
+
+  @VisibleForTesting
+  public ImmutableList<Artifact> getSeparateModuleHeaders() {
+    return separateModuleHeaders;
   }
 
   @VisibleForTesting

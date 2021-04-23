@@ -14,7 +14,7 @@
 package com.google.devtools.build.skyframe;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
 import com.google.common.collect.ImmutableList;
 import org.junit.Test;
@@ -28,35 +28,27 @@ public class CycleDeduperTest {
   private CycleDeduper<String> cycleDeduper = new CycleDeduper<>();
 
   @Test
-  public void simple() throws Exception {
-    assertThat(cycleDeduper.seen(ImmutableList.of("a", "b"))).isTrue();
-    assertThat(cycleDeduper.seen(ImmutableList.of("a", "b"))).isFalse();
-    assertThat(cycleDeduper.seen(ImmutableList.of("b", "a"))).isFalse();
+  public void simple() {
+    assertThat(cycleDeduper.alreadySeen(ImmutableList.of("a", "b"))).isFalse();
+    assertThat(cycleDeduper.alreadySeen(ImmutableList.of("a", "b"))).isTrue();
+    assertThat(cycleDeduper.alreadySeen(ImmutableList.of("b", "a"))).isTrue();
 
-    assertThat(cycleDeduper.seen(ImmutableList.of("a", "b", "c"))).isTrue();
-    assertThat(cycleDeduper.seen(ImmutableList.of("b", "c", "a"))).isFalse();
-    assertThat(cycleDeduper.seen(ImmutableList.of("c", "a", "b"))).isFalse();
-    assertThat(cycleDeduper.seen(ImmutableList.of("b", "a", "c"))).isTrue();
-    assertThat(cycleDeduper.seen(ImmutableList.of("c", "b", "a"))).isFalse();
+    assertThat(cycleDeduper.alreadySeen(ImmutableList.of("a", "b", "c"))).isFalse();
+    assertThat(cycleDeduper.alreadySeen(ImmutableList.of("b", "c", "a"))).isTrue();
+    assertThat(cycleDeduper.alreadySeen(ImmutableList.of("c", "a", "b"))).isTrue();
+    assertThat(cycleDeduper.alreadySeen(ImmutableList.of("b", "a", "c"))).isFalse();
+    assertThat(cycleDeduper.alreadySeen(ImmutableList.of("c", "b", "a"))).isTrue();
   }
 
   @Test
-  public void badCycle_Empty() throws Exception {
-    try {
-      cycleDeduper.seen(ImmutableList.<String>of());
-      fail();
-    } catch (IllegalStateException e) {
-      // Expected.
-    }
+  public void badCycle_empty() {
+    assertThrows(IllegalStateException.class, () -> cycleDeduper.alreadySeen(ImmutableList.of()));
   }
 
   @Test
-  public void badCycle_NonUniqueMembers() throws Exception {
-    try {
-      cycleDeduper.seen(ImmutableList.<String>of("a", "b", "a"));
-      fail();
-    } catch (IllegalStateException e) {
-      // Expected.
-    }
+  public void badCycle_nonUniqueMembers() {
+    assertThrows(
+        IllegalStateException.class,
+        () -> cycleDeduper.alreadySeen(ImmutableList.of("a", "b", "a")));
   }
 }

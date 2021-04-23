@@ -26,9 +26,11 @@ import com.google.devtools.common.options.OptionEffectTag;
 import com.google.devtools.common.options.OptionsBase;
 import com.google.devtools.common.options.OptionsParser;
 import com.google.devtools.common.options.ShellQuotedParamsFilePreProcessor;
+import java.io.IOException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.ExecutionException;
 import java.util.logging.Logger;
 
 /** Compiles resources using aapt2 and archives them to zip. */
@@ -95,16 +97,17 @@ public class CompileLibraryResourcesAction {
               + " This value is required for processing data binding."
     )
     public Path dataBindingInfoOut;
-
   }
 
   static final Logger logger = Logger.getLogger(CompileLibraryResourcesAction.class.getName());
 
   public static void main(String[] args) throws Exception {
     OptionsParser optionsParser =
-        OptionsParser.newOptionsParser(Options.class, Aapt2ConfigOptions.class);
-    optionsParser.enableParamsFileSupport(
-        new ShellQuotedParamsFilePreProcessor(FileSystems.getDefault()));
+        OptionsParser.builder()
+            .optionsClasses(
+                Options.class, Aapt2ConfigOptions.class, ResourceProcessorCommonOptions.class)
+            .argsPreProcessor(new ShellQuotedParamsFilePreProcessor(FileSystems.getDefault()))
+            .build();
     optionsParser.parseAndExitUponError(args);
 
     Options options = optionsParser.getOptions(Options.class);
@@ -133,9 +136,15 @@ public class CompileLibraryResourcesAction {
           .resources
           .toData(options.manifest)
           .processDataBindings(
-              options.dataBindingInfoOut, options.packagePath, databindingResourcesRoot)
+              options.dataBindingInfoOut,
+              options.packagePath,
+              databindingResourcesRoot,
+              aapt2Options.useDataBindingAndroidX)
           .compile(compiler, compiledResources)
           .copyResourcesZipTo(options.output);
+    } catch (IOException | ExecutionException | InterruptedException e) {
+      logger.log(java.util.logging.Level.SEVERE, "Unexpected", e);
+      throw e;
     }
   }
 }

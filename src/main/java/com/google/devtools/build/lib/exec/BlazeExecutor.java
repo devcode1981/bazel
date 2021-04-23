@@ -13,25 +13,19 @@
 // limitations under the License.
 package com.google.devtools.build.lib.exec;
 
-import com.google.common.base.Preconditions;
-import com.google.common.eventbus.EventBus;
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import com.google.devtools.build.lib.actions.ActionContext;
 import com.google.devtools.build.lib.actions.ActionExecutionContext.ShowSubcommands;
 import com.google.devtools.build.lib.actions.Executor;
-import com.google.devtools.build.lib.actions.ExecutorInitException;
+import com.google.devtools.build.lib.bugreport.BugReporter;
 import com.google.devtools.build.lib.clock.Clock;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
-import com.google.devtools.build.lib.events.Event;
-import com.google.devtools.build.lib.events.EventHandler;
-import com.google.devtools.build.lib.events.ExtendedEventHandler;
 import com.google.devtools.build.lib.events.Reporter;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.common.options.OptionsProvider;
-import java.util.Map;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
+import javax.annotation.Nullable;
 
 /**
  * The Executor class provides a dynamic abstraction of the various actual primitive system
@@ -44,17 +38,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @ThreadSafe
 public final class BlazeExecutor implements Executor {
 
-  private final boolean verboseFailures;
   private final ShowSubcommands showSubcommands;
   private final FileSystem fileSystem;
   private final Path execRoot;
-  private final Reporter reporter;
-  private final EventBus eventBus;
   private final Clock clock;
+  private final BugReporter bugReporter;
   private final OptionsProvider options;
-  private AtomicBoolean inExecutionPhase;
-
-  private final Map<Class<? extends ActionContext>, ActionContext> contextMap;
+  private final ActionContext.ActionContextRegistry actionContextRegistry;
 
   /**
    * Constructs an Executor, bound to a specified output base path, and which will use the specified
@@ -71,34 +61,27 @@ public final class BlazeExecutor implements Executor {
       FileSystem fileSystem,
       Path execRoot,
       Reporter reporter,
-      EventBus eventBus,
       Clock clock,
+      BugReporter bugReporter,
       OptionsProvider options,
-      SpawnActionContextMaps spawnActionContextMaps,
-      Iterable<ActionContextProvider> contextProviders)
-      throws ExecutorInitException {
-    ExecutionOptions executionOptions = options.getOptions(ExecutionOptions.class);
-    this.verboseFailures = executionOptions.verboseFailures;
+      ModuleActionContextRegistry actionContextRegistry,
+      SpawnStrategyRegistry spawnStrategyRegistry) {
+    ExecutionOptions executionOptions = checkNotNull(options.getOptions(ExecutionOptions.class));
     this.showSubcommands = executionOptions.showSubcommands;
     this.fileSystem = fileSystem;
     this.execRoot = execRoot;
-    this.reporter = reporter;
-    this.eventBus = eventBus;
     this.clock = clock;
+    this.bugReporter = bugReporter;
     this.options = options;
-    this.inExecutionPhase = new AtomicBoolean(false);
-    this.contextMap = spawnActionContextMaps.contextMap();
+    this.actionContextRegistry = actionContextRegistry;
 
     if (executionOptions.debugPrintActionContexts) {
-      spawnActionContextMaps.debugPrintSpawnActionContextMaps(reporter);
+      spawnStrategyRegistry.writeSpawnStrategiesTo(reporter);
+      actionContextRegistry.writeActionContextsTo(reporter);
     }
 
-    for (ActionContextProvider factory : contextProviders) {
-      factory.executorCreated(spawnActionContextMaps.allContexts());
-    }
-    for (ActionContext context : spawnActionContextMaps.allContexts()) {
-      context.executorCreated(spawnActionContextMaps.allContexts());
-    }
+    actionContextRegistry.notifyUsed();
+    spawnStrategyRegistry.notifyUsed(actionContextRegistry);
   }
 
   @Override
@@ -112,18 +95,13 @@ public final class BlazeExecutor implements Executor {
   }
 
   @Override
-  public ExtendedEventHandler getEventHandler() {
-    return reporter;
-  }
-
-  @Override
-  public EventBus getEventBus() {
-    return eventBus;
-  }
-
-  @Override
   public Clock getClock() {
     return clock;
+  }
+
+  @Override
+  public BugReporter getBugReporter() {
+    return bugReporter;
   }
 
   @Override
@@ -131,55 +109,10 @@ public final class BlazeExecutor implements Executor {
     return showSubcommands;
   }
 
-  /**
-   * This method is called before the start of the execution phase of each
-   * build request.
-   */
-  public void executionPhaseStarting() {
-    Preconditions.checkState(!inExecutionPhase.getAndSet(true));
-  }
-
-  /**
-   * This method is called after the end of the execution phase of each build
-   * request (even if there was an interrupt).
-   */
-  public void executionPhaseEnding() {
-    if (!inExecutionPhase.get()) {
-      return;
-    }
-    inExecutionPhase.set(false);
-  }
-
-  public static void shutdownHelperPool(EventHandler reporter, ExecutorService pool,
-      String name) {
-    pool.shutdownNow();
-
-    boolean interrupted = false;
-    while (true) {
-      try {
-        if (!pool.awaitTermination(10, TimeUnit.SECONDS)) {
-          reporter.handle(Event.warn(name + " threadpool shutdown took greater than ten seconds"));
-        }
-        break;
-      } catch (InterruptedException e) {
-        interrupted = true;
-      }
-    }
-
-    if (interrupted) {
-      Thread.currentThread().interrupt();
-    }
-  }
-
   @Override
-  public <T extends ActionContext> T getContext(Class<? extends T> type) {
-    return type.cast(contextMap.get(type));
-  }
-
-  /** Returns true iff the --verbose_failures option was enabled. */
-  @Override
-  public boolean getVerboseFailures() {
-    return verboseFailures;
+  @Nullable
+  public <T extends ActionContext> T getContext(Class<T> type) {
+    return actionContextRegistry.getContext(type);
   }
 
   /** Returns the options associated with the execution. */

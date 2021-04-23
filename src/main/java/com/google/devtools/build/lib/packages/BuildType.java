@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 package com.google.devtools.build.lib.packages;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -25,29 +24,28 @@ import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.packages.License.DistributionType;
 import com.google.devtools.build.lib.packages.License.LicenseParsingException;
+import com.google.devtools.build.lib.packages.Type.ConversionException;
+import com.google.devtools.build.lib.packages.Type.DictType;
+import com.google.devtools.build.lib.packages.Type.LabelClass;
+import com.google.devtools.build.lib.packages.Type.ListType;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
-import com.google.devtools.build.lib.skylarkinterface.SkylarkPrinter;
-import com.google.devtools.build.lib.skylarkinterface.SkylarkValue;
-import com.google.devtools.build.lib.syntax.EvalException;
-import com.google.devtools.build.lib.syntax.Printer;
-import com.google.devtools.build.lib.syntax.Printer.BasePrinter;
-import com.google.devtools.build.lib.syntax.Runtime;
-import com.google.devtools.build.lib.syntax.SelectorValue;
-import com.google.devtools.build.lib.syntax.Type;
-import com.google.devtools.build.lib.syntax.Type.ConversionException;
-import com.google.devtools.build.lib.syntax.Type.DictType;
-import com.google.devtools.build.lib.syntax.Type.LabelClass;
-import com.google.devtools.build.lib.syntax.Type.ListType;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import javax.annotation.Nullable;
+import net.starlark.java.eval.EvalException;
+import net.starlark.java.eval.Printer;
+import net.starlark.java.eval.Starlark;
+import net.starlark.java.eval.StarlarkValue;
 
 /**
- * Collection of data types that are specific to building things, i.e. not inherent to Skylark.
+ * Collection of data types that are specific to building things, i.e. not inherent to Starlark.
+ *
+ * <p>BEFORE YOU ADD A NEW TYPE: See javadoc in {@link Type}.
  */
 public final class BuildType {
 
@@ -148,10 +146,12 @@ public final class BuildType {
   public static <T> Object selectableConvert(
       Type<T> type, Object x, Object what, LabelConversionContext context)
       throws ConversionException {
-    if (x instanceof com.google.devtools.build.lib.syntax.SelectorList) {
+    if (x instanceof com.google.devtools.build.lib.packages.SelectorList) {
       return new SelectorList<T>(
-          ((com.google.devtools.build.lib.syntax.SelectorList) x).getElements(),
-          what, context, type);
+          ((com.google.devtools.build.lib.packages.SelectorList) x).getElements(),
+          what,
+          context,
+          type);
     } else {
       return type.convert(x, what, context);
     }
@@ -200,19 +200,42 @@ public final class BuildType {
   public static class LabelConversionContext {
     private final Label label;
     private final ImmutableMap<RepositoryName, RepositoryName> repositoryMapping;
+    private final HashMap<String, Label> convertedLabelsInPackage;
 
     public LabelConversionContext(
-        Label label, ImmutableMap<RepositoryName, RepositoryName> repositoryMapping) {
+        Label label,
+        ImmutableMap<RepositoryName, RepositoryName> repositoryMapping,
+        HashMap<String, Label> convertedLabelsInPackage) {
       this.label = label;
       this.repositoryMapping = repositoryMapping;
+      this.convertedLabelsInPackage = convertedLabelsInPackage;
     }
 
     public Label getLabel() {
       return label;
     }
 
+    /** Returns the Label corresponding to the input, using the current conversion context. */
+    public Label convert(String input) throws LabelSyntaxException {
+      // Optimization: First check the package-local map, avoiding Label validation, Label
+      // construction, and global Interner lookup. This approach tends to be very profitable
+      // overall, since it's common for the targets in a single package to have duplicate
+      // label-strings across all their attribute values.
+      Label label = convertedLabelsInPackage.get(input);
+      if (label == null) {
+        label = getLabel().getRelativeWithRemapping(input, getRepositoryMapping());
+        convertedLabelsInPackage.put(input, label);
+      }
+
+      return label;
+    }
+
     public ImmutableMap<RepositoryName, RepositoryName> getRepositoryMapping() {
       return repositoryMapping;
+    }
+
+    HashMap<String, Label> getConvertedLabelsInPackage() {
+      return convertedLabelsInPackage;
     }
 
     @Override
@@ -263,20 +286,20 @@ public final class BuildType {
         if (!(x instanceof String)) {
           throw new ConversionException(Type.STRING, x, what);
         }
+        // This String here is about to be parsed into a Label. We do not use STRING.convert since
+        // there is absolutely no motivation to intern the String; the Label we create will be
+        // storing a reference to different string (a substring in fact).
+        String str = (String) x;
         // TODO(b/110101445): check if context is ever actually null
         if (context == null) {
           return Label.parseAbsolute(
-              (String) x, /* defaultToMain= */ false, /* repositoryMapping= */ ImmutableMap.of());
+              str, /* defaultToMain= */ false, /* repositoryMapping= */ ImmutableMap.of());
           // TODO(b/110308446): remove instances of context being a Label
         } else if (context instanceof Label) {
-          return ((Label) context)
-              .getRelativeWithRemapping(STRING.convert(x, what, context), ImmutableMap.of());
+          return ((Label) context).getRelativeWithRemapping(str, ImmutableMap.of());
         } else if (context instanceof LabelConversionContext) {
           LabelConversionContext labelConversionContext = (LabelConversionContext) context;
-          return labelConversionContext
-              .getLabel()
-              .getRelativeWithRemapping(
-                  STRING.convert(x, what, context), labelConversionContext.getRepositoryMapping());
+          return labelConversionContext.convert(str);
         } else {
           throw new ConversionException("invalid context '" + context + "' in " + what);
         }
@@ -289,7 +312,7 @@ public final class BuildType {
 
   /**
    * Dictionary type specialized for label keys, which is able to detect collisions caused by the
-   * fact that labels have multiple equivalent representations in Skylark code.
+   * fact that labels have multiple equivalent representations in Starlark code.
    */
   private static class LabelKeyedDictType<ValueT> extends DictType<Label, ValueT> {
     private LabelKeyedDictType(Type<ValueT> valueType) {
@@ -308,7 +331,7 @@ public final class BuildType {
     public Map<Label, ValueT> convert(Object x, Object what, Object context)
         throws ConversionException {
       Map<Label, ValueT> result = super.convert(x, what, context);
-      // The input is known to be a map because super.convert succeded; otherwise, a
+      // The input is known to be a map because super.convert succeeded; otherwise, a
       // ConversionException would have been thrown.
       Map<?, ?> input = (Map<?, ?>) x;
 
@@ -323,7 +346,7 @@ public final class BuildType {
         convertedFrom.computeIfAbsent(label, k -> new ArrayList<Object>());
         convertedFrom.get(label).add(original);
       }
-      BasePrinter errorMessage = Printer.getPrinter();
+      Printer errorMessage = new Printer();
       errorMessage.append("duplicate labels");
       if (what != null) {
         errorMessage.append(" in ").append(what.toString());
@@ -488,11 +511,13 @@ public final class BuildType {
   }
 
   /**
-   * Holds an ordered collection of {@link Selector}s. This is used to support
-   * {@code attr = rawValue + select(...) + select(...) + ..."} syntax. For consistency's
-   * sake, raw values are stored as selects with only a default condition.
+   * Holds an ordered collection of {@link Selector}s. This is used to support {@code attr =
+   * rawValue + select(...) + select(...) + ..."} syntax. For consistency's sake, raw values are
+   * stored as selects with only a default condition.
    */
-  public static final class SelectorList<T> implements SkylarkValue {
+  // TODO(adonovan): merge with packages.Selector{List,Value}.
+  // We don't need three classes for the same concept.
+  public static final class SelectorList<T> implements StarlarkValue {
     private final Type<T> originalType;
     private final List<Selector<T>> elements;
 
@@ -557,19 +582,19 @@ public final class BuildType {
 
     @Override
     public String toString() {
-      return Printer.repr(this);
+      return Starlark.repr(this);
     }
 
     @Override
-    public void repr(SkylarkPrinter printer) {
-      // Convert to a lib.syntax.SelectorList to guarantee consistency with callers that serialize
+    public void repr(Printer printer) {
+      // Convert to a lib.packages.SelectorList to guarantee consistency with callers that serialize
       // directly on that type.
       List<SelectorValue> selectorValueList = new ArrayList<>();
       for (Selector<T> element : elements) {
         selectorValueList.add(new SelectorValue(element.getEntries(), element.getNoMatchError()));
       }
       try {
-        printer.repr(com.google.devtools.build.lib.syntax.SelectorList.of(null, selectorValueList));
+        printer.repr(com.google.devtools.build.lib.packages.SelectorList.of(selectorValueList));
       } catch (EvalException e) {
         throw new IllegalStateException("this list should have been validated on creation");
       }
@@ -623,7 +648,7 @@ public final class BuildType {
         if (key.equals(DEFAULT_CONDITION_LABEL)) {
           foundDefaultCondition = true;
         }
-        if (entry.getValue() == Runtime.NONE) {
+        if (entry.getValue() == Starlark.NONE) {
           // { "//condition": None } is the same as not setting the value.
           result.put(key, originalType.getDefaultValue());
           defaultValuesBuilder.add(key);
@@ -724,12 +749,10 @@ public final class BuildType {
   }
 
   /**
-   * Tristate values are needed for cases where user intent matters.
-   *
-   * <p>Tristate values are not explicitly interchangeable with booleans and are
-   * handled explicitly as TriStates. Prefer Booleans with default values where
-   * possible.  The main use case for TriState values is when a Rule's behavior
-   * must interact with a Flag value in a complicated way.</p>
+   * A TriState value is like a boolean attribute whose default value may be distinguished from
+   * either of the possible explicitly assigned values. TriState attributes may be assigned the
+   * values 0 (NO), 1 (YES), or None (AUTO). TriState is deprecated; use attr.int(values=[-1, 0, 1])
+   * instead.
    */
   private static class TriStateType extends Type<TriState> {
     @Override
@@ -751,7 +774,6 @@ public final class BuildType {
       return "tristate";
     }
 
-    // Like BooleanType, this must handle integers as well.
     @Override
     public TriState convert(Object x, Object what, Object context)
         throws ConversionException {
@@ -759,9 +781,14 @@ public final class BuildType {
         return (TriState) x;
       }
       if (x instanceof Boolean) {
+        // TODO(adonovan): re-enable this under flag control; see b/116691720.
+        // throw new ConversionException(this, x,
+        //   "rule attribute (tristate is being replaced by "
+        //       + "attr.int(values=[-1, 0, 1]), and it no longer accepts Boolean values; "
+        //       + "instead, use 0 or 1, or None for the default)");
         return ((Boolean) x) ? TriState.YES : TriState.NO;
       }
-      Integer xAsInteger = INTEGER.convert(x, what, context);
+      int xAsInteger = INTEGER.convert(x, what, context).toIntUnchecked();
       if (xAsInteger == -1) {
         return TriState.AUTO;
       } else if (xAsInteger == 1) {

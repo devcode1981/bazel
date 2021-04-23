@@ -17,7 +17,6 @@ package com.google.devtools.build.lib.skyframe;
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.devtools.build.skyframe.EvaluationResultSubjectFactory.assertThatEvaluationResult;
 
-import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -30,22 +29,20 @@ import com.google.devtools.build.lib.analysis.util.AnalysisMock;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.events.NullEventHandler;
+import com.google.devtools.build.lib.io.FileSymlinkCycleUniquenessFunction;
 import com.google.devtools.build.lib.packages.BuildFileName;
 import com.google.devtools.build.lib.packages.BuildFileNotFoundException;
-import com.google.devtools.build.lib.packages.PackageFactory;
-import com.google.devtools.build.lib.packages.PackageFactory.EnvironmentExtension;
 import com.google.devtools.build.lib.packages.RuleClassProvider;
+import com.google.devtools.build.lib.packages.WorkspaceFileValue;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
 import com.google.devtools.build.lib.rules.repository.LocalRepositoryFunction;
 import com.google.devtools.build.lib.rules.repository.LocalRepositoryRule;
 import com.google.devtools.build.lib.rules.repository.RepositoryDelegatorFunction;
 import com.google.devtools.build.lib.rules.repository.RepositoryFunction;
-import com.google.devtools.build.lib.rules.repository.RepositoryLoaderFunction;
 import com.google.devtools.build.lib.skyframe.ExternalFilesHelper.ExternalFileAction;
 import com.google.devtools.build.lib.skyframe.PackageLookupFunction.CrossRepositoryLabelViolationStrategy;
 import com.google.devtools.build.lib.skyframe.PackageLookupValue.ErrorReason;
 import com.google.devtools.build.lib.skyframe.PackageLookupValue.IncorrectRepositoryReferencePackageLookupValue;
-import com.google.devtools.build.lib.syntax.SkylarkSemantics;
 import com.google.devtools.build.lib.testutil.FoundationTestCase;
 import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
@@ -53,6 +50,7 @@ import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.RootedPath;
+import com.google.devtools.build.lib.vfs.UnixGlob;
 import com.google.devtools.build.skyframe.EvaluationContext;
 import com.google.devtools.build.skyframe.EvaluationResult;
 import com.google.devtools.build.skyframe.InMemoryMemoizingEvaluator;
@@ -67,9 +65,11 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import net.starlark.java.eval.StarlarkSemantics;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -84,8 +84,7 @@ public abstract class PackageLookupFunctionTest extends FoundationTestCase {
   private SequentialBuildDriver driver;
   private RecordingDifferencer differencer;
   private Path emptyPackagePath;
-  private static final String ADDITIONAL_BLACKLISTED_PACKAGE_PREFIXES_FILE_PATH_STRING =
-      "config/blacklisted.txt";
+  private static final String IGNORED_PACKAGE_PREFIXES_FILE_PATH_STRING = "config/ignored.txt";
 
   protected abstract CrossRepositoryLabelViolationStrategy crossRepositoryLabelViolationStrategy();
 
@@ -117,40 +116,44 @@ public abstract class PackageLookupFunctionTest extends FoundationTestCase {
         new PackageLookupFunction(
             deletedPackages,
             crossRepositoryLabelViolationStrategy(),
-            BazelSkyframeExecutorConstants.BUILD_FILES_BY_PRIORITY));
+            BazelSkyframeExecutorConstants.BUILD_FILES_BY_PRIORITY,
+            BazelSkyframeExecutorConstants.EXTERNAL_PACKAGE_HELPER));
     skyFunctions.put(
-        SkyFunctions.PACKAGE,
-        new PackageFunction(null, null, null, null, null, null, null));
+        SkyFunctions.PACKAGE, new PackageFunction(null, null, null, null, null, null, null));
     skyFunctions.put(
         FileStateValue.FILE_STATE,
         new FileStateFunction(
-            new AtomicReference<TimestampGranularityMonitor>(), externalFilesHelper));
+            new AtomicReference<TimestampGranularityMonitor>(),
+            new AtomicReference<>(UnixGlob.DEFAULT_SYSCALLS),
+            externalFilesHelper));
     skyFunctions.put(FileValue.FILE, new FileFunction(pkgLocator));
     skyFunctions.put(SkyFunctions.DIRECTORY_LISTING, new DirectoryListingFunction());
     skyFunctions.put(
         SkyFunctions.DIRECTORY_LISTING_STATE,
-        new DirectoryListingStateFunction(externalFilesHelper));
-    skyFunctions.put(SkyFunctions.BLACKLISTED_PACKAGE_PREFIXES,
-        new BlacklistedPackagePrefixesFunction(
-            /*hardcodedBlacklistedPackagePrefixes=*/ ImmutableSet.of(),
-            PathFragment.create(ADDITIONAL_BLACKLISTED_PACKAGE_PREFIXES_FILE_PATH_STRING)));
-    RuleClassProvider ruleClassProvider = analysisMock.createRuleClassProvider();
-    skyFunctions.put(SkyFunctions.WORKSPACE_AST, new WorkspaceASTFunction(ruleClassProvider));
+        new DirectoryListingStateFunction(
+            externalFilesHelper, new AtomicReference<>(UnixGlob.DEFAULT_SYSCALLS)));
     skyFunctions.put(
-        SkyFunctions.WORKSPACE_FILE,
+        SkyFunctions.IGNORED_PACKAGE_PREFIXES,
+        new IgnoredPackagePrefixesFunction(
+            PathFragment.create(IGNORED_PACKAGE_PREFIXES_FILE_PATH_STRING)));
+    RuleClassProvider ruleClassProvider = analysisMock.createRuleClassProvider();
+    skyFunctions.put(
+        WorkspaceFileValue.WORKSPACE_FILE,
         new WorkspaceFileFunction(
             ruleClassProvider,
             analysisMock
                 .getPackageFactoryBuilderForTesting(directories)
-                .setEnvironmentExtensions(
-                    ImmutableList.<EnvironmentExtension>of(
-                        new PackageFactory.EmptyEnvironmentExtension()))
-                .build(ruleClassProvider),
-            directories));
-    skyFunctions.put(SkyFunctions.EXTERNAL_PACKAGE, new ExternalPackageFunction());
-    skyFunctions.put(SkyFunctions.LOCAL_REPOSITORY_LOOKUP, new LocalRepositoryLookupFunction());
+                .build(ruleClassProvider, fileSystem),
+            directories,
+            /*bzlLoadFunctionForInlining=*/ null));
     skyFunctions.put(
-        SkyFunctions.FILE_SYMLINK_CYCLE_UNIQUENESS, new FileSymlinkCycleUniquenessFunction());
+        SkyFunctions.EXTERNAL_PACKAGE,
+        new ExternalPackageFunction(BazelSkyframeExecutorConstants.EXTERNAL_PACKAGE_HELPER));
+    skyFunctions.put(
+        SkyFunctions.LOCAL_REPOSITORY_LOOKUP,
+        new LocalRepositoryLookupFunction(BazelSkyframeExecutorConstants.EXTERNAL_PACKAGE_HELPER));
+    skyFunctions.put(
+        FileSymlinkCycleUniquenessFunction.NAME, new FileSymlinkCycleUniquenessFunction());
 
     ImmutableMap<String, RepositoryFunction> repositoryHandlers =
         ImmutableMap.of(
@@ -158,21 +161,26 @@ public abstract class PackageLookupFunctionTest extends FoundationTestCase {
     skyFunctions.put(
         SkyFunctions.REPOSITORY_DIRECTORY,
         new RepositoryDelegatorFunction(
-            repositoryHandlers, null, new AtomicBoolean(true), ImmutableMap::of, directories));
-    skyFunctions.put(SkyFunctions.REPOSITORY, new RepositoryLoaderFunction());
+            repositoryHandlers,
+            null,
+            new AtomicBoolean(true),
+            ImmutableMap::of,
+            directories,
+            ManagedDirectoriesKnowledge.NO_MANAGED_DIRECTORIES,
+            BazelSkyframeExecutorConstants.EXTERNAL_PACKAGE_HELPER));
 
     differencer = new SequencedRecordingDifferencer();
     evaluator = new InMemoryMemoizingEvaluator(skyFunctions, differencer);
     driver = new SequentialBuildDriver(evaluator);
     PrecomputedValue.BUILD_ID.set(differencer, UUID.randomUUID());
     PrecomputedValue.PATH_PACKAGE_LOCATOR.set(differencer, pkgLocator.get());
-    PrecomputedValue.SKYLARK_SEMANTICS.set(differencer, SkylarkSemantics.DEFAULT_SEMANTICS);
+    PrecomputedValue.STARLARK_SEMANTICS.set(differencer, StarlarkSemantics.DEFAULT);
     RepositoryDelegatorFunction.REPOSITORY_OVERRIDES.set(
         differencer, ImmutableMap.<RepositoryName, PathFragment>of());
     RepositoryDelegatorFunction.DEPENDENCY_FOR_UNCONDITIONAL_FETCHING.set(
         differencer, RepositoryDelegatorFunction.DONT_FETCH_UNCONDITIONALLY);
     RepositoryDelegatorFunction.RESOLVED_FILE_INSTEAD_OF_WORKSPACE.set(
-        differencer, Optional.<RootedPath>absent());
+        differencer, Optional.empty());
   }
 
   protected PackageLookupValue lookupPackage(String packageName) throws InterruptedException {
@@ -191,7 +199,7 @@ public abstract class PackageLookupFunctionTest extends FoundationTestCase {
         EvaluationContext.newBuilder()
             .setKeepGoing(false)
             .setNumThreads(SkyframeExecutor.DEFAULT_THREAD_COUNT)
-            .setEventHander(NullEventHandler.INSTANCE)
+            .setEventHandler(NullEventHandler.INSTANCE)
             .build();
     return driver.<PackageLookupValue>evaluate(
         ImmutableList.of(packageIdentifierSkyKey), evaluationContext);
@@ -227,13 +235,12 @@ public abstract class PackageLookupFunctionTest extends FoundationTestCase {
   }
 
   @Test
-  public void testBlacklistedPackage() throws Exception {
-    scratch.file("blacklisted/subdir/BUILD");
-    scratch.file("blacklisted/BUILD");
-    Path blacklist = scratch.overwriteFile(
-        ADDITIONAL_BLACKLISTED_PACKAGE_PREFIXES_FILE_PATH_STRING, "blacklisted");
+  public void testIgnoredPackage() throws Exception {
+    scratch.file("ignored/subdir/BUILD");
+    scratch.file("ignored/BUILD");
+    Path ignored = scratch.overwriteFile(IGNORED_PACKAGE_PREFIXES_FILE_PATH_STRING, "ignored");
 
-    ImmutableSet<String> pkgs = ImmutableSet.of("blacklisted/subdir", "blacklisted");
+    ImmutableSet<String> pkgs = ImmutableSet.of("ignored/subdir", "ignored");
     for (String pkg : pkgs) {
       PackageLookupValue packageLookupValue = lookupPackage(pkg);
       assertThat(packageLookupValue.packageExists()).isFalse();
@@ -241,13 +248,12 @@ public abstract class PackageLookupFunctionTest extends FoundationTestCase {
       assertThat(packageLookupValue.getErrorMsg()).isNotNull();
     }
 
-    scratch.overwriteFile(
-        ADDITIONAL_BLACKLISTED_PACKAGE_PREFIXES_FILE_PATH_STRING, "not_blacklisted");
-    RootedPath rootedBlacklist =
+    scratch.overwriteFile(IGNORED_PACKAGE_PREFIXES_FILE_PATH_STRING, "not_ignored");
+    RootedPath rootedIgnoreFile =
         RootedPath.toRootedPath(
-            Root.fromPath(blacklist.getParentDirectory().getParentDirectory()),
-            PathFragment.create("config/blacklisted.txt"));
-    differencer.invalidate(ImmutableSet.of(FileStateValue.key(rootedBlacklist)));
+            Root.fromPath(ignored.getParentDirectory().getParentDirectory()),
+            PathFragment.create("config/ignored.txt"));
+    differencer.invalidate(ImmutableSet.of(FileStateValue.key(rootedIgnoreFile)));
     for (String pkg : pkgs) {
       PackageLookupValue packageLookupValue = lookupPackage(pkg);
       assertThat(packageLookupValue.packageExists()).isTrue();
@@ -431,7 +437,8 @@ public abstract class PackageLookupFunctionTest extends FoundationTestCase {
       assertThatEvaluationResult(result)
           .hasErrorEntryForKeyThat(skyKey)
           .hasExceptionThat()
-          .hasMessage(
+          .hasMessageThat()
+          .isEqualTo(
               "no such package 'local/repo': Unable to determine the local repository for "
                   + "directory /workspace/local/repo");
     }

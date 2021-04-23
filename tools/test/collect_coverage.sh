@@ -1,4 +1,4 @@
-#!/bin/bash -x
+#!/bin/bash
 
 # Copyright 2016 The Bazel Authors. All rights reserved.
 #
@@ -21,9 +21,33 @@
 #   LCOV_MERGER - mandatory, location of the LcovMerger
 #   COVERAGE_DIR - optional, location of the coverage temp directory
 #   COVERAGE_OUTPUT_FILE - optional, location of the final lcov file
+#   VERBOSE_COVERAGE - optional, print debug info from the coverage scripts
 #
 # Script expects that it will be started in the execution root directory and
 # not in the test's runfiles directory.
+
+if [[ -n "$VERBOSE_COVERAGE" ]]; then
+  set -x
+fi
+
+function resolve_links() {
+  local name="$1"
+
+  if [ -e "$name" ]; then
+    # resolve all links, keep path absolute
+    while [ -L "$name" ]; do
+      local target=$(readlink "$name")
+      if [ "$(echo "$target" | head -c1)" = "/" ]; then
+        name="$target"
+      else
+        name="$(dirname "$name")/$target"
+      fi
+    done
+    echo "$name"
+  else
+    false  # fail the function
+  fi
+}
 
 if [[ -z "$COVERAGE_MANIFEST" ]]; then
   echo --
@@ -32,7 +56,6 @@ if [[ -z "$COVERAGE_MANIFEST" ]]; then
   env | sort
   exit 1
 fi
-
 # When collect_coverage.sh is used, test runner must be instructed not to cd
 # to the test's runfiles directory.
 export ROOT="$PWD"
@@ -56,7 +79,6 @@ if ! [[ $COVERAGE_OUTPUT_FILE == $ROOT* ]]; then
   COVERAGE_OUTPUT_FILE=$ROOT/$COVERAGE_OUTPUT_FILE
 fi
 
-
 # Java
 # --------------------------------------
 export JAVA_COVERAGE_FILE=$COVERAGE_DIR/jvcov.dat
@@ -74,35 +96,96 @@ for name in "$LCOV_MERGER"; do
 done
 
 # Setting up the environment for executing the C++ tests.
-export GCOV_PREFIX_STRIP=3
+if [[ -z "$GCOV_PREFIX_STRIP" ]]; then
+  # TODO: GCOV_PREFIX_STRIP=3 is incorrect on MacOS in the default setup
+  export GCOV_PREFIX_STRIP=3
+fi
 export GCOV_PREFIX="${COVERAGE_DIR}"
 export LLVM_PROFILE_FILE="${COVERAGE_DIR}/%h-%p-%m.profraw"
 
-# TODO(bazel-team): cd should be avoided.
-cd "$TEST_SRCDIR/$TEST_WORKSPACE"
-# Execute the test.
-"$@"
-TEST_STATUS=$?
+# In coverage mode for Java, we need to merge the runtime classpath before
+# running the tests. JacocoCoverageRunner uses this merged jar in order
+# to get coverage data.
+#
+# Merge the classpath using SingleJar and save it in the environment
+# variable JACOCO_METADATA_JAR. The jars on the runtime classpath are listed
+# in the file $JAVA_RUNTIME_CLASSPATH_FOR_COVERAGE.
+#
+# We need to merge the jars here because the merged jar can be an input
+# too large (the combined merged jars for several big tests in a run
+# can go over 10G). Not merging the jars and making
+# JacocoCoverageRunner read every individual jar goes over the shutdown hook
+# time limit in the coverage runner (~few seconds).
+#
+# SINGLE_JAR_TOOL                     Exec path of SingleJar.
+#
+# JAVA_RUNTIME_CLASSPATH_FOR_COVERAGE Exec path of a file that contains the
+#                                     relative paths of the jars on the runtime
+#                                     classpath delimited by newline.
+if [[ ! -z "${JAVA_RUNTIME_CLASSPATH_FOR_COVERAGE}" ]]; then
+  JAVA_RUNTIME_CLASSPATH_FOR_COVERAGE="${PWD}/${JAVA_RUNTIME_CLASSPATH_FOR_COVERAGE}"
+  SINGLE_JAR_TOOL="${PWD}/${SINGLE_JAR_TOOL}"
 
-# Always create the coverage report.
-touch $COVERAGE_OUTPUT_FILE
+  # Create a paramsfile for invoking SingleJar.
+  mkdir -p "${COVERAGE_DIR}"
+  single_jar_params_file="${COVERAGE_DIR}/runtime_classpath.paramsfile"
+  touch "$single_jar_params_file"
 
-if [[ $TEST_STATUS -ne 0 ]]; then
-  echo --
-  echo Coverage runner: Not collecting coverage for failed test.
-  echo The following commands failed with status $TEST_STATUS
-  echo "$@"
-  exit $TEST_STATUS
+  # Export JACOCO_METADATA_JAR in order for JacocoCoverageRunner to be able
+  # to read it.
+  export JACOCO_METADATA_JAR="${COVERAGE_DIR}/coverage-runtime_merged_instr.jar"
+
+  echo -e "--output ${JACOCO_METADATA_JAR}\n--sources" >> "$single_jar_params_file"
+
+  # Append the runfiles prefix to all the relative paths found in
+  # JAVA_RUNTIME_CLASSPATH_FOR_COVERAGE, to invoke SingleJar with the
+  # absolute paths.
+  RUNFILES_PREFIX="$TEST_SRCDIR/"
+  cat "$JAVA_RUNTIME_CLASSPATH_FOR_COVERAGE" | sed "s@^@$RUNFILES_PREFIX@" >> "$single_jar_params_file"
+
+  # Invoke SingleJar. This will create JACOCO_METADATA_JAR.
+  "${SINGLE_JAR_TOOL}" "@$single_jar_params_file"
 fi
 
+if [[ "$IS_COVERAGE_SPAWN" == "0" ]]; then
+  # TODO(bazel-team): cd should be avoided.
+  cd "$TEST_SRCDIR/$TEST_WORKSPACE"
+
+  # Always create the coverage report.
+  if [[ "$SPLIT_COVERAGE_POST_PROCESSING" == "0" ]]; then
+    touch $COVERAGE_OUTPUT_FILE
+  fi
+
+  # Execute the test.
+  "$@"
+  TEST_STATUS=$?
+
+  if [[ $TEST_STATUS -ne 0 ]]; then
+    echo --
+    echo Coverage runner: Not collecting coverage for failed test.
+    echo The following commands failed with status $TEST_STATUS
+    echo "$@"
+    exit $TEST_STATUS
+  fi
+fi
+
+
+# ------------------EXPERIMENTAL---------------------
+# After this point we can run the code necessary for the coverage spawn
+
+if [[ "$SPLIT_COVERAGE_POST_PROCESSING" == "1" && "$IS_COVERAGE_SPAWN" == "0" ]]; then
+  exit 0
+fi
+
+if [[ "$SPLIT_COVERAGE_POST_PROCESSING" == "1" && "$IS_COVERAGE_SPAWN" == "1" ]]; then
+  touch $COVERAGE_OUTPUT_FILE
+fi
 # TODO(bazel-team): cd should be avoided.
 cd $ROOT
-
 # Call the C++ code coverage collection script.
 if [[ "$CC_CODE_COVERAGE_SCRIPT" ]]; then
     eval "${CC_CODE_COVERAGE_SCRIPT}"
 fi
-
 
 # Export the command line that invokes LcovMerger with the flags:
 # --coverage_dir          The absolute path of the directory where the
@@ -122,9 +205,16 @@ fi
 #
 # --source_file_manifest  The absolute path of the coverage source file
 #                         manifest. CoverageOutputGenerator uses this file to
-#                         keep only the C++ sources found in the manifest.
-#                         For other languages the sources in the manifest are
-#                         ignored.
+#                         keep only the sources found in the manifest (that is,
+#                         only the sources of targets matched by
+#                         --instrumentation_filter, excluding test targets
+#                         unless --instrument_test_targets).
+
+if [[ "$IS_COVERAGE_SPAWN" == "1" ]]; then
+  COVERAGE_DIR=$(resolve_links $COVERAGE_DIR)
+  COVERAGE_MANIFEST=$(resolve_links $COVERAGE_MANIFEST)
+fi
+
 LCOV_MERGER_CMD="${LCOV_MERGER} --coverage_dir=${COVERAGE_DIR} \
   --output_file=${COVERAGE_OUTPUT_FILE} \
   --filter_sources=/usr/bin/.+ \

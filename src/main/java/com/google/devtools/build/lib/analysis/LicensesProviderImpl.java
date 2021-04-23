@@ -58,7 +58,7 @@ public final class LicensesProviderImpl implements LicensesProvider {
     TargetLicense outputLicenses =
         toolOutputLicense == null ? null : new TargetLicense(rule.getLabel(), toolOutputLicense);
 
-    if (configuration.isHostConfiguration() && toolOutputLicense != null) {
+    if (configuration.isToolConfiguration() && toolOutputLicense != null) {
       if (toolOutputLicense != License.NO_LICENSE) {
         builder.add(outputLicenses);
       }
@@ -70,20 +70,27 @@ public final class LicensesProviderImpl implements LicensesProvider {
       ListMultimap<String, ? extends TransitiveInfoCollection> configuredMap =
           ruleContext.getConfiguredTargetMap();
 
-      for (String depAttrName : attributes.getAttributeNames()) {
-        // Only add the transitive licenses for the attributes that do not have the output_licenses.
-        Attribute attribute = attributes.getAttributeDefinition(depAttrName);
-        for (TransitiveInfoCollection dep : configuredMap.get(depAttrName)) {
-          LicensesProvider provider = dep.getProvider(LicensesProvider.class);
-          if (provider == null) {
-            continue;
-          }
-          if (useOutputLicenses(attribute, configuration) && provider.hasOutputLicenses()) {
+      if (rule.getRuleClassObject().isBazelLicense()) {
+        // Don't crawl a new-style license, it's effectively a leaf.
+        // The representation of the new-style rule is unfortunately hardcoded here,
+        // but this is code in the old-style licensing path that will ultimately be removed.
+      } else {
+        for (String depAttrName : attributes.getAttributeNames()) {
+          // Only add the transitive licenses for the attributes that do not have the
+          // output_licenses.
+          Attribute attribute = attributes.getAttributeDefinition(depAttrName);
+          for (TransitiveInfoCollection dep : configuredMap.get(depAttrName)) {
+            LicensesProvider provider = dep.getProvider(LicensesProvider.class);
+            if (provider == null) {
+              continue;
+            }
+            if (useOutputLicenses(attribute, configuration) && provider.hasOutputLicenses()) {
               builder.add(provider.getOutputLicenses());
-          } else {
-            builder.addTransitive(provider.getTransitiveLicenses());
+            } else {
+              builder.addTransitive(provider.getTransitiveLicenses());
+            }
           }
-        }
+          }
       }
     }
 
@@ -91,7 +98,7 @@ public final class LicensesProviderImpl implements LicensesProvider {
   }
 
   private static boolean useOutputLicenses(Attribute attribute, BuildConfiguration configuration) {
-    return configuration.isHostConfiguration() || attribute.useOutputLicenses();
+    return configuration.isToolConfiguration() || attribute.useOutputLicenses();
   }
 
   @Override

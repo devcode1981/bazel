@@ -1,3 +1,5 @@
+load("//tools/python:private/defs.bzl", "py_binary", "py_library", "py_test")
+
 package(default_visibility = ["//tools:__pkg__"])
 
 py_binary(
@@ -25,7 +27,7 @@ py_binary(
     name = "build_split_manifest",
     srcs = ["build_split_manifest.py"],
     deps = [
-        "//third_party/py/gflags",
+        "//third_party/py/abseil",
     ],
 )
 
@@ -41,8 +43,8 @@ py_binary(
     name = "incremental_install",
     srcs = ["incremental_install.py"],
     deps = [
+        "//third_party/py/abseil",
         "//third_party/py/concurrent:futures",
-        "//third_party/py/gflags",
     ],
 )
 
@@ -62,7 +64,7 @@ py_test(
 py_binary(
     name = "strip_resources",
     srcs = ["strip_resources.py"],
-    deps = ["//third_party/py/gflags"],
+    deps = ["//third_party/py/abseil"],
 )
 
 sh_test(
@@ -86,7 +88,7 @@ py_binary(
     ],
     deps = [
         ":junction_lib",
-        "//third_party/py/gflags",
+        "//third_party/py/abseil",
     ],
 )
 
@@ -104,7 +106,7 @@ py_binary(
     name = "stubify_manifest",
     srcs = ["stubify_manifest.py"],
     deps = [
-        "//third_party/py/gflags",
+        "//third_party/py/abseil",
     ],
 )
 
@@ -117,11 +119,26 @@ py_test(
 )
 
 py_binary(
+    name = "aar_embedded_proguard_extractor",
+    srcs = ["aar_embedded_proguard_extractor.py"],
+    deps = [
+        ":junction_lib",
+        "//third_party/py/abseil",
+    ],
+)
+
+py_test(
+    name = "aar_embedded_proguard_extractor_test",
+    srcs = ["aar_embedded_proguard_extractor_test.py"],
+    deps = [":aar_embedded_proguard_extractor"],
+)
+
+py_binary(
     name = "aar_embedded_jars_extractor",
     srcs = ["aar_embedded_jars_extractor.py"],
     deps = [
         ":junction_lib",
-        "//third_party/py/gflags",
+        "//third_party/py/abseil",
     ],
 )
 
@@ -136,7 +153,7 @@ py_binary(
     srcs = ["aar_resources_extractor.py"],
     deps = [
         ":junction_lib",
-        "//third_party/py/gflags",
+        "//third_party/py/abseil",
     ],
 )
 
@@ -160,7 +177,7 @@ py_test(
 py_binary(
     name = "instrumentation_test_check",
     srcs = ["instrumentation_test_check.py"],
-    deps = ["//third_party/py/gflags"],
+    deps = ["//third_party/py/abseil"],
 )
 
 py_test(
@@ -191,15 +208,6 @@ py_test(
     ],
 )
 
-genrule(
-    name = "desugar_jdk_libs",
-    srcs = ["@desugar_jdk_libs"],
-    outs = ["desugar_jdk_libs.jar"],
-    cmd = "cp $< $@",
-    output_to_bindir = 1,
-    visibility = ["//visibility:private"],
-)
-
 filegroup(
     name = "srcs",
     srcs = glob(
@@ -208,7 +216,10 @@ filegroup(
             "*~",
             ".*",
         ],
-    ) + ["//tools/android/emulator:srcs"],
+    ) + [
+        "//tools/android/emulator:srcs",
+        "//tools/android/runtime_deps:srcs",
+    ],
 )
 
 filegroup(
@@ -222,7 +233,6 @@ filegroup(
             ".*",
         ],
     ) + [
-        ":desugar_jdk_libs.jar",
         "//tools/android/emulator:embedded_tools",
     ],
 )

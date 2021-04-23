@@ -11,6 +11,13 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
+#include "src/main/native/windows/file.h"
+
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
@@ -20,7 +27,6 @@
 #include <string>
 
 #include "gtest/gtest.h"
-#include "src/main/native/windows/file.h"
 #include "src/test/cpp/util/windows_test_util.h"
 
 #if !defined(_WIN32) && !defined(__CYGWIN__)
@@ -48,14 +54,43 @@ class WindowsFileOperationsTest : public ::testing::Test {
   void TearDown() override { DeleteAllUnder(GetTestTmpDirW()); }
 };
 
+TEST_F(WindowsFileOperationsTest, TestIsAbsoluteWindowsStylePath) {
+  EXPECT_FALSE(IsAbsoluteNormalizedWindowsPath(L""));
+  EXPECT_TRUE(IsAbsoluteNormalizedWindowsPath(L"NUL"));
+  EXPECT_TRUE(IsAbsoluteNormalizedWindowsPath(L"nul"));
+  EXPECT_FALSE(IsAbsoluteNormalizedWindowsPath(L"c"));
+  EXPECT_FALSE(IsAbsoluteNormalizedWindowsPath(L"\\\\?\\c"));
+  EXPECT_FALSE(IsAbsoluteNormalizedWindowsPath(L"c:"));
+  EXPECT_FALSE(IsAbsoluteNormalizedWindowsPath(L"\\\\?\\c:"));
+  EXPECT_FALSE(IsAbsoluteNormalizedWindowsPath(L"c:/"));
+  EXPECT_FALSE(IsAbsoluteNormalizedWindowsPath(L"\\\\?\\c:/"));
+  EXPECT_TRUE(IsAbsoluteNormalizedWindowsPath(L"c:\\"));
+  EXPECT_TRUE(IsAbsoluteNormalizedWindowsPath(L"\\\\?\\c:\\"));
+  EXPECT_FALSE(IsAbsoluteNormalizedWindowsPath(L"c:\\foo/bar"));
+  EXPECT_FALSE(IsAbsoluteNormalizedWindowsPath(L"\\\\?\\c:\\foo/bar"));
+  EXPECT_TRUE(IsAbsoluteNormalizedWindowsPath(L"c:\\foo\\bar"));
+  EXPECT_TRUE(IsAbsoluteNormalizedWindowsPath(L"\\\\?\\c:\\foo\\bar"));
+  EXPECT_FALSE(IsAbsoluteNormalizedWindowsPath(L"foo"));
+  EXPECT_FALSE(IsAbsoluteNormalizedWindowsPath(L"foo\\bar"));
+  EXPECT_FALSE(IsAbsoluteNormalizedWindowsPath(L"c:\\foo\\."));
+  EXPECT_FALSE(IsAbsoluteNormalizedWindowsPath(L"\\\\?\\c:\\foo\\."));
+  EXPECT_FALSE(IsAbsoluteNormalizedWindowsPath(L"c:\\foo\\.\\bar"));
+  EXPECT_FALSE(IsAbsoluteNormalizedWindowsPath(L"\\\\?\\c:\\foo\\.\\bar"));
+  EXPECT_FALSE(IsAbsoluteNormalizedWindowsPath(L"c:\\foo\\..\\bar"));
+  EXPECT_FALSE(IsAbsoluteNormalizedWindowsPath(L"\\\\?\\c:\\foo\\..\\bar"));
+}
+
 TEST_F(WindowsFileOperationsTest, TestCreateJunction) {
   wstring tmp(kUncPrefix + GetTestTmpDirW());
   wstring target(tmp + L"\\junc_target");
-  EXPECT_TRUE(::CreateDirectoryW(target.c_str(), NULL));
+  EXPECT_TRUE(::CreateDirectoryW(target.c_str(), nullptr));
   wstring file1(target + L"\\foo");
   EXPECT_TRUE(blaze_util::CreateDummyFile(file1));
 
-  EXPECT_EQ(IS_JUNCTION_NO, IsJunctionOrDirectorySymlink(target.c_str()));
+  bool is_link = true;
+  EXPECT_EQ(IsSymlinkOrJunctionResult::kSuccess,
+            IsSymlinkOrJunction(target.c_str(), &is_link, nullptr));
+  EXPECT_FALSE(is_link);
   EXPECT_NE(INVALID_FILE_ATTRIBUTES, ::GetFileAttributesW(file1.c_str()));
 
   wstring name(tmp + L"\\junc_name");
@@ -72,14 +107,22 @@ TEST_F(WindowsFileOperationsTest, TestCreateJunction) {
             CreateJunctionResult::kSuccess);
 
   // Assert creation of the junctions.
-  ASSERT_EQ(IS_JUNCTION_YES,
-            IsJunctionOrDirectorySymlink((name + L"1").c_str()));
-  ASSERT_EQ(IS_JUNCTION_YES,
-            IsJunctionOrDirectorySymlink((name + L"2").c_str()));
-  ASSERT_EQ(IS_JUNCTION_YES,
-            IsJunctionOrDirectorySymlink((name + L"3").c_str()));
-  ASSERT_EQ(IS_JUNCTION_YES,
-            IsJunctionOrDirectorySymlink((name + L"4").c_str()));
+  is_link = false;
+  ASSERT_EQ(IsSymlinkOrJunctionResult::kSuccess,
+            IsSymlinkOrJunction((name + L"1").c_str(), &is_link, nullptr));
+  ASSERT_TRUE(is_link);
+  is_link = false;
+  ASSERT_EQ(IsSymlinkOrJunctionResult::kSuccess,
+            IsSymlinkOrJunction((name + L"2").c_str(), &is_link, nullptr));
+  ASSERT_TRUE(is_link);
+  is_link = false;
+  ASSERT_EQ(IsSymlinkOrJunctionResult::kSuccess,
+            IsSymlinkOrJunction((name + L"3").c_str(), &is_link, nullptr));
+  ASSERT_TRUE(is_link);
+  is_link = false;
+  ASSERT_EQ(IsSymlinkOrJunctionResult::kSuccess,
+            IsSymlinkOrJunction((name + L"4").c_str(), &is_link, nullptr));
+  ASSERT_TRUE(is_link);
 
   // Assert that the file is visible under all junctions.
   ASSERT_NE(INVALID_FILE_ATTRIBUTES,
@@ -122,7 +165,7 @@ TEST_F(WindowsFileOperationsTest, TestCanCreateNonDanglingJunction) {
   wstring tmp(kUncPrefix + GetTestTmpDirW());
   wstring name = tmp + L"\\junc" WLINE;
   wstring target = tmp + L"\\target" WLINE;
-  EXPECT_TRUE(CreateDirectoryW(target.c_str(), NULL));
+  EXPECT_TRUE(CreateDirectoryW(target.c_str(), nullptr));
   ASSERT_EQ(CreateJunction(name, target, nullptr),
             CreateJunctionResult::kSuccess);
 }
@@ -152,7 +195,7 @@ TEST_F(WindowsFileOperationsTest, TestCannotCreateJunctionFromEmptyDirectory) {
   wstring tmp(kUncPrefix + GetTestTmpDirW());
   wstring name = tmp + L"\\junc" WLINE;
   wstring target = tmp + L"\\target" WLINE;
-  EXPECT_TRUE(CreateDirectoryW(name.c_str(), NULL));
+  EXPECT_TRUE(CreateDirectoryW(name.c_str(), nullptr));
   ASSERT_EQ(CreateJunction(name, target, nullptr),
             CreateJunctionResult::kAlreadyExistsButNotJunction);
 }
@@ -162,7 +205,7 @@ TEST_F(WindowsFileOperationsTest,
   wstring tmp(kUncPrefix + GetTestTmpDirW());
   wstring name = tmp + L"\\junc" WLINE;
   wstring target = tmp + L"\\target" WLINE;
-  EXPECT_TRUE(CreateDirectoryW(name.c_str(), NULL));
+  EXPECT_TRUE(CreateDirectoryW(name.c_str(), nullptr));
   EXPECT_TRUE(blaze_util::CreateDummyFile(name + L"\\hello.txt"));
   ASSERT_EQ(CreateJunction(name, target, nullptr),
             CreateJunctionResult::kAlreadyExistsButNotJunction);
@@ -181,10 +224,10 @@ TEST_F(WindowsFileOperationsTest, TestCannotCreateButCanCheckIfNameIsBusy) {
   wstring tmp(kUncPrefix + GetTestTmpDirW());
   wstring name = tmp + L"\\junc" WLINE;
   wstring target = tmp + L"\\target" WLINE;
-  EXPECT_TRUE(CreateDirectoryW(name.c_str(), NULL));
+  EXPECT_TRUE(CreateDirectoryW(name.c_str(), nullptr));
   HANDLE h = CreateFileW(
-      name.c_str(), GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
-      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+      name.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
   EXPECT_NE(h, INVALID_HANDLE_VALUE);
   int actual = CreateJunction(name, target, nullptr);
   CloseHandle(h);
@@ -195,9 +238,9 @@ TEST_F(WindowsFileOperationsTest, TestCanCreateJunctionIfTargetIsBusy) {
   wstring tmp(kUncPrefix + GetTestTmpDirW());
   wstring name = tmp + L"\\junc" WLINE;
   wstring target = tmp + L"\\target" WLINE;
-  EXPECT_TRUE(CreateDirectoryW(target.c_str(), NULL));
-  HANDLE h = CreateFileW(target.c_str(), GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
-                         FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  EXPECT_TRUE(CreateDirectoryW(target.c_str(), nullptr));
+  HANDLE h = CreateFileW(target.c_str(), GENERIC_WRITE, 0, nullptr,
+                         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
   EXPECT_NE(h, INVALID_HANDLE_VALUE);
   int actual = CreateJunction(name, target, nullptr);
   CloseHandle(h);
@@ -214,7 +257,7 @@ TEST_F(WindowsFileOperationsTest, TestCanDeleteExistingFile) {
 TEST_F(WindowsFileOperationsTest, TestCanDeleteExistingDirectory) {
   wstring tmp(kUncPrefix + GetTestTmpDirW());
   wstring path = tmp + L"\\dir" WLINE;
-  EXPECT_TRUE(CreateDirectoryW(path.c_str(), NULL));
+  EXPECT_TRUE(CreateDirectoryW(path.c_str(), nullptr));
   ASSERT_EQ(DeletePath(path.c_str(), nullptr), DeletePathResult::kSuccess);
 }
 
@@ -222,7 +265,7 @@ TEST_F(WindowsFileOperationsTest, TestCanDeleteExistingJunction) {
   wstring tmp(kUncPrefix + GetTestTmpDirW());
   wstring name = tmp + L"\\junc" WLINE;
   wstring target = tmp + L"\\target" WLINE;
-  EXPECT_TRUE(CreateDirectoryW(target.c_str(), NULL));
+  EXPECT_TRUE(CreateDirectoryW(target.c_str(), nullptr));
   EXPECT_EQ(CreateJunction(name, target, nullptr),
             CreateJunctionResult::kSuccess);
   ASSERT_EQ(DeletePath(name.c_str(), nullptr), DeletePathResult::kSuccess);
@@ -232,7 +275,7 @@ TEST_F(WindowsFileOperationsTest, TestCanDeleteExistingJunctionWithoutTarget) {
   wstring tmp(kUncPrefix + GetTestTmpDirW());
   wstring name = tmp + L"\\junc" WLINE;
   wstring target = tmp + L"\\target" WLINE;
-  EXPECT_TRUE(CreateDirectoryW(target.c_str(), NULL));
+  EXPECT_TRUE(CreateDirectoryW(target.c_str(), nullptr));
   EXPECT_EQ(CreateJunction(name, target, nullptr),
             CreateJunctionResult::kSuccess);
   EXPECT_TRUE(RemoveDirectoryW(target.c_str()));
@@ -263,7 +306,7 @@ TEST_F(WindowsFileOperationsTest, TestCannotDeleteNonEmptyDirectory) {
   wstring tmp(kUncPrefix + GetTestTmpDirW());
   wstring parent = tmp + L"\\dir" WLINE;
   wstring child = parent + L"\\file" WLINE;
-  EXPECT_TRUE(CreateDirectoryW(parent.c_str(), NULL));
+  EXPECT_TRUE(CreateDirectoryW(parent.c_str(), nullptr));
   EXPECT_TRUE(blaze_util::CreateDummyFile(child));
   ASSERT_EQ(DeletePath(parent.c_str(), nullptr),
             DeletePathResult::kDirectoryNotEmpty);
@@ -273,8 +316,8 @@ TEST_F(WindowsFileOperationsTest, TestCannotDeleteBusyFile) {
   wstring tmp(kUncPrefix + GetTestTmpDirW());
   wstring path = tmp + L"\\file" WLINE;
   EXPECT_TRUE(blaze_util::CreateDummyFile(path));
-  HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
-                         FILE_ATTRIBUTE_NORMAL, NULL);
+  HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                         FILE_ATTRIBUTE_NORMAL, nullptr);
   EXPECT_NE(h, INVALID_HANDLE_VALUE);
   int actual = DeletePath(path.c_str(), nullptr);
   CloseHandle(h);
@@ -284,9 +327,9 @@ TEST_F(WindowsFileOperationsTest, TestCannotDeleteBusyFile) {
 TEST_F(WindowsFileOperationsTest, TestCannotDeleteBusyDirectory) {
   wstring tmp(kUncPrefix + GetTestTmpDirW());
   wstring path = tmp + L"\\dir" WLINE;
-  EXPECT_TRUE(CreateDirectoryW(path.c_str(), NULL));
-  HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
-                         FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  EXPECT_TRUE(CreateDirectoryW(path.c_str(), nullptr));
+  HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                         FILE_FLAG_BACKUP_SEMANTICS, nullptr);
   EXPECT_NE(h, INVALID_HANDLE_VALUE);
   int actual = DeletePath(path.c_str(), nullptr);
   CloseHandle(h);
@@ -297,13 +340,13 @@ TEST_F(WindowsFileOperationsTest, TestCannotDeleteBusyJunction) {
   wstring tmp(kUncPrefix + GetTestTmpDirW());
   wstring name = tmp + L"\\junc" WLINE;
   wstring target = tmp + L"\\target" WLINE;
-  EXPECT_TRUE(CreateDirectoryW(target.c_str(), NULL));
+  EXPECT_TRUE(CreateDirectoryW(target.c_str(), nullptr));
   EXPECT_EQ(CreateJunction(name, target, nullptr),
             CreateJunctionResult::kSuccess);
   // Open the junction itself (do not follow symlinks).
   HANDLE h = CreateFileW(
-      name.c_str(), GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
-      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+      name.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
   EXPECT_NE(h, INVALID_HANDLE_VALUE);
   int actual = DeletePath(name.c_str(), nullptr);
   CloseHandle(h);
@@ -314,12 +357,12 @@ TEST_F(WindowsFileOperationsTest, TestCanDeleteJunctionWhoseTargetIsBusy) {
   wstring tmp(kUncPrefix + GetTestTmpDirW());
   wstring name = tmp + L"\\junc" WLINE;
   wstring target = tmp + L"\\target" WLINE;
-  EXPECT_TRUE(CreateDirectoryW(target.c_str(), NULL));
+  EXPECT_TRUE(CreateDirectoryW(target.c_str(), nullptr));
   EXPECT_EQ(CreateJunction(name, target, nullptr),
             CreateJunctionResult::kSuccess);
   // Open the junction's target (follow symlinks).
-  HANDLE h = CreateFileW(target.c_str(), GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
-                         FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  HANDLE h = CreateFileW(target.c_str(), GENERIC_WRITE, 0, nullptr,
+                         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
   EXPECT_NE(h, INVALID_HANDLE_VALUE);
   int actual = DeletePath(name.c_str(), nullptr);
   CloseHandle(h);
@@ -331,6 +374,86 @@ TEST_F(WindowsFileOperationsTest, TestCanDeleteJunctionWhoseTargetIsBusy) {
 #undef TOWSTRING1
 #undef TOWSTRING
 #undef WLINE
+
+TEST(FileTests, TestNormalize) {
+#define ASSERT_NORMALIZE(x, y) EXPECT_EQ(Normalize(x), y);
+  ASSERT_NORMALIZE("", "");
+  ASSERT_NORMALIZE("a", "a");
+  ASSERT_NORMALIZE("foo/bar", "foo\\bar");
+  ASSERT_NORMALIZE("foo/../bar", "bar");
+  ASSERT_NORMALIZE("a/", "a");
+  ASSERT_NORMALIZE("foo", "foo");
+  ASSERT_NORMALIZE("foo/", "foo");
+  ASSERT_NORMALIZE(".", ".");
+  ASSERT_NORMALIZE("./", ".");
+  ASSERT_NORMALIZE("..", "..");
+  ASSERT_NORMALIZE("../", "..");
+  ASSERT_NORMALIZE("./..", "..");
+  ASSERT_NORMALIZE("./../", "..");
+  ASSERT_NORMALIZE("../.", "..");
+  ASSERT_NORMALIZE(".././", "..");
+  ASSERT_NORMALIZE("...", "...");
+  ASSERT_NORMALIZE(".../", "...");
+  ASSERT_NORMALIZE("a/", "a");
+  ASSERT_NORMALIZE(".a", ".a");
+  ASSERT_NORMALIZE("..a", "..a");
+  ASSERT_NORMALIZE("...a", "...a");
+  ASSERT_NORMALIZE("./a", "a");
+  ASSERT_NORMALIZE("././a", "a");
+  ASSERT_NORMALIZE("./../a", "..\\a");
+  ASSERT_NORMALIZE(".././a", "..\\a");
+  ASSERT_NORMALIZE("../../a", "..\\..\\a");
+  ASSERT_NORMALIZE("../.../a", "..\\...\\a");
+  ASSERT_NORMALIZE(".../../a", "a");
+  ASSERT_NORMALIZE("a/..", "");
+  ASSERT_NORMALIZE("a/../", "");
+  ASSERT_NORMALIZE("a/./../", "");
+
+  ASSERT_NORMALIZE("c:/", "c:\\");
+  ASSERT_NORMALIZE("c:/a", "c:\\a");
+  ASSERT_NORMALIZE("c:/foo/bar", "c:\\foo\\bar");
+  ASSERT_NORMALIZE("c:/foo/../bar", "c:\\bar");
+  ASSERT_NORMALIZE("d:/a/", "d:\\a");
+  ASSERT_NORMALIZE("D:/foo", "D:\\foo");
+  ASSERT_NORMALIZE("c:/foo/", "c:\\foo");
+  ASSERT_NORMALIZE("c:/.", "c:\\");
+  ASSERT_NORMALIZE("c:/./", "c:\\");
+  ASSERT_NORMALIZE("c:/..", "c:\\");
+  ASSERT_NORMALIZE("c:/../", "c:\\");
+  ASSERT_NORMALIZE("c:/./..", "c:\\");
+  ASSERT_NORMALIZE("c:/./../", "c:\\");
+  ASSERT_NORMALIZE("c:/../.", "c:\\");
+  ASSERT_NORMALIZE("c:/.././", "c:\\");
+  ASSERT_NORMALIZE("c:/...", "c:\\...");
+  ASSERT_NORMALIZE("c:/.../", "c:\\...");
+  ASSERT_NORMALIZE("c:/.a", "c:\\.a");
+  ASSERT_NORMALIZE("c:/..a", "c:\\..a");
+  ASSERT_NORMALIZE("c:/...a", "c:\\...a");
+  ASSERT_NORMALIZE("c:/./a", "c:\\a");
+  ASSERT_NORMALIZE("c:/././a", "c:\\a");
+  ASSERT_NORMALIZE("c:/./../a", "c:\\a");
+  ASSERT_NORMALIZE("c:/.././a", "c:\\a");
+  ASSERT_NORMALIZE("c:/../../a", "c:\\a");
+  ASSERT_NORMALIZE("c:/../.../a", "c:\\...\\a");
+  ASSERT_NORMALIZE("c:/.../../a", "c:\\a");
+  ASSERT_NORMALIZE("c:/a/..", "c:\\");
+  ASSERT_NORMALIZE("c:/a/../", "c:\\");
+  ASSERT_NORMALIZE("c:/a/./../", "c:\\");
+  ASSERT_NORMALIZE("c:/../d:/e", "c:\\d:\\e");
+  ASSERT_NORMALIZE("c:/../d:/../e", "c:\\e");
+
+  ASSERT_NORMALIZE("foo", "foo");
+  ASSERT_NORMALIZE("foo/", "foo");
+  ASSERT_NORMALIZE("foo//bar", "foo\\bar");
+  ASSERT_NORMALIZE("../..//foo/./bar", "..\\..\\foo\\bar");
+  ASSERT_NORMALIZE("../foo/baz/../bar", "..\\foo\\bar");
+  ASSERT_NORMALIZE("c:", "c:\\");
+  ASSERT_NORMALIZE("c:/", "c:\\");
+  ASSERT_NORMALIZE("c:\\", "c:\\");
+  ASSERT_NORMALIZE("c:\\..//foo/./bar/", "c:\\foo\\bar");
+  ASSERT_NORMALIZE("../foo", "..\\foo");
+#undef ASSERT_NORMALIZE
+}
 
 }  // namespace windows
 }  // namespace bazel

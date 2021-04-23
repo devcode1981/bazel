@@ -5,12 +5,6 @@ title: Platforms
 
 # Platforms
 
-- [Overview](#overview)
-- [Defining constraints and platforms](#defining-constraints-and-platforms)
-- [Built-in constraints and platforms](#built-in-constraints-and-platforms)
-- [Specifying a platform for a build](#specifying-a-platform-for-a-build)
-
-## Overview
 
 Bazel can build and test code on a variety of hardware, operating systems, and
 system configurations, using many different versions of build tools such as
@@ -88,38 +82,28 @@ glibc version of 2.25. (See below for more on Bazel's built-in constraints.)
 platform(
     name = "linux_x86",
     constraint_values = [
-        "@bazel_tools//platforms:linux",
-        "@bazel_tools//platforms:x86_64",
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
         ":glibc_2_25",
     ],
 )
 ```
 
 Note that it is an error for a platform to specify more than one value of the
-same constraint setting, such as `@bazel_tools//platforms:x86_64` and
-`@bazel_tools//platforms:arm` for `@bazel_tools//platforms:cpu`.
+same constraint setting, such as `@platforms//cpu:x86_64` and
+`@platforms//cpu:arm` for `@platforms//cpu:cpu`.
 
-## Built-in constraints and platforms
 
-Bazel ships with constraint definitions for the most popular CPU architectures
-and operating systems. These are all located in the package
-`@bazel_tools//platforms`:
+## Generally useful constraints and platforms
 
-*  `:cpu` for the CPU architecture, with values `:x86_32`, `:x86_64`, `:ppc`,
-   `:arm`, `:s390x`
-*  `:os` for the operating system, with values `:android`, `:freebsd`, `:ios`,
-   `:linux`, `:osx`, `:windows`
+To keep the ecosystem consistent, Bazel team maintains a repository with
+constraint definitions for the most popular CPU architectures and operating
+systems. These are all located in
+[https://github.com/bazelbuild/platforms](https://github.com/bazelbuild/platforms).
 
-There are also the following special platform definitions:
-
-*  `:host_platform` - represents the CPU and operating system for the host
-   environment
-
-*  `:target_platform` - represents the CPU and operating system for the target
-   environment
-
-The CPU values used by these two platforms can be specified with the
-`--host_cpu` and `--cpu` flags.
+Bazel ships with the following special platform definition:
+`@local_config_platform//:host`. This is the autodetected host platform value -
+represents autodetected platform for the system Bazel is running on.
 
 ## Specifying a platform for a build
 
@@ -127,5 +111,141 @@ You can specify the host and target platforms for a build using the following
 command-line flags:
 
 *  `--host_platform` - defaults to `@bazel_tools//platforms:host_platform`
-
 *  `--platforms` - defaults to `@bazel_tools//platforms:target_platform`
+
+## Skipping incompatible targets
+
+When building for a specific target platform it is often desirable to skip
+targets that will never work on that platform. For example, your Windows device
+driver is likely going to generate lots of compiler errors when building on a
+Linux machine with `//...`. Use the
+[`target_compatible_with`](be/common-definitions.html#common.target_compatible_with)
+attribute to tell Bazel what target platform constraints your code has.
+
+The simplest use of this attribute restricts a target to a single platform.
+The target will not be built for any platform that doesn't satisfy all of the
+constraints. The following example restricts `win_driver_lib.cc` to 64-bit
+Windows.
+
+```python
+cc_library(
+    name = "win_driver_lib",
+    srcs = "win_driver_lib.cc",
+    target_compatible_with = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:windows",
+    ],
+)
+```
+
+`:win_driver_lib` is *only* compatible for building with 64-bit Windows and
+incompatible with all else. Incompatibility is transitive. Any targets
+that transitively depend on an incompatible target are themselves considered
+incompatible.
+
+### When are targets skipped?
+
+Targets are skipped when they are considered incompatible and included in the
+build as part of a target pattern expansion. For example, the following two
+invocations skip any incompatible targets found in a target pattern expansion.
+
+```console
+$ bazel build --platforms=//:myplatform //...
+```
+
+```console
+$ bazel build --platforms=//:myplatform //:all
+```
+
+Incompatible tests in a [`test_suite`](be/general.html#test_suite) are
+similarly skipped if the `test_suite` is specified on the command line with
+[`--expand_test_suites`](command-line-reference.html#flag--expand_test_suites).
+In other words, `test_suite` targets on the command line behave like `:all` and
+`...`. Using `--noexpand_test_suites` prevents expansion and causes
+`test_suite` targets with incompatible tests to also be incompatible.
+
+Explicitly specifying an incompatible target on the command line results in an
+error message and a failed build.
+
+```console
+$ bazel build --platforms=//:myplatform //:target_incompatible_with_myplatform
+...
+ERROR: Target //:target_incompatible_with_myplatform is incompatible and cannot be built, but was explicitly requested.
+...
+FAILED: Build did NOT complete successfully
+```
+
+### More expressive constraints
+
+For more flexibility in expressing constraints, use the
+`@platforms//:incompatible`
+[`constraint_value`](be/platform.html#constraint_value) that no platform
+satisfies.
+
+Use [`select()`](functions.html#select) in combination with
+`@platforms//:incompatible` to express more complicated restrictions. For
+example, use it to implement basic OR logic. The following marks a library
+compatible with macOS and Linux, but no other platforms. Note that an empty
+constraints list is equivalent to "compatible with everything".
+
+```python
+cc_library(
+    name = "unixish_lib",
+    srcs = "unixish_lib.cc",
+    target_compatible_with = select({
+        "@platforms//os:osx": [],
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+```
+
+The above can be interpreted as follows:
+
+1. When targeting macOS, the target has no constraints.
+2. When targeting Linux, the target has no constraints.
+3. Otherwise, the target has the `@platforms//:incompatible` constraint. Because
+   `@platforms//:incompatible` is not part of any platform, the target is
+   deemed incompatible.
+
+To make your constraints more readable, use
+[skylib](https://github.com/bazelbuild/bazel-skylib)'s
+[`selects.with_or()`](https://github.com/bazelbuild/bazel-skylib/blob/main/docs/selects_doc.md#selectswith_or).
+
+You can express inverse compatibility in a similar way. The following example
+describes a library that is compatible with everything _except_ for ARM.
+
+```python
+cc_library(
+    name = "non_arm_lib",
+    srcs = "non_arm_lib.cc",
+    target_compatible_with = select({
+        "@platforms//cpu:arm": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    ],
+)
+```
+
+### Detecting incompatible targets using `bazel cquery`
+
+You can use the
+[`IncompatiblePlatformProvider`](skylark/lib/IncompatiblePlatformProvider.html)
+in `bazel cquery`'s [Starlark output
+format](cquery.html#defining-the-output-format-using-starlark) to distinguish
+incompatible targets from compatible ones.
+
+This can be used to filter out incompatible targets. The example below will
+only print the labels for targets that are compatible. Incompatible targets are
+not printed.
+
+```console
+$ cat example.cquery
+
+def format(target):
+  if "IncompatiblePlatformProvider" not in providers(target):
+    return target.label
+  return ""
+
+
+$ bazel cquery //... --output=starlark --starlark:file=example.cquery
+```

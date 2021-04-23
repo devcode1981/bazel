@@ -17,12 +17,26 @@ package com.google.devtools.build.lib.buildtool;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.config.BuildConfigurationCollection;
-import com.google.devtools.build.lib.skyframe.AspectValue;
+import com.google.devtools.build.lib.buildeventstream.BuildEvent.LocalFile.LocalFileCompression;
+import com.google.devtools.build.lib.buildeventstream.BuildEvent.LocalFile.LocalFileType;
+import com.google.devtools.build.lib.buildeventstream.BuildToolLogs;
+import com.google.devtools.build.lib.buildeventstream.BuildToolLogs.LogFileEntry;
+import com.google.devtools.build.lib.skyframe.AspectValueKey.AspectKey;
+import com.google.devtools.build.lib.util.CrashFailureDetails;
+import com.google.devtools.build.lib.util.DetailedExitCode;
 import com.google.devtools.build.lib.util.ExitCode;
+import com.google.devtools.build.lib.util.Pair;
+import com.google.devtools.build.lib.vfs.Path;
+import com.google.protobuf.ByteString;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.List;
 import javax.annotation.Nullable;
 
 /**
@@ -33,17 +47,21 @@ public final class BuildResult {
   private long startTimeMillis = 0; // milliseconds since UNIX epoch.
   private long stopTimeMillis = 0;
 
+  private boolean wasSuspended = false;
+
   private Throwable crash = null;
   private boolean catastrophe = false;
   private boolean stopOnFirstFailure;
-  private ExitCode exitCondition = ExitCode.BLAZE_INTERNAL_ERROR;
+  @Nullable private DetailedExitCode detailedExitCode;
 
   private BuildConfigurationCollection configurations;
   private Collection<ConfiguredTarget> actualTargets;
   private Collection<ConfiguredTarget> testTargets;
   private Collection<ConfiguredTarget> successfulTargets;
   private Collection<ConfiguredTarget> skippedTargets;
-  private Collection<AspectValue> successfulAspects;
+  private ImmutableSet<AspectKey> successfulAspects;
+
+  private final BuildToolLogCollection buildToolLogCollection = new BuildToolLogCollection();
 
   public BuildResult(long startTimeMillis) {
     this.startTimeMillis = startTimeMillis;
@@ -76,30 +94,41 @@ public final class BuildResult {
     return (stopTimeMillis - startTimeMillis) / 1000.0;
   }
 
-  public void setExitCondition(ExitCode exitCondition) {
-    this.exitCondition = exitCondition;
+  /** Record if the build was suspended (SIGSTOP or hardware put to sleep). */
+  public void setWasSuspended(boolean wasSuspended) {
+    this.wasSuspended = wasSuspended;
   }
 
-  /**
-   * True iff the build request has been successfully completed.
-   */
+  /** Whether the build was suspended (SIGSTOP or hardware put to sleep). */
+  public boolean getWasSuspended() {
+    return wasSuspended;
+  }
+
+  public void setDetailedExitCode(DetailedExitCode detailedExitCode) {
+    this.detailedExitCode = detailedExitCode;
+  }
+
+  /** True iff the build request has been successfully completed. */
   public boolean getSuccess() {
-    return exitCondition.equals(ExitCode.SUCCESS);
+    return detailedExitCode != null && detailedExitCode.isSuccess();
   }
 
   /**
-   * Gets the Blaze exit condition.
+   * Gets the {@link DetailedExitCode} containing the {@link ExitCode} and optional failure detail
+   * to complete the command with.
    */
-  public ExitCode getExitCondition() {
-    return exitCondition;
+  public DetailedExitCode getDetailedExitCode() {
+    if (detailedExitCode != null) {
+      return detailedExitCode;
+    }
+    return CrashFailureDetails.detailedExitCodeForThrowable(
+        new IllegalStateException("Unspecified DetailedExitCode"));
   }
 
-  /**
-   * Sets the RuntimeException / Error that induced a Blaze crash.
-   */
+  /** Sets the RuntimeException / Error that induced a Blaze crash. */
   public void setUnhandledThrowable(Throwable crash) {
-    Preconditions.checkState(crash == null ||
-        ((crash instanceof RuntimeException) || (crash instanceof Error)));
+    Preconditions.checkState(
+        crash == null || ((crash instanceof RuntimeException) || (crash instanceof Error)));
     this.crash = crash;
   }
 
@@ -196,8 +225,8 @@ public final class BuildResult {
     this.successfulTargets = successfulTargets;
   }
 
-  /** @see #getSuccessfulAspects */
-  void setSuccessfulAspects(Collection<AspectValue> successfulAspects) {
+  /** See #getSuccessfulAspects */
+  void setSuccessfulAspects(ImmutableSet<AspectKey> successfulAspects) {
     this.successfulAspects = successfulAspects;
   }
 
@@ -221,7 +250,7 @@ public final class BuildResult {
    * null if the execution phase was not attempted, as may happen if there are errors in the loading
    * phase, for example.
    */
-  public Collection<AspectValue> getSuccessfulAspects() {
+  public ImmutableSet<AspectKey> getSuccessfulAspects() {
     return successfulAspects;
   }
 
@@ -241,6 +270,15 @@ public final class BuildResult {
     return skippedTargets;
   }
 
+  /**
+   * Collection of data for the build tool logs event. This may only be modified until the
+   * BuildCompleteEvent is posted; any changes after that event is handled will not be included in
+   * the build tool logs event.
+   */
+  public BuildToolLogCollection getBuildToolLogCollection() {
+    return buildToolLogCollection;
+  }
+
   /** For debugging. */
   @Override
   public String toString() {
@@ -249,10 +287,82 @@ public final class BuildResult {
         .add("stopTimeMillis", stopTimeMillis)
         .add("crash", crash)
         .add("catastrophe", catastrophe)
-        .add("exitCondition", exitCondition)
+        .add("detailedExitCode", detailedExitCode)
         .add("actualTargets", actualTargets)
         .add("testTargets", testTargets)
         .add("successfulTargets", successfulTargets)
+        .add("buildToolLogCollection", buildToolLogCollection)
         .toString();
+  }
+
+  /**
+   * Collection of data for the build tool logs event. See {@link BuildToolLogs} for details.
+   */
+  public static final class BuildToolLogCollection {
+    private final List<Pair<String, ByteString>> directValues = new ArrayList<>();
+    private final List<Pair<String, ListenableFuture<String>>> futureUris = new ArrayList<>();
+    private final List<LogFileEntry> localFiles = new ArrayList<>();
+    private boolean frozen;
+
+    public BuildToolLogCollection freeze() {
+      frozen = true;
+      return this;
+    }
+
+    @VisibleForTesting
+    public List<LogFileEntry> getLocalFiles() {
+      return localFiles;
+    }
+
+    public BuildToolLogCollection addDirectValue(String name, byte[] data) {
+      Preconditions.checkState(!frozen);
+      this.directValues.add(Pair.of(name, ByteString.copyFrom(data)));
+      return this;
+    }
+
+    public BuildToolLogCollection addUri(String name, String uri) {
+      Preconditions.checkState(!frozen);
+      this.futureUris.add(Pair.of(name, Futures.immediateFuture(uri)));
+      return this;
+    }
+
+    public BuildToolLogCollection addUriFuture(String name, ListenableFuture<String> uriFuture) {
+      Preconditions.checkState(!frozen);
+      this.futureUris.add(Pair.of(name, uriFuture));
+      return this;
+    }
+
+    public BuildToolLogCollection addLocalFile(String name, Path path) {
+      return addLocalFile(name, path, LocalFileType.LOG, LocalFileCompression.NONE);
+    }
+
+    public BuildToolLogCollection addLocalFile(
+        String name, Path path, LocalFileType localFileType, LocalFileCompression compression) {
+      Preconditions.checkState(!frozen);
+      switch (compression) {
+        case GZIP:
+          name = name + ".gz";
+          break;
+        case NONE:
+          break;
+      }
+      this.localFiles.add(new LogFileEntry(name, path, localFileType, compression));
+      return this;
+    }
+
+    public BuildToolLogs toEvent() {
+      Preconditions.checkState(frozen);
+      return new BuildToolLogs(directValues, futureUris, localFiles);
+    }
+
+    /** For debugging. */
+    @Override
+    public String toString() {
+      return MoreObjects.toStringHelper(this)
+          .add("directValues", directValues)
+          .add("futureUris", futureUris)
+          .add("localFiles", localFiles)
+          .toString();
+    }
   }
 }

@@ -16,12 +16,19 @@ package com.google.devtools.build.lib.actions;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
+import com.google.common.collect.Maps;
+import com.google.common.flogger.GoogleLogger;
+import com.google.devtools.build.lib.actions.Artifact.ArchivedTreeArtifact;
+import com.google.devtools.build.lib.actions.Artifact.SpecialArtifact;
+import com.google.devtools.build.lib.actions.cache.MetadataHandler;
 import com.google.devtools.build.lib.actions.extra.ExtraActionInfo;
 import com.google.devtools.build.lib.analysis.platform.PlatformInfo;
 import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.collect.CollectionUtils;
+import com.google.devtools.build.lib.collect.nestedset.Depset;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
@@ -29,24 +36,25 @@ import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.packages.AspectDescriptor;
+import com.google.devtools.build.lib.server.FailureDetails.Execution.Code;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec.VisibleForSerialization;
-import com.google.devtools.build.lib.skylarkbuildapi.ActionApi;
-import com.google.devtools.build.lib.skylarkinterface.SkylarkPrinter;
-import com.google.devtools.build.lib.syntax.EvalException;
-import com.google.devtools.build.lib.syntax.SkylarkDict;
-import com.google.devtools.build.lib.syntax.SkylarkList;
-import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
-import com.google.devtools.build.lib.util.Fingerprint;
-import com.google.devtools.build.lib.vfs.FileSystem;
-import com.google.devtools.build.lib.vfs.FileSystemUtils;
+import com.google.devtools.build.lib.starlarkbuildapi.ActionApi;
+import com.google.devtools.build.lib.starlarkbuildapi.CommandLineArgsApi;
+import com.google.devtools.build.lib.vfs.BulkDeleter;
 import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.Symlinks;
+import com.google.errorprone.annotations.ForOverride;
 import java.io.IOException;
 import java.util.Collection;
 import java.util.Map;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
+import net.starlark.java.eval.Dict;
+import net.starlark.java.eval.EvalException;
+import net.starlark.java.eval.Printer;
+import net.starlark.java.eval.Sequence;
 
 /**
  * Abstract implementation of Action which implements basic functionality: the inputs, outputs, and
@@ -55,7 +63,14 @@ import javax.annotation.concurrent.GuardedBy;
  */
 @Immutable
 @ThreadSafe
-public abstract class AbstractAction implements Action, ActionApi {
+public abstract class AbstractAction extends ActionKeyCacher implements Action, ActionApi {
+  private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
+
+  @Override
+  public boolean isImmutable() {
+    return true; // immutable and Starlark-hashable
+  }
+
   /**
    * An arbitrary default resource set. We assume that a typical subprocess is single-threaded
    * (i.e., uses one CPU core) and CPU-bound, and uses a small-ish amount of memory. In the past,
@@ -64,8 +79,7 @@ public abstract class AbstractAction implements Action, ActionApi {
    * amounts of memory), we suggest to use this default set.
    */
   // TODO(ulfjack): Collect actual data to confirm that this is an acceptable approximation.
-  public static final ResourceSet DEFAULT_RESOURCE_SET =
-      ResourceSet.createWithRamCpu(250, 1);
+  public static final ResourceSet DEFAULT_RESOURCE_SET = ResourceSet.createWithRamCpu(250, 1);
 
   /**
    * The owner/inputs/outputs attributes below should never be directly accessed even within
@@ -84,14 +98,13 @@ public abstract class AbstractAction implements Action, ActionApi {
    * <p>If the "tools" set does not contain exactly the right set of artifacts, the following can
    * happen: If an artifact that should be included is missing, the tool might not be restarted when
    * it should, and builds can become incorrect (example: The compiler binary is not part of this
-   * set, then the compiler gets upgraded, but the worker strategy still reuses the old version).
-   * If an artifact that should *not* be included is accidentally part of this set, the worker
-   * process will be restarted more often that is necessary - e.g. if a file that is unique to each
-   * unit of work, e.g. the source code that a compiler should compile for a compile action, is
-   * part of this set, then the worker will never be reused and will be restarted for each unit of
-   * work.
+   * set, then the compiler gets upgraded, but the worker strategy still reuses the old version). If
+   * an artifact that should *not* be included is accidentally part of this set, the worker process
+   * will be restarted more often that is necessary - e.g. if a file that is unique to each unit of
+   * work, e.g. the source code that a compiler should compile for a compile action, is part of this
+   * set, then the worker will never be reused and will be restarted for each unit of work.
    */
-  private final Iterable<Artifact> tools;
+  private final NestedSet<Artifact> tools;
 
   @GuardedBy("this")
   private boolean inputsDiscovered = false;  // Only used when discoversInputs() returns true
@@ -99,24 +112,18 @@ public abstract class AbstractAction implements Action, ActionApi {
   // The variable inputs is non-final only so that actions that discover their inputs can modify it.
   @GuardedBy("this")
   @VisibleForSerialization
-  protected Iterable<Artifact> inputs;
+  protected NestedSet<Artifact> inputs;
 
   protected final ActionEnvironment env;
   private final RunfilesSupplier runfilesSupplier;
   @VisibleForSerialization protected final ImmutableSet<Artifact> outputs;
 
-  private String cachedKey;
-
-  /**
-   * Construct an abstract action with the specified inputs and outputs;
-   */
+  /** Construct an abstract action with the specified inputs and outputs; */
   protected AbstractAction(
-      ActionOwner owner,
-      Iterable<Artifact> inputs,
-      Iterable<Artifact> outputs) {
+      ActionOwner owner, NestedSet<Artifact> inputs, Iterable<Artifact> outputs) {
     this(
         owner,
-        /*tools = */ImmutableList.of(),
+        /*tools=*/ NestedSetBuilder.emptySet(Order.STABLE_ORDER),
         inputs,
         EmptyRunfilesSupplier.INSTANCE,
         outputs,
@@ -125,12 +132,12 @@ public abstract class AbstractAction implements Action, ActionApi {
 
   protected AbstractAction(
       ActionOwner owner,
-      Iterable<Artifact> inputs,
+      NestedSet<Artifact> inputs,
       Iterable<Artifact> outputs,
       ActionEnvironment env) {
     this(
         owner,
-        /*tools = */ImmutableList.of(),
+        /*tools = */ NestedSetBuilder.emptySet(Order.STABLE_ORDER),
         inputs,
         EmptyRunfilesSupplier.INSTANCE,
         outputs,
@@ -139,15 +146,15 @@ public abstract class AbstractAction implements Action, ActionApi {
 
   protected AbstractAction(
       ActionOwner owner,
-      Iterable<Artifact> tools,
-      Iterable<Artifact> inputs,
+      NestedSet<Artifact> tools,
+      NestedSet<Artifact> inputs,
       RunfilesSupplier runfilesSupplier,
-      Iterable<Artifact> outputs,
+      Iterable<? extends Artifact> outputs,
       ActionEnvironment env) {
     Preconditions.checkNotNull(owner);
     this.owner = owner;
-    this.tools = CollectionUtils.makeImmutable(tools);
-    this.inputs = CollectionUtils.makeImmutable(inputs);
+    this.tools = tools;
+    this.inputs = inputs;
     this.env = Preconditions.checkNotNull(env);
     this.outputs = ImmutableSet.copyOf(outputs);
     this.runfilesSupplier = Preconditions.checkNotNull(runfilesSupplier);
@@ -161,7 +168,7 @@ public abstract class AbstractAction implements Action, ActionApi {
 
   @Override
   public final synchronized boolean inputsDiscovered() {
-    return discoversInputs() ? inputsDiscovered : true;
+    return !discoversInputs() || inputsDiscovered;
   }
 
   /**
@@ -178,27 +185,59 @@ public abstract class AbstractAction implements Action, ActionApi {
   }
 
   /**
-   * Run input discovery on the action.
+   * Runs input discovery on the action.
    *
-   * <p>Called by Blaze if {@link #discoversInputs()} returns true. It must return the set of
-   * input artifacts that were not known at analysis time. May also call
-   * {@link #updateInputs(Iterable<Artifact>)}; if it doesn't, the action itself must arrange for
-   * the newly discovered artifacts to be available during action execution, probably by keeping
-   * state in the action instance and using a custom action execution context and for
-   * {@code #updateInputs()} to be called during the execution of the action.
+   * <p>Called by Blaze if {@link #discoversInputs()} returns true. It must return the set of input
+   * artifacts that were not known at analysis time. May also call {@link #updateInputs}; if it
+   * doesn't, the action itself must arrange for the newly discovered artifacts to be available
+   * during action execution, probably by keeping state in the action instance and using a custom
+   * action execution context and for {@link #updateInputs} to be called during the execution of the
+   * action.
    *
-   * <p>Since keeping state within an action bad, don't do that unless there is a very good reason
-   * to do so.
+   * <p>Since keeping state within an action is bad, don't do that unless there is a very good
+   * reason to do so.
+   *
+   * <p>May return {@code null} if more dependencies were requested from skyframe but were
+   * unavailable, meaning a restart is necessary.
    */
   @Override
-  public Iterable<Artifact> discoverInputs(ActionExecutionContext actionExecutionContext)
+  @Nullable
+  public NestedSet<Artifact> discoverInputs(ActionExecutionContext actionExecutionContext)
       throws ActionExecutionException, InterruptedException {
     throw new IllegalStateException("discoverInputs cannot be called for " + this.prettyPrint()
         + " since it does not discover inputs");
   }
 
   @Override
-  public Iterable<Artifact> getAllowedDerivedInputs() {
+  public final void resetDiscoveredInputs() {
+    Preconditions.checkState(discoversInputs(), "Not an input-discovering action: %s", this);
+    if (!inputsDiscovered()) {
+      return;
+    }
+    NestedSet<Artifact> originalInputs = getOriginalInputs();
+    if (originalInputs != null) {
+      synchronized (this) {
+        inputs = originalInputs;
+        inputsDiscovered = false;
+      }
+    }
+  }
+
+  /**
+   * Returns this action's <em>original</em> inputs, prior to {@linkplain #discoverInputs input
+   * discovery}.
+   *
+   * <p>Input-discovering actions which are able to reconstitute their original inputs may override
+   * this, allowing for memory savings.
+   */
+  @Nullable
+  @ForOverride
+  protected NestedSet<Artifact> getOriginalInputs() {
+    return null;
+  }
+
+  @Override
+  public NestedSet<Artifact> getAllowedDerivedInputs() {
     throw new IllegalStateException(
         "Method must be overridden for actions that may have unknown inputs.");
   }
@@ -214,26 +253,34 @@ public abstract class AbstractAction implements Action, ActionApi {
    * itself when an action is loaded from the on-disk action cache.
    */
   @Override
-  public synchronized void updateInputs(Iterable<Artifact> inputs) {
-    this.inputs = CollectionUtils.makeImmutable(inputs);
+  public synchronized void updateInputs(NestedSet<Artifact> inputs) {
+    Preconditions.checkState(
+        discoversInputs(), "Can't update inputs unless discovering: %s %s", this, inputs);
+    this.inputs = inputs;
     inputsDiscovered = true;
   }
 
   @Override
-  public Iterable<Artifact> getTools() {
+  public NestedSet<Artifact> getTools() {
     return tools;
   }
 
-  /**
-   * Should not be overridden (it's non-final only for tests)
-   */
+  /** Should not be overridden (it's non-final only for tests) */
   @Override
-  public synchronized Iterable<Artifact> getInputs() {
+  public synchronized NestedSet<Artifact> getInputs() {
     return inputs;
   }
 
   public final ActionEnvironment getEnvironment() {
     return env;
+  }
+
+  @Override
+  public ImmutableMap<String, String> getEffectiveEnvironment(Map<String, String> clientEnv)
+      throws CommandLineExpansionException {
+    Map<String, String> effectiveEnvironment = Maps.newLinkedHashMapWithExpectedSize(env.size());
+    env.resolve(effectiveEnvironment, clientEnv);
+    return ImmutableMap.copyOf(effectiveEnvironment);
   }
 
   @Override
@@ -255,7 +302,7 @@ public abstract class AbstractAction implements Action, ActionApi {
   public Artifact getPrimaryInput() {
     // The default behavior is to return the first input artifact.
     // Call through the method, not the field, because it may be overridden.
-    return Iterables.getFirst(getInputs(), null);
+    return Iterables.getFirst(getInputs().toList(), null);
   }
 
   @Override
@@ -266,50 +313,25 @@ public abstract class AbstractAction implements Action, ActionApi {
   }
 
   @Override
-  public Iterable<Artifact> getMandatoryInputs() {
+  public NestedSet<Artifact> getMandatoryInputs() {
     return getInputs();
   }
 
   @Override
   public String toString() {
-    return prettyPrint() + " (" + getMnemonic() + "[" + ImmutableList.copyOf(getInputs())
+    return prettyPrint()
+        + " ("
+        + getMnemonic()
+        + "["
+        + getInputs().toList()
         + (inputsDiscovered() ? " -> " : ", unknown inputs -> ")
-        + getOutputs() + "]" + ")";
+        + getOutputs()
+        + "]"
+        + ")";
   }
 
   @Override
   public abstract String getMnemonic();
-
-  /**
-   * See the javadoc for {@link com.google.devtools.build.lib.actions.Action} and {@link
-   * ActionExecutionMetadata#getKey(ActionKeyContext)} for the contract for {@link
-   * #computeKey(ActionKeyContext, Fingerprint)}.
-   */
-  protected abstract void computeKey(ActionKeyContext actionKeyContext, Fingerprint fp)
-      throws CommandLineExpansionException;
-
-  @Override
-  public final synchronized String getKey(ActionKeyContext actionKeyContext) {
-    if (cachedKey == null) {
-      try {
-        Fingerprint fp = new Fingerprint();
-        computeKey(actionKeyContext, fp);
-
-        // Add a bool indicating whether the execution platform was set.
-        fp.addBoolean(getExecutionPlatform() != null);
-        if (getExecutionPlatform() != null) {
-          // Add the execution platform information.
-          getExecutionPlatform().addTo(fp);
-        }
-
-        // Compute the actual key and store it.
-        cachedKey = fp.hexDigestAndReset();
-      } catch (CommandLineExpansionException e) {
-        cachedKey = KEY_ERROR;
-      }
-    }
-    return cachedKey;
-  }
 
   @Override
   public String describeKey() {
@@ -369,7 +391,7 @@ public abstract class AbstractAction implements Action, ActionApi {
   }
 
   @Override
-  public void repr(SkylarkPrinter printer) {
+  public void repr(Printer printer) {
     printer.append(prettyPrint()); // TODO(bazel-team): implement a readable representation
   }
 
@@ -378,42 +400,109 @@ public abstract class AbstractAction implements Action, ActionApi {
    * directory recursively removes the contents of the directory.
    *
    * @param execRoot the exec root in which this action is executed
+   * @param bulkDeleter a helper to bulk delete outputs to avoid delegating to the filesystem
+   * @param outputPrefixForArchivedArtifactsCleanup derived output prefix to construct archived tree
+   *     artifacts to be cleaned up. If null, no cleanup is needed.
    */
-  protected void deleteOutputs(FileSystem fileSystem, Path execRoot) throws IOException {
-    for (Artifact output : getOutputs()) {
-      deleteOutput(fileSystem, output);
+  protected final void deleteOutputs(
+      Path execRoot,
+      ArtifactPathResolver pathResolver,
+      @Nullable BulkDeleter bulkDeleter,
+      @Nullable PathFragment outputPrefixForArchivedArtifactsCleanup)
+      throws IOException, InterruptedException {
+    Iterable<Artifact> artifactsToDelete =
+        outputPrefixForArchivedArtifactsCleanup != null
+            ? Iterables.concat(
+                outputs, archivedTreeArtifactOutputs(outputPrefixForArchivedArtifactsCleanup))
+            : outputs;
+    Iterable<PathFragment> additionalPathOutputsToDelete = getAdditionalPathOutputsToDelete();
+    Iterable<PathFragment> directoryOutputsToDelete = getDirectoryOutputsToDelete();
+    if (bulkDeleter != null) {
+      bulkDeleter.bulkDelete(
+          Iterables.concat(
+              Artifact.asPathFragments(artifactsToDelete),
+              additionalPathOutputsToDelete,
+              directoryOutputsToDelete));
+      return;
+    }
+
+    // TODO(b/185277726): Either we don't need a path resolver for actual deletion of output
+    //  artifacts (likely) or we need to transform the fragments below (and then the resolver should
+    //  be augmented to deal with exec-path PathFragments).
+    for (Artifact output : artifactsToDelete) {
+      deleteOutput(output, pathResolver);
+    }
+
+    for (PathFragment path : additionalPathOutputsToDelete) {
+      deleteOutput(execRoot.getRelative(path), /*root=*/ null);
+    }
+
+    for (PathFragment path : directoryOutputsToDelete) {
+      execRoot.getRelative(path).deleteTree();
     }
   }
 
+  @ForOverride
+  protected Iterable<PathFragment> getAdditionalPathOutputsToDelete() {
+    return ImmutableList.of();
+  }
+
+  @ForOverride
+  protected Iterable<PathFragment> getDirectoryOutputsToDelete() {
+    return ImmutableList.of();
+  }
+
+  private Iterable<Artifact> archivedTreeArtifactOutputs(PathFragment derivedPathPrefix) {
+    return Iterables.transform(
+        Iterables.filter(outputs, Artifact::isTreeArtifact),
+        tree -> ArchivedTreeArtifact.create((SpecialArtifact) tree, derivedPathPrefix));
+  }
+
   /**
-   * Helper method to remove an Artifact. If the Artifact refers to a directory recursively removes
-   * the contents of the directory.
+   * Remove an output artifact.
+   *
+   * <p>If the path refers to a directory, recursively removes the contents of the directory.
+   *
+   * @param output artifact to remove
    */
-  protected void deleteOutput(FileSystem fileSystem, Artifact output) throws IOException {
-    Path path = output.getPath();
+  protected static void deleteOutput(Artifact output, ArtifactPathResolver pathResolver)
+      throws IOException {
+    deleteOutput(
+        pathResolver.toPath(output), pathResolver.transformRoot(output.getRoot().getRoot()));
+  }
+
+  /**
+   * Helper method to remove an output file.
+   *
+   * <p>If the path refers to a directory, recursively removes the contents of the directory.
+   *
+   * @param path the output to remove
+   * @param root the root containing the output. This is used to check that we don't delete
+   *     arbitrary files in the file system.
+   */
+  public static void deleteOutput(Path path, @Nullable Root root) throws IOException {
     try {
       // Optimize for the common case: output artifacts are files.
       path.delete();
     } catch (IOException e) {
       // Handle a couple of scenarios where the output can still be deleted, but make sure we're not
       // deleting random files on the filesystem.
-      if (output.getRoot() == null) {
-        throw e;
+      if (root == null) {
+        throw new IOException("null root", e);
       }
-      Root outputRoot = output.getRoot().getRoot();
-      if (!outputRoot.contains(path)) {
-        throw e;
+      if (!root.contains(path)) {
+        throw new IOException(String.format("%s not under %s", path, root), e);
       }
 
       Path parentDir = path.getParentDirectory();
-      if (!parentDir.isWritable() && outputRoot.contains(parentDir)) {
+      if (!parentDir.isWritable() && root.contains(parentDir)) {
         // Retry deleting after making the parent writable.
         parentDir.setWritable(true);
-        deleteOutput(fileSystem, output);
+        deleteOutput(path, root);
       } else if (path.isDirectory(Symlinks.NOFOLLOW)) {
-        FileSystemUtils.deleteTree(path);
+        path.deleteTree();
       } else {
-        throw e;
+        throw new IOException(e);
       }
     }
   }
@@ -426,19 +515,22 @@ public abstract class AbstractAction implements Action, ActionApi {
       EventHandler eventHandler, MetadataProvider metadataProvider) throws ExecException {
     // Report "directory dependency checking" warning only for non-generated directories (generated
     // ones will be reported earlier).
-    for (Artifact input : getMandatoryInputs()) {
+    for (Artifact input : getMandatoryInputs().toList()) {
       // Assume that if the file did not exist, we would not have gotten here.
       try {
         if (input.isSourceArtifact()
             && metadataProvider.getMetadata(input).getType().isDirectory()) {
           // TODO(ulfjack): What about dependency checking of special files?
-          eventHandler.handle(Event.warn(getOwner().getLocation(),
-              String.format(
-                  "input '%s' to %s is a directory; dependency checking of directories is unsound",
-                  input.prettyPrint(), getOwner().getLabel())));
+          eventHandler.handle(
+              Event.warn(
+                  getOwner().getLocation(),
+                  String.format(
+                      "input '%s' to %s is a directory; "
+                          + "dependency checking of directories is unsound",
+                      input.prettyPrint(), getOwner().getLabel())));
         }
       } catch (IOException e) {
-        throw new UserExecException(e);
+        throw new EnvironmentalExecException(e, Code.INPUT_DIRECTORY_CHECK_IO_EXCEPTION);
       }
     }
   }
@@ -450,32 +542,52 @@ public abstract class AbstractAction implements Action, ActionApi {
 
   /** If the action might create directories as outputs this method must be called. */
   protected void checkOutputsForDirectories(ActionExecutionContext actionExecutionContext) {
+    FileArtifactValue metadata;
     for (Artifact output : getOutputs()) {
-      Path path = actionExecutionContext.getInputPath(output);
-      String ownerString = Label.print(getOwner().getLabel());
-      if (path.isDirectory()) {
-        actionExecutionContext
-            .getEventHandler()
-            .handle(
-                Event.warn(
-                        getOwner().getLocation(),
-                        "output '"
-                            + output.prettyPrint()
-                            + "' of "
-                            + ownerString
-                            + " is a directory; dependency checking of directories is unsound")
-                    .withTag(ownerString));
+      MetadataHandler metadataHandler = actionExecutionContext.getMetadataHandler();
+      if (metadataHandler.artifactOmitted(output)) {
+        continue;
       }
+      try {
+        metadata = metadataHandler.getMetadata(output);
+      } catch (IOException e) {
+        logger.atWarning().withCause(e).log("Error getting metadata for %s", output);
+        metadata = null;
+      }
+      if (metadata != null) {
+        if (!metadata.getType().isDirectory()) {
+          continue;
+        }
+      } else if (!actionExecutionContext.getInputPath(output).isDirectory()) {
+        continue;
+      }
+      String ownerString = Label.print(getOwner().getLabel());
+      actionExecutionContext
+          .getEventHandler()
+          .handle(
+              Event.warn(
+                      getOwner().getLocation(),
+                      "output '"
+                          + output.prettyPrint()
+                          + "' of "
+                          + ownerString
+                          + " is a directory; dependency checking of directories is unsound")
+                  .withTag(ownerString));
     }
   }
 
   @Override
-  public void prepare(FileSystem fileSystem, Path execRoot) throws IOException {
-    deleteOutputs(fileSystem, execRoot);
+  public void prepare(
+      Path execRoot,
+      ArtifactPathResolver pathResolver,
+      @Nullable BulkDeleter bulkDeleter,
+      @Nullable PathFragment outputPrefixForArchivedArtifactsCleanup)
+      throws IOException, InterruptedException {
+    deleteOutputs(execRoot, pathResolver, bulkDeleter, outputPrefixForArchivedArtifactsCleanup);
   }
 
   @Override
-  public String describe() {
+  public final String describe() {
     String progressMessage = getProgressMessage();
     return progressMessage != null ? progressMessage : defaultProgressMessage();
   }
@@ -487,12 +599,12 @@ public abstract class AbstractAction implements Action, ActionApi {
 
   @Override
   public ExtraActionInfo.Builder getExtraActionInfo(ActionKeyContext actionKeyContext)
-      throws CommandLineExpansionException {
+      throws CommandLineExpansionException, InterruptedException {
     ActionOwner owner = getOwner();
     ExtraActionInfo.Builder result =
         ExtraActionInfo.newBuilder()
             .setOwner(owner.getLabel().toString())
-            .setId(getKey(actionKeyContext))
+            .setId(getKey(actionKeyContext, /*artifactExpander=*/ null))
             .setMnemonic(getMnemonic());
     Iterable<AspectDescriptor> aspectDescriptors = owner.getAspectDescriptors();
     AspectDescriptor lastAspect = null;
@@ -534,52 +646,69 @@ public abstract class AbstractAction implements Action, ActionApi {
    * Returns input files that need to be present to allow extra_action rules to shadow this action
    * correctly when run remotely. This is at least the normal inputs of the action, but may include
    * other files as well. For example C(++) compilation may perform include file header scanning.
-   * This needs to be mirrored by the extra_action rule. Called by
-   * {@link com.google.devtools.build.lib.analysis.extra.ExtraAction} at execution time for actions
-   * that return true for {link #discoversInputs()}.
+   * This needs to be mirrored by the extra_action rule. Called by {@link
+   * com.google.devtools.build.lib.analysis.extra.ExtraAction} at execution time for actions that
+   * return true for {link #discoversInputs()}.
    *
    * @param actionExecutionContext Services in the scope of the action, like the Out/Err streams.
-   * @throws ActionExecutionException only when code called from this method
-   *     throws that exception.
+   * @throws ActionExecutionException only when code called from this method throws that exception.
    * @throws InterruptedException if interrupted
    */
   @Override
-  public Iterable<Artifact> getInputFilesForExtraAction(
+  public NestedSet<Artifact> getInputFilesForExtraAction(
       ActionExecutionContext actionExecutionContext)
       throws ActionExecutionException, InterruptedException {
-    return ImmutableList.of();
+    return NestedSetBuilder.emptySet(Order.STABLE_ORDER);
   }
 
   @Override
-  public SkylarkNestedSet getSkylarkInputs() {
-    return SkylarkNestedSet.of(Artifact.class, NestedSetBuilder.wrap(
-        Order.STABLE_ORDER, getInputs()));
+  public Depset getStarlarkInputs() {
+    return Depset.of(Artifact.TYPE, getInputs());
   }
 
   @Override
-  public SkylarkNestedSet getSkylarkOutputs() {
-    return SkylarkNestedSet.of(Artifact.class, NestedSetBuilder.wrap(
-        Order.STABLE_ORDER, getOutputs()));
+  public Depset getStarlarkOutputs() {
+    return Depset.of(Artifact.TYPE, NestedSetBuilder.wrap(Order.STABLE_ORDER, getOutputs()));
   }
 
   @Override
-  public SkylarkList<String> getSkylarkArgv() throws EvalException {
+  public Sequence<String> getStarlarkArgv() throws EvalException, InterruptedException {
     return null;
   }
 
   @Override
-  public String getSkylarkContent() throws IOException {
+  public Sequence<CommandLineArgsApi> getStarlarkArgs() throws EvalException {
+    // Not all action types support returning Args.
     return null;
   }
 
   @Override
-  public SkylarkDict<String, String> getSkylarkSubstitutions() {
+  public String getStarlarkContent() throws IOException, EvalException, InterruptedException {
     return null;
   }
 
   @Override
-  public SkylarkDict<String, String> getEnv() {
-    return SkylarkDict.copyOf(null, env.getFixedEnv().toMap());
+  public Dict<String, String> getStarlarkSubstitutions() {
+    return null;
+  }
+
+  @Override
+  public Dict<String, String> getExecutionInfoDict() {
+    Map<String, String> executionInfo = getExecutionInfo();
+    if (executionInfo == null) {
+      return null;
+    }
+    return Dict.immutableCopyOf(executionInfo);
+  }
+
+  @Override
+  public Dict<String, String> getEnv() {
+    return Dict.immutableCopyOf(env.getFixedEnv().toMap());
+  }
+
+  @Override
+  public ImmutableMap<String, String> getExecProperties() {
+    return getOwner().getExecProperties();
   }
 
   @Override

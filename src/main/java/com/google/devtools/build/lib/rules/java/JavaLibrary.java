@@ -13,7 +13,8 @@
 // limitations under the License.
 package com.google.devtools.build.lib.rules.java;
 
-import com.google.common.collect.ImmutableList;
+import static com.google.devtools.build.lib.collect.nestedset.Order.STABLE_ORDER;
+
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
@@ -24,8 +25,10 @@ import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
-import com.google.devtools.build.lib.rules.cpp.LinkerInput;
+import com.google.devtools.build.lib.collect.nestedset.Order;
+import com.google.devtools.build.lib.rules.cpp.LibraryToLink;
 import com.google.devtools.build.lib.rules.java.JavaCompilationArgsProvider.ClasspathType;
+import com.google.devtools.build.lib.rules.java.JavaRuleOutputJarsProvider.JavaOutput;
 import com.google.devtools.build.lib.rules.java.proto.GeneratedExtensionRegistryProvider;
 
 /** Implementation for the java_library rule. */
@@ -52,7 +55,8 @@ public class JavaLibrary implements RuleConfiguredTargetFactory {
       final JavaCommon common,
       boolean includeGeneratedExtensionRegistry,
       boolean isJavaPluginRule)
-      throws InterruptedException, RuleErrorException, ActionConflictException {
+      throws InterruptedException, ActionConflictException {
+    semantics.checkDependencyRuleKinds(ruleContext);
     JavaTargetAttributes.Builder attributesBuilder = common.initCommon();
 
     // Collect the transitive dependencies.
@@ -76,10 +80,9 @@ public class JavaLibrary implements RuleConfiguredTargetFactory {
     JavaConfiguration javaConfig = ruleContext.getFragment(JavaConfiguration.class);
     NestedSetBuilder<Artifact> filesBuilder = NestedSetBuilder.stableOrder();
 
-    JavaTargetAttributes attributes = helper.getAttributes();
+    JavaTargetAttributes attributes = attributesBuilder.build();
     if (attributes.hasMessages()) {
-      helper.setTranslations(
-          semantics.translate(ruleContext, javaConfig, attributes.getMessages()));
+      helper.setTranslations(semantics.translate(ruleContext, attributes.getMessages()));
     }
 
     ruleContext.checkSrcsSamePackage(true);
@@ -104,40 +107,18 @@ public class JavaLibrary implements RuleConfiguredTargetFactory {
 
     filesBuilder.add(classJar);
 
-    Artifact manifestProtoOutput = helper.createManifestProtoOutput(classJar);
-
-    // The gensrc jar is created only if the target uses annotation processing.
-    // Otherwise, it is null, and the source jar action will not depend on the compile action.
-    Artifact genSourceJar = null;
-    Artifact genClassJar = null;
-    if (helper.usesAnnotationProcessing()) {
-      genClassJar = helper.createGenJar(classJar);
-      genSourceJar = helper.createGensrcJar(classJar);
-      helper.createGenJarAction(classJar, manifestProtoOutput, genClassJar);
-    }
-
-    Artifact outputDepsProto = helper.createOutputDepsProtoArtifact(classJar, javaArtifactsBuilder);
-
-    Artifact nativeHeaderOutput = helper.createNativeHeaderJar(classJar);
-
-    helper.createCompileActionWithInstrumentation(
-        classJar,
-        manifestProtoOutput,
-        genSourceJar,
-        outputDepsProto,
-        javaArtifactsBuilder,
-        nativeHeaderOutput);
-    helper.createSourceJarAction(srcJar, genSourceJar);
+    JavaCompileOutputs<Artifact> outputs = helper.createOutputs(classJar);
+    javaArtifactsBuilder.setCompileTimeDependencies(outputs.depsProto());
+    helper.createCompileAction(outputs);
+    helper.createSourceJarAction(srcJar, outputs.genSource());
 
     Artifact iJar = null;
     if (attributes.hasSources() && jar != null) {
       iJar = helper.createCompileTimeJarAction(jar, javaArtifactsBuilder);
     }
+
     JavaRuleOutputJarsProvider.Builder ruleOutputJarsProviderBuilder =
-        JavaRuleOutputJarsProvider.builder()
-            .addOutputJar(classJar, iJar, manifestProtoOutput, ImmutableList.of(srcJar))
-            .setJdeps(outputDepsProto)
-            .setNativeHeaders(nativeHeaderOutput);
+        JavaRuleOutputJarsProvider.builder();
 
     GeneratedExtensionRegistryProvider generatedExtensionRegistryProvider = null;
     if (includeGeneratedExtensionRegistry) {
@@ -153,24 +134,27 @@ public class JavaLibrary implements RuleConfiguredTargetFactory {
 
     boolean neverLink = JavaCommon.isNeverLink(ruleContext);
     JavaCompilationArtifacts javaArtifacts = javaArtifactsBuilder.build();
+
+    ruleOutputJarsProviderBuilder.addJavaOutput(
+        JavaOutput.builder()
+            .fromJavaCompileOutputs(outputs)
+            .setCompileJar(iJar)
+            .setCompileJdeps(javaArtifacts.getCompileTimeDependencyArtifact())
+            .addSourceJar(srcJar)
+            .build());
+
     common.setJavaCompilationArtifacts(javaArtifacts);
     common.setClassPathFragment(
         new ClasspathConfiguredFragment(
             javaArtifacts, attributes, neverLink, helper.getBootclasspathOrDefault()));
 
     JavaCompilationArgsProvider javaCompilationArgs =
-        common.collectJavaCompilationArgs(
-            neverLink, /* srcLessDepsExport= */ false, /* javaProtoLibraryStrictDeps= */ false);
-    JavaStrictCompilationArgsProvider strictJavaCompilationArgs =
-        new JavaStrictCompilationArgsProvider(
-            common.collectJavaCompilationArgs(
-                neverLink, /* srcLessDepsExport= */ false, /* javaProtoLibraryStrictDeps= */ true));
-    NestedSet<LinkerInput> transitiveJavaNativeLibraries =
+        common.collectJavaCompilationArgs(neverLink, /* srcLessDepsExport= */ false);
+    NestedSet<LibraryToLink> transitiveJavaNativeLibraries =
         common.collectTransitiveJavaNativeLibraries();
 
     RuleConfiguredTargetBuilder builder = new RuleConfiguredTargetBuilder(ruleContext);
 
-    semantics.addProviders(ruleContext, common, genSourceJar, builder);
     if (generatedExtensionRegistryProvider != null) {
       builder.addNativeDeclaredProvider(generatedExtensionRegistryProvider);
     }
@@ -184,7 +168,7 @@ public class JavaLibrary implements RuleConfiguredTargetFactory {
     JavaInfo.Builder javaInfoBuilder = JavaInfo.Builder.create();
 
     common.addTransitiveInfoProviders(builder, javaInfoBuilder, filesToBuild, classJar);
-    common.addGenJarsProvider(builder, javaInfoBuilder, genClassJar, genSourceJar);
+    common.addGenJarsProvider(builder, javaInfoBuilder, outputs.genClass(), outputs.genSource());
 
     NestedSet<Artifact> proguardSpecs = new ProguardLibrary(ruleContext).collectProguardSpecs();
 
@@ -197,33 +181,45 @@ public class JavaLibrary implements RuleConfiguredTargetFactory {
             // attrs.
             : JavaCommon.getTransitivePlugins(ruleContext);
 
-    // java_library doesn't need to return JavaRunfilesProvider
     JavaInfo javaInfo =
         javaInfoBuilder
             .addProvider(JavaCompilationArgsProvider.class, compilationArgsProvider)
-            .addProvider(JavaStrictCompilationArgsProvider.class, strictJavaCompilationArgs)
             .addProvider(JavaSourceJarsProvider.class, sourceJarsProvider)
             .addProvider(JavaRuleOutputJarsProvider.class, ruleOutputJarsProvider)
             // TODO(bazel-team): this should only happen for java_plugin
             .addProvider(JavaPluginInfoProvider.class, pluginInfoProvider)
+            .addTransitiveOnlyRuntimeJars(common.getDependencies())
             .setRuntimeJars(javaArtifacts.getRuntimeJars())
             .setJavaConstraints(JavaCommon.getConstraints(ruleContext))
             .setNeverlink(neverLink)
             .build();
 
     builder
-        .addSkylarkTransitiveInfo(
-            JavaSkylarkApiProvider.NAME, JavaSkylarkApiProvider.fromRuleContext())
         .addProvider(
             RunfilesProvider.simple(
                 JavaCommon.getRunfiles(ruleContext, semantics, javaArtifacts, neverLink)))
         .setFilesToBuild(filesToBuild)
-        .addProvider(new JavaNativeLibraryProvider(transitiveJavaNativeLibraries))
-        .addProvider(JavaSourceInfoProvider.fromJavaTargetAttributes(attributes, semantics))
+        .addNativeDeclaredProvider(new JavaNativeLibraryInfo(transitiveJavaNativeLibraries))
         .addNativeDeclaredProvider(new ProguardSpecProvider(proguardSpecs))
         .addNativeDeclaredProvider(javaInfo)
         .addOutputGroup(JavaSemantics.SOURCE_JARS_OUTPUT_GROUP, transitiveSourceJars)
+        .addOutputGroup(
+            JavaSemantics.DIRECT_SOURCE_JARS_OUTPUT_GROUP,
+            NestedSetBuilder.wrap(Order.STABLE_ORDER, sourceJarsProvider.getSourceJars()))
         .addOutputGroup(OutputGroupInfo.HIDDEN_TOP_LEVEL, proguardSpecs);
+
+    Artifact validation =
+        AndroidLintActionBuilder.create(
+            ruleContext,
+            javaConfig,
+            attributes,
+            helper.getBootclasspathOrDefault(),
+            common,
+            outputs);
+    if (validation != null) {
+      builder.addOutputGroup(
+          OutputGroupInfo.VALIDATION, NestedSetBuilder.create(STABLE_ORDER, validation));
+    }
 
     if (ruleContext.hasErrors()) {
       return null;

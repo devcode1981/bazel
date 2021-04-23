@@ -14,21 +14,19 @@
 package com.google.devtools.build.lib.rules.java.proto;
 
 import static com.google.common.base.Preconditions.checkNotNull;
-import static com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode.TARGET;
 
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration.StrictDepsMode;
+import com.google.devtools.build.lib.analysis.config.CoreOptionConverters.StrictDepsMode;
 import com.google.devtools.build.lib.rules.java.JavaCompilationArgsProvider;
 import com.google.devtools.build.lib.rules.java.JavaCompilationArtifacts;
-import com.google.devtools.build.lib.rules.java.JavaCompilationHelper;
 import com.google.devtools.build.lib.rules.java.JavaInfo;
 import com.google.devtools.build.lib.rules.java.JavaLibraryHelper;
 import com.google.devtools.build.lib.rules.java.JavaRuleOutputJarsProvider;
-import com.google.devtools.build.lib.rules.java.JavaRuntimeInfo;
 import com.google.devtools.build.lib.rules.java.JavaSemantics;
+import com.google.devtools.build.lib.rules.java.JavaToolchainProvider;
 import com.google.devtools.build.lib.rules.proto.ProtoLangToolchainProvider;
 
 /** Common logic used by java*_proto aspects (e.g. {@link JavaLiteProtoAspect}). */
@@ -108,7 +106,8 @@ public class JavaProtoAspectCommon {
       String injectingRuleKind,
       Artifact sourceJar,
       Artifact outputJar,
-      JavaCompilationArgsProvider dep) {
+      JavaCompilationArgsProvider dep)
+      throws InterruptedException {
     JavaLibraryHelper helper =
         new JavaLibraryHelper(ruleContext)
             .setInjectingRuleKind(injectingRuleKind)
@@ -128,9 +127,7 @@ public class JavaProtoAspectCommon {
     JavaCompilationArtifacts artifacts =
         helper.build(
             javaSemantics,
-            JavaCompilationHelper.getJavaToolchainProvider(ruleContext),
-            JavaRuntimeInfo.forHost(ruleContext),
-            JavaCompilationHelper.getInstrumentationJars(ruleContext),
+            JavaToolchainProvider.from(ruleContext),
             JavaRuleOutputJarsProvider.builder(),
             /*createOutputSourceJar*/ false,
             /*outputSourceJar=*/ null);
@@ -157,15 +154,14 @@ public class JavaProtoAspectCommon {
   /** Returns the toolchain that specifies how to generate code from {@code .proto} files. */
   public ProtoLangToolchainProvider getProtoToolchainProvider() {
     return checkNotNull(
-        ruleContext.getPrerequisite(protoToolchainAttr, TARGET, ProtoLangToolchainProvider.class));
+        ruleContext.getPrerequisite(protoToolchainAttr, ProtoLangToolchainProvider.class));
   }
 
   /**
    * Returns the toolchain that specifies how to generate Java-lite code from {@code .proto} files.
    */
   static ProtoLangToolchainProvider getLiteProtoToolchainProvider(RuleContext ruleContext) {
-    return ruleContext.getPrerequisite(
-        LITE_PROTO_TOOLCHAIN_ATTR, TARGET, ProtoLangToolchainProvider.class);
+    return ruleContext.getPrerequisite(LITE_PROTO_TOOLCHAIN_ATTR, ProtoLangToolchainProvider.class);
   }
 
   /**

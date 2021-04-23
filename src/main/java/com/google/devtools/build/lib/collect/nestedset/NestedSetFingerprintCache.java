@@ -17,6 +17,7 @@ package com.google.devtools.build.lib.collect.nestedset;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.HashMultiset;
 import com.google.common.collect.Multiset;
+import com.google.devtools.build.lib.actions.CommandLineExpansionException;
 import com.google.devtools.build.lib.actions.CommandLineItem;
 import com.google.devtools.build.lib.actions.CommandLineItem.MapFn;
 import com.google.devtools.build.lib.util.Fingerprint;
@@ -36,12 +37,14 @@ public class NestedSetFingerprintCache {
   private final Set<Class<?>> seenMapFns = new HashSet<>();
   private final Multiset<Class<?>> seenParametrizedMapFns = HashMultiset.create();
 
-  public <T> void addNestedSetToFingerprint(Fingerprint fingerprint, NestedSet<T> nestedSet) {
+  public <T> void addNestedSetToFingerprint(Fingerprint fingerprint, NestedSet<T> nestedSet)
+      throws CommandLineExpansionException, InterruptedException {
     addNestedSetToFingerprint(CommandLineItem.MapFn.DEFAULT, fingerprint, nestedSet);
   }
 
   public <T> void addNestedSetToFingerprint(
-      CommandLineItem.MapFn<? super T> mapFn, Fingerprint fingerprint, NestedSet<T> nestedSet) {
+      CommandLineItem.MapFn<? super T> mapFn, Fingerprint fingerprint, NestedSet<T> nestedSet)
+      throws CommandLineExpansionException, InterruptedException {
     if (mapFn instanceof CommandLineItem.CapturingMapFn) {
       addNestedSetToFingerprintSlow(mapFn, fingerprint, nestedSet);
       return;
@@ -58,9 +61,10 @@ public class NestedSetFingerprintCache {
   }
 
   private <T> void addNestedSetToFingerprintSlow(
-      MapFn<? super T> mapFn, Fingerprint fingerprint, NestedSet<T> nestedSet) {
-    for (T object : nestedSet) {
-      mapFn.expandToCommandLine(object, fingerprint);
+      MapFn<? super T> mapFn, Fingerprint fingerprint, NestedSet<T> nestedSet)
+      throws CommandLineExpansionException, InterruptedException {
+    for (T object : nestedSet.toList()) {
+      addToFingerprint(mapFn, fingerprint, object);
     }
   }
 
@@ -75,7 +79,8 @@ public class NestedSetFingerprintCache {
       CommandLineItem.MapFn<? super T> mapFn,
       Fingerprint fingerprint,
       DigestMap digestMap,
-      Object children) {
+      Object children)
+      throws CommandLineExpansionException, InterruptedException {
     if (children instanceof Object[]) {
       if (!digestMap.readDigest(children, fingerprint)) {
         Fingerprint childrenFingerprint = new Fingerprint();
@@ -91,8 +96,9 @@ public class NestedSetFingerprintCache {
 
   @VisibleForTesting
   <T> void addToFingerprint(
-      CommandLineItem.MapFn<? super T> mapFn, Fingerprint fingerprint, T object) {
-    mapFn.expandToCommandLine(object, fingerprint);
+      CommandLineItem.MapFn<? super T> mapFn, Fingerprint fingerprint, T object)
+      throws CommandLineExpansionException, InterruptedException {
+    mapFn.expandToCommandLine(object, fingerprint::addString);
   }
 
   private static Map<CommandLineItem.MapFn<?>, DigestMap> createMap() {
@@ -123,6 +129,6 @@ public class NestedSetFingerprintCache {
     }
     // TODO(b/112460990): Use the value from DigestHashFunction.getDefault(), but check for
     // contention.
-    return new DigestMap(DigestHashFunction.MD5, 1024);
+    return new DigestMap(DigestHashFunction.SHA256, 1024);
   }
 }

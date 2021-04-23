@@ -25,6 +25,8 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import javax.annotation.concurrent.Immutable;
 
 /**
@@ -53,11 +55,11 @@ public class IsolatedOptionsData extends OpaqueOptionsData {
    * instances, and must be used through the thread safe {@link
    * #getAllOptionDefinitionsForClass(Class)}
    */
-  private static final Map<Class<? extends OptionsBase>, ImmutableList<OptionDefinition>>
-      allOptionsFields = new HashMap<>();
+  private static final ConcurrentMap<Class<? extends OptionsBase>, ImmutableList<OptionDefinition>>
+      allOptionsFields = new ConcurrentHashMap<>();
 
   /** Returns all {@code optionDefinitions}, ordered by their option name (not their field name). */
-  public static synchronized ImmutableList<OptionDefinition> getAllOptionDefinitionsForClass(
+  public static ImmutableList<OptionDefinition> getAllOptionDefinitionsForClass(
       Class<? extends OptionsBase> optionsClass) {
     return allOptionsFields.computeIfAbsent(
         optionsClass,
@@ -220,9 +222,9 @@ public class IsolatedOptionsData extends OpaqueOptionsData {
   }
 
   /**
-   * Constructs an {@link IsolatedOptionsData} object for a parser that knows about the given
-   * {@link OptionsBase} classes. No inter-option analysis is done. Performs basic sanity checking
-   * on each option in isolation.
+   * Constructs an {@link IsolatedOptionsData} object for a parser that knows about the given {@link
+   * OptionsBase} classes. No inter-option analysis is done. Performs basic validity checks on each
+   * option in isolation.
    */
   static IsolatedOptionsData from(Collection<Class<? extends OptionsBase>> classes) {
     // Mind which fields have to preserve order.

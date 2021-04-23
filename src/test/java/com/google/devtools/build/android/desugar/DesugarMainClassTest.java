@@ -15,10 +15,9 @@ package com.google.devtools.build.android.desugar;
 
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.devtools.build.android.desugar.LambdaClassMaker.LAMBDA_METAFACTORY_DUMPER_PROPERTY;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
 import com.google.common.base.Strings;
-import java.io.IOError;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -48,12 +47,9 @@ public class DesugarMainClassTest {
           System.setProperty(LAMBDA_METAFACTORY_DUMPER_PROPERTY, path.toString());
           return path;
         };
-    try {
-      Desugar.verifyLambdaDumpDirectoryRegistered(supplier.get());
-      fail("Expected NullPointerException");
-    } catch (NullPointerException e) {
-      // Expected
-    }
+    assertThrows(
+        NullPointerException.class,
+        () -> Desugar.verifyLambdaDumpDirectoryRegistered(supplier.get()));
   }
 
   /**
@@ -61,17 +57,9 @@ public class DesugarMainClassTest {
    * LAMBDA_METAFACTORY_DUMPER_PROPERTY} in the command line.
    */
   private void testLambdaDumpDirPassSpecifiedInCmdPass() throws IOException {
-    // The following lambda ensures that the LambdaMetafactory is loaded at the beggining of this
+    // The following lambda ensures that the LambdaMetafactory is loaded at the beginning of this
     // test, so that the dump directory can be registered.
-    Supplier<Path> supplier =
-        () -> {
-          try {
-            return Desugar.createAndRegisterLambdaDumpDirectory();
-          } catch (IOException e) {
-            throw new IOError(e);
-          }
-        };
-    Path dumpDirectory = supplier.get();
+    Path dumpDirectory = Desugar.createAndRegisterLambdaDumpDirectory();
     assertThat(dumpDirectory.toAbsolutePath().toString())
         .isEqualTo(
             Paths.get(System.getProperty(LAMBDA_METAFACTORY_DUMPER_PROPERTY))

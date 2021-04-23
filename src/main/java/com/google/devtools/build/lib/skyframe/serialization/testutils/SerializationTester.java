@@ -15,25 +15,22 @@
 package com.google.devtools.build.lib.skyframe.serialization.testutils;
 
 import static com.google.common.truth.Truth.assertThat;
-import static com.google.common.truth.Truth.assert_;
+import static com.google.common.truth.Truth.assertWithMessage;
 
 import com.google.common.base.Preconditions;
 import com.google.common.base.Stopwatch;
+import com.google.common.collect.ClassToInstanceMap;
+import com.google.common.collect.ImmutableClassToInstanceMap;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
+import com.google.common.flogger.GoogleLogger;
 import com.google.devtools.build.lib.skyframe.serialization.AutoRegistry;
 import com.google.devtools.build.lib.skyframe.serialization.ObjectCodec;
 import com.google.devtools.build.lib.skyframe.serialization.ObjectCodecRegistry;
 import com.google.devtools.build.lib.skyframe.serialization.ObjectCodecs;
 import com.google.devtools.build.lib.skyframe.serialization.SerializationException;
 import com.google.protobuf.ByteString;
-import com.google.protobuf.InvalidProtocolBufferException;
-import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Map;
 import java.util.Random;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 /**
  * Utility for testing serialization of given subjects.
@@ -45,7 +42,7 @@ public class SerializationTester {
   public static final int DEFAULT_JUNK_INPUTS = 20;
   public static final int JUNK_LENGTH_UPPER_BOUND = 20;
 
-  private static final Logger logger = Logger.getLogger(SerializationTester.class.getName());
+  private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
 
   /** Interface for testing successful deserialization of an object. */
   @FunctionalInterface
@@ -59,7 +56,8 @@ public class SerializationTester {
   }
 
   private final ImmutableList<?> subjects;
-  private final ImmutableMap.Builder<Class<?>, Object> dependenciesBuilder;
+  private final ImmutableClassToInstanceMap.Builder<Object> dependenciesBuilder =
+      ImmutableClassToInstanceMap.builder();
   private final ArrayList<ObjectCodec<?>> additionalCodecs = new ArrayList<>();
   private boolean memoize;
   private boolean allowFutureBlocking;
@@ -78,7 +76,6 @@ public class SerializationTester {
   public SerializationTester(ImmutableList<?> subjects) {
     Preconditions.checkArgument(!subjects.isEmpty());
     this.subjects = subjects;
-    this.dependenciesBuilder = ImmutableMap.builder();
   }
 
   public <D> SerializationTester addDependency(Class<? super D> type, D dependency) {
@@ -86,7 +83,7 @@ public class SerializationTester {
     return this;
   }
 
-  public SerializationTester addDependencies(Map<Class<?>, Object> dependencies) {
+  public SerializationTester addDependencies(ClassToInstanceMap<?> dependencies) {
     dependenciesBuilder.putAll(dependencies);
     return this;
   }
@@ -112,7 +109,6 @@ public class SerializationTester {
     return this;
   }
 
-  @SuppressWarnings("rawtypes")
   public <T> SerializationTester setVerificationFunction(
       VerificationFunction<T> verificationFunction) {
     this.verificationFunction = verificationFunction;
@@ -125,16 +121,38 @@ public class SerializationTester {
     return this;
   }
 
-  public void runTests() throws Exception {
+  private void runTests(boolean verifyStableSerialization) throws Exception {
     ObjectCodecs codecs = this.objectCodecs == null ? createObjectCodecs() : this.objectCodecs;
     testSerializeDeserialize(codecs);
-    testStableSerialization(codecs);
+    if (verifyStableSerialization) {
+      testStableSerialization(codecs);
+    }
     testDeserializeJunkData(codecs);
+  }
+
+  public void runTests() throws Exception {
+    runTests(true);
+  }
+
+  /**
+   * Runs serialization tests without checking for stable serialization ({@code
+   * serialize(deserialize(serialize(x))) == serialize(x)}). Call {@link #runTests()}} instead if
+   * possible.
+   *
+   * <p>To be used only when serialization is not stable for good reasons: please understand the
+   * cause before using this. Typically unstable serialization is the result of non-determinism in
+   * your underlying objects, which can cause problems throughout Blaze by harming incrementality.
+   * Only if you are sure that the non-determinism in your objects is not detectable in its public
+   * interface or behavior (including {@code equals} if implemented) should you use this instead of
+   * {@link #runTests()}.
+   */
+  public void runTestsWithoutStableSerializationCheck() throws Exception {
+    runTests(false);
   }
 
   private ObjectCodecs createObjectCodecs() {
     ObjectCodecRegistry registry = AutoRegistry.get();
-    ImmutableMap<Class<?>, Object> dependencies = dependenciesBuilder.build();
+    ImmutableClassToInstanceMap<Object> dependencies = dependenciesBuilder.build();
     ObjectCodecRegistry.Builder registryBuilder = registry.getBuilder();
     for (Object val : dependencies.values()) {
       registryBuilder.addReferenceConstant(val);
@@ -158,7 +176,7 @@ public class SerializationTester {
   }
 
   private Object deserialize(ByteString serialized, ObjectCodecs codecs)
-      throws SerializationException, IOException {
+      throws SerializationException {
     if (memoize) {
       return codecs.deserializeMemoized(serialized);
     } else {
@@ -179,18 +197,13 @@ public class SerializationTester {
         verificationFunction.verifyDeserialized(subject, deserialized);
       }
     }
-    logger.log(
-        Level.INFO,
-        subjects.get(0).getClass().getSimpleName()
-            + " total serialized bytes = "
-            + totalBytes
-            + ", "
-            + timer);
+    logger.atInfo().log(
+        "%s total serialized bytes = %d, %s",
+        subjects.get(0).getClass().getSimpleName(), totalBytes, timer);
   }
 
   /** Runs serialized bytes stability tests. */
-  private void testStableSerialization(ObjectCodecs codecs)
-      throws SerializationException, IOException {
+  private void testStableSerialization(ObjectCodecs codecs) throws SerializationException {
     for (Object subject : subjects) {
       ByteString serialized = serialize(subject, codecs);
       Object deserialized = deserialize(serialized, codecs);
@@ -200,7 +213,7 @@ public class SerializationTester {
   }
 
   /** Runs junk-data recognition tests. */
-  private void testDeserializeJunkData(ObjectCodecs codecs) throws IOException {
+  private void testDeserializeJunkData(ObjectCodecs codecs) {
     Random rng = new Random(0);
     for (int i = 0; i < DEFAULT_JUNK_INPUTS; ++i) {
       byte[] junkData = new byte[rng.nextInt(JUNK_LENGTH_UPPER_BOUND)];
@@ -208,11 +221,11 @@ public class SerializationTester {
       try {
         deserialize(ByteString.copyFrom(junkData), codecs);
         // OK. Junk string was coincidentally parsed.
-      } catch (SerializationException | InvalidProtocolBufferException e) {
+      } catch (SerializationException e) {
         // OK. Deserialization of junk failed.
         return;
       }
     }
-    assert_().fail("all junk was parsed successfully");
+    assertWithMessage("all junk was parsed successfully").fail();
   }
 }

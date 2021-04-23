@@ -53,8 +53,17 @@ public class RepositoryOptions extends OptionsBase {
       effectTags = {OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION},
       help =
           "If set, the repository cache will hardlink the file in case of a"
-              + " cache hit, rather than copying. This is inteded to save disk space.")
+              + " cache hit, rather than copying. This is intended to save disk space.")
   public boolean useHardlinks;
+
+  @Option(
+      name = "experimental_repository_disable_download",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.BAZEL_CLIENT_OPTIONS,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      metadataTags = {OptionMetadataTag.EXPERIMENTAL},
+      help = "If set, downloading external repositories is not allowed.")
+  public boolean disableDownload;
 
   @Option(
       name = "distdir",
@@ -68,6 +77,14 @@ public class RepositoryOptions extends OptionsBase {
           "Additional places to search for archives before accessing the network "
               + "to download them.")
   public List<PathFragment> experimentalDistdir;
+
+  @Option(
+      name = "http_timeout_scaling",
+      defaultValue = "1.0",
+      documentationCategory = OptionDocumentationCategory.BAZEL_CLIENT_OPTIONS,
+      effectTags = {OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION},
+      help = "Scale all timeouts related to http downloads by the given factor")
+  public double httpTimeoutScaling;
 
   @Option(
     name = "override_repository",
@@ -107,14 +124,14 @@ public class RepositoryOptions extends OptionsBase {
   @Option(
       name = "experimental_verify_repository_rules",
       allowMultiple = true,
-      defaultValue = "",
+      defaultValue = "null",
       documentationCategory = OptionDocumentationCategory.INPUT_STRICTNESS,
       effectTags = {OptionEffectTag.AFFECTS_OUTPUTS},
       metadataTags = {OptionMetadataTag.EXPERIMENTAL},
       help =
           "If list of repository rules for which the hash of the output directory should be"
               + " verified, provided a file is specified by"
-              + " --experimental_respository_hash_file.")
+              + " --experimental_repository_hash_file.")
   public List<String> experimentalVerifyRepositoryRules;
 
   @Option(
@@ -122,8 +139,22 @@ public class RepositoryOptions extends OptionsBase {
       defaultValue = "",
       documentationCategory = OptionDocumentationCategory.GENERIC_INPUTS,
       effectTags = {OptionEffectTag.CHANGES_INPUTS},
-      help = "If non-empty read the specifed resolved file instead of the WORKSPACE file")
+      help = "If non-empty read the specified resolved file instead of the WORKSPACE file")
   public String experimentalResolvedFileInsteadOfWorkspace;
+
+  @Option(
+      name = "experimental_downloader_config",
+      defaultValue = "null",
+      documentationCategory = OptionDocumentationCategory.REMOTE,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      help =
+          "Specify a file to configure the remote downloader with. This file consists of lines, "
+              + "each of which starts with a directive (`allow`, `block` or `rewrite`) followed "
+              + "by either a host name (for `allow` and `block`) or two patterns, one to match "
+              + "against, and one to use as a substitute URL, with back-references starting from "
+              + "`$1`. It is possible for multiple `rewrite` directives for the same URL to be "
+              + "give, and in this case multiple URLs will be returned.")
+  public String downloaderConfig;
 
   /**
    * Converts from an equals-separated pair of strings into RepositoryName->PathFragment mapping.
@@ -132,7 +163,7 @@ public class RepositoryOptions extends OptionsBase {
 
     @Override
     public RepositoryOverride convert(String input) throws OptionsParsingException {
-      String[] pieces = input.split("=");
+      String[] pieces = input.split("=", 2);
       if (pieces.length != 2) {
         throw new OptionsParsingException(
             "Repository overrides must be of the form 'repository-name=path'", input);

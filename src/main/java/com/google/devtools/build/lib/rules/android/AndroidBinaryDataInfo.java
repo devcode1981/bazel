@@ -16,7 +16,8 @@ package com.google.devtools.build.lib.rules.android;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.packages.BuiltinProvider;
 import com.google.devtools.build.lib.packages.NativeInfo;
-import com.google.devtools.build.lib.skylarkbuildapi.android.AndroidBinaryDataInfoApi;
+import com.google.devtools.build.lib.starlarkbuildapi.android.AndroidBinaryDataInfoApi;
+import net.starlark.java.eval.EvalException;
 
 /**
  * Provides information on Android resource, asset, and manifest information specific to binaries.
@@ -26,10 +27,8 @@ import com.google.devtools.build.lib.skylarkbuildapi.android.AndroidBinaryDataIn
  */
 public class AndroidBinaryDataInfo extends NativeInfo
     implements AndroidBinaryDataInfoApi<Artifact> {
-  public static final String SKYLARK_NAME = "AndroidBinaryData";
 
-  public static final BuiltinProvider<AndroidBinaryDataInfo> PROVIDER =
-      new BuiltinProvider<AndroidBinaryDataInfo>(SKYLARK_NAME, AndroidBinaryDataInfo.class) {};
+  public static final Provider PROVIDER = new Provider();
 
   private final Artifact dataApk;
   private final Artifact resourceProguardConfig;
@@ -54,7 +53,6 @@ public class AndroidBinaryDataInfo extends NativeInfo
       AndroidResourcesInfo resourcesInfo,
       AndroidAssetsInfo assetsInfo,
       AndroidManifestInfo manifestInfo) {
-    super(PROVIDER);
     this.dataApk = dataApk;
     this.resourceProguardConfig = resourceProguardConfig;
     this.resourcesInfo = resourcesInfo;
@@ -63,10 +61,16 @@ public class AndroidBinaryDataInfo extends NativeInfo
   }
 
   @Override
+  public Provider getProvider() {
+    return PROVIDER;
+  }
+
+  @Override
   public Artifact getApk() {
     return dataApk;
   }
 
+  @Override
   public Artifact getResourceProguardConfig() {
     return resourceProguardConfig;
   }
@@ -86,5 +90,27 @@ public class AndroidBinaryDataInfo extends NativeInfo
   public AndroidBinaryDataInfo withShrunkApk(Artifact shrunkApk) {
     return new AndroidBinaryDataInfo(
         shrunkApk, resourceProguardConfig, resourcesInfo, assetsInfo, manifestInfo);
+  }
+
+  /** Provider class for {@link AndroidBinaryDataInfo} objects. */
+  public static class Provider extends BuiltinProvider<AndroidBinaryDataInfo>
+      implements AndroidBinaryDataInfoApi.Provider<
+          Artifact, AndroidResourcesInfo, AndroidAssetsInfo, AndroidManifestInfo> {
+
+    private Provider() {
+      super(NAME, AndroidBinaryDataInfo.class);
+    }
+
+    @Override
+    public AndroidBinaryDataInfoApi<Artifact> create(
+        Artifact resourceApk,
+        Artifact resourceProguardConfig,
+        AndroidResourcesInfo resourcesInfo,
+        AndroidAssetsInfo assetsInfo,
+        AndroidManifestInfo manifestInfo)
+        throws EvalException {
+      return new AndroidBinaryDataInfo(
+          resourceApk, resourceProguardConfig, resourcesInfo, assetsInfo, manifestInfo);
+    }
   }
 }

@@ -1,3 +1,5 @@
+load("@rules_java//java:defs.bzl", "java_library")
+
 package_group(
     name = "tests",
     packages = [
@@ -34,7 +36,7 @@ java_library(
     deps = [
         "//src/test/java/com/google/devtools/build/lib/blackbox:base_deps",
         "//src/test/java/com/google/devtools/build/lib/blackbox/framework",
-        "@bazel_tools//tools/runfiles:java-runfiles",
+        "@bazel_tools//tools/java/runfiles",
     ],
 )
 

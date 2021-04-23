@@ -12,15 +12,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Contains Skylark rules used to build the embedded_tools.zip."""
+"""Contains Starlark rules used to build the embedded_tools.zip."""
 
 def _embedded_tools(ctx):
     # The list of arguments we pass to the script.
     args_file = ctx.actions.declare_file(ctx.label.name + ".params")
-    ctx.file_action(output = args_file, content = "\n".join([f.path for f in ctx.files.srcs]))
+    ctx.actions.write(output = args_file, content = "\n".join([f.path for f in ctx.files.srcs]))
 
     # Action to call the script.
-    ctx.action(
+    ctx.actions.run(
         inputs = ctx.files.srcs,
         outputs = [ctx.outputs.out],
         arguments = [ctx.outputs.out.path, args_file.path],

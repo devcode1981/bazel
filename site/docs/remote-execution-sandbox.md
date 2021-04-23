@@ -1,32 +1,15 @@
 ---
 layout: documentation
-title: Troubleshooting Bazel Remote Execution with Docker Sandbox
-
+title: Troubleshooting Bazel remote execution with Docker sandbox
 ---
 
 # Troubleshooting Bazel Remote Execution with Docker Sandbox
 
-## Contents
-
-*  [Overview](#overview)
-*  [Prerequisites](#prerequisites)
-*  [Troubleshooting on the local machine](#troubleshooting-on-the-local-machine)
-   *  [Step 1: Run the build](#step-1-run-the-build)
-   *  [Step 2: Resolve detected issues](#step-2-resolve-detected-issues)
-*  [Troubleshooting in a Docker container](#troubleshooting-in-a-docker-container)
-   *  [Step 1: Build the container](#step-1-build-the-container)
-   *  [Step 2: Start the container](#step-2-start-the-container)
-   *  [Step 3: Test the container](#step-3-test-the-container)
-   *  [Step 4: Run the build](#step-4-run-the-build)
-   *  [Step 5: Resolve detected issues](#step-5-resolve-detected-issues)
-
-## Overview
-
 Bazel builds that succeed locally may fail when executed remotely due to
 restrictions and requirements that do not affect local builds. The most common
-causes of such failures are described in [Adapting Bazel Rules for Remote Execution](https://docs.bazel.build/versions/master/remote-execution-rules.html).
+causes of such failures are described in [Adapting Bazel Rules for Remote Execution](remote-execution-rules.html).
 
-This document describes how to identify and resolve the most common issues that
+This page describes how to identify and resolve the most common issues that
 arise with remote execution using the Docker sandbox feature, which imposes
 restrictions upon the build equal to those of remote execution. This allows you
 to troubleshoot your build without the need for a remote execution service.
@@ -114,7 +97,7 @@ machine and is a reliable way to confirm whether your build will succeed when
 executed remotely.
 
 However, with this method, locally installed tools, binaries, and data may leak
-into into your build, especially if it uses [configure-style WORKSPACE rules](https://docs.bazel.build/versions/master/remote-execution-rules.html#managing-configure-style-workspace-rules).
+into into your build, especially if it uses [configure-style WORKSPACE rules](remote-execution-rules.html#managing-configure-style-workspace-rules).
 Such leaks will cause problems with remote execution; to detect them, [troubleshoot in a Docker container](#troubleshooting-in-a-docker-container)
 in addition to troubleshooting natively.
 
@@ -165,7 +148,7 @@ The following are the most commonly encountered issues and their workarounds.
 
 *  **A file from `@local-jdk` is missing or causing errors.** The Java binaries
    on your local machine are leaking into the build while being incompatible with
-   it. Use [`java_toolchain`](https://docs.bazel.build/versions/master/be/java.html#java_toolchain)
+   it. Use [`java_toolchain`](be/java.html#java_toolchain)
    in your rules and targets instead of `@local_jdk`. Contact [bazel-discuss@google.com](mailto:bazel-discuss@google.com) if you need further help.
 
 *  **Other errors.** Contact [bazel-discuss@google.com](mailto:bazel-discuss@google.com) for help.
@@ -270,7 +253,7 @@ You can resolve build failures as follows:
 
 *   If the build fails during the analysis or loading phases, one or more of
     your build rules declared in the WORKSPACE file are not compatible with
-    remote execution. See [Adapting Bazel Rules for Remote Execution](https://docs.bazel.build/versions/master/remote-execution-rules.html)
+    remote execution. See [Adapting Bazel Rules for Remote Execution](remote-execution-rules.html)
     for possible causes and workarounds.
 
 *   If the build fails for any other reason, see the troubleshooting steps in [Step 2: Resolve detected issues](#step-2-resolve-detected-issues).

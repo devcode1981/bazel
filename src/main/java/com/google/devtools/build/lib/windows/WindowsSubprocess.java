@@ -14,17 +14,16 @@
 
 package com.google.devtools.build.lib.windows;
 
+import com.google.common.base.Throwables;
 import com.google.devtools.build.lib.shell.Subprocess;
-import com.google.devtools.build.lib.windows.jni.WindowsProcesses;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -33,6 +32,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class WindowsSubprocess implements Subprocess {
   // For debugging purposes.
   private String commandLine;
+
+  private static enum WaitResult {
+    SUCCESS,
+    TIMEOUT
+  }
 
   /**
    * Output stream for writing to the stdin of a Windows process.
@@ -63,6 +67,20 @@ public class WindowsSubprocess implements Subprocess {
 
     ProcessInputStream(long nativeStream) {
       this.nativeStream = nativeStream;
+    }
+
+    @Override
+    public int available() throws IOException {
+      if (nativeStream == WindowsProcesses.INVALID) {
+        throw new IllegalStateException("Stream already closed");
+      }
+
+      int result = WindowsProcesses.streamBytesAvailable(nativeStream);
+      if (result == -1) {
+        throw new IOException(WindowsProcesses.streamGetLastError(nativeStream));
+      }
+
+      return result;
     }
 
     @Override
@@ -109,25 +127,28 @@ public class WindowsSubprocess implements Subprocess {
   }
 
   private static final AtomicInteger THREAD_SEQUENCE_NUMBER = new AtomicInteger(1);
-  private static final ExecutorService WAITER_POOL = Executors.newCachedThreadPool(
-      new ThreadFactory() {
-        @Override
-        public Thread newThread(Runnable runnable) {
-          Thread thread = new Thread(null, runnable,
-              "Windows-Process-Waiter-Thread-" + THREAD_SEQUENCE_NUMBER.getAndIncrement(),
-              16 * 1024);
-          thread.setDaemon(true);
-          return thread;
-        }
-      });
+  private static final ExecutorService WAITER_POOL =
+      Executors.newCachedThreadPool(
+          new ThreadFactory() {
+            @Override
+            public Thread newThread(Runnable runnable) {
+              Thread thread =
+                  new Thread(
+                      null,
+                      runnable,
+                      "Windows-Process-Waiter-Thread-" + THREAD_SEQUENCE_NUMBER.getAndIncrement());
+              thread.setDaemon(true);
+              return thread;
+            }
+          });
 
   private volatile long nativeProcess;
   private final OutputStream stdinStream;
   private final ProcessInputStream stdoutStream;
   private final ProcessInputStream stderrStream;
-  private final CountDownLatch waitLatch;
+  private final Future<WaitResult> processFuture;
   private final long timeoutMillis;
-  private final AtomicBoolean timedout = new AtomicBoolean(false);
+  private boolean timedout = false;
 
   WindowsSubprocess(long nativeProcess, String commandLine, boolean stdoutRedirected,
       boolean stderrRedirected, long timeoutMillis) {
@@ -140,35 +161,34 @@ public class WindowsSubprocess implements Subprocess {
     stderrStream =
         stderrRedirected ? null : new ProcessInputStream(WindowsProcesses.getStderr(nativeProcess));
     stdinStream = new ProcessOutputStream();
-    waitLatch = new CountDownLatch(1);
     // Every Windows process we start consumes a thread here. This is suboptimal, but seems to be
     // the sanest way to reconcile WaitForMultipleObjects() and Java-style interruption.
-    @SuppressWarnings("unused")
-    Future<?> possiblyIgnoredError = WAITER_POOL.submit(this::waiterThreadFunc);
+    processFuture = WAITER_POOL.submit(this::waiterThreadFunc);
   }
 
-  private void waiterThreadFunc() {
+  // Waits for the process to finish.
+  private WaitResult waiterThreadFunc() {
     switch (WindowsProcesses.waitFor(nativeProcess, timeoutMillis)) {
       case 0:
         // Excellent, process finished in time.
-        break;
+        return WaitResult.SUCCESS;
 
       case 1:
-        // Timeout. Terminate the process if we can.
-        timedout.set(true);
-        WindowsProcesses.terminate(nativeProcess);
-        break;
+        // Timeout. We don't need to call `terminate` here, because waitFor
+        // automatically terminates the process in case of a timeout.
+        return WaitResult.TIMEOUT;
 
-      case 2:
+      default:
         // Error. There isn't a lot we can do -- the process is still alive but
-        // WaitForMultipleObjects() failed for some odd reason. We'll pretend it terminated and
-        // log a message to jvm.out .
-        System.err.println(
-            "Waiting for process " + WindowsProcesses.getProcessPid(nativeProcess) + " failed");
-        break;
+        // WaitForSingleObject() failed for some odd reason. This should
+        // basically never happen, but if it does... let's get a stack trace.
+        String errorMessage = WindowsProcesses.processGetLastError(nativeProcess);
+        throw new IllegalStateException(
+            "Waiting for process "
+                + WindowsProcesses.getProcessPid(nativeProcess)
+                + " failed: "
+                + errorMessage);
     }
-
-    waitLatch.countDown();
   }
 
   @Override
@@ -200,17 +220,29 @@ public class WindowsSubprocess implements Subprocess {
 
   @Override
   public boolean finished() {
-    return waitLatch.getCount() == 0;
+    return processFuture.isDone();
+  }
+
+  @Override
+  public boolean isAlive() {
+    return !processFuture.isDone();
   }
 
   @Override
   public boolean timedout() {
-    return timedout.get();
+    return timedout;
   }
 
   @Override
   public void waitFor() throws InterruptedException {
-    waitLatch.await();
+    try {
+      timedout = processFuture.get() == WaitResult.TIMEOUT;
+    } catch (ExecutionException e) {
+      Throwables.throwIfUnchecked(e.getCause());
+      // This should never happen, because waiterThreadFunc does not throw any
+      // checked exceptions.
+      throw new IllegalStateException("Unexpected exception", e);
+    }
   }
 
   @Override

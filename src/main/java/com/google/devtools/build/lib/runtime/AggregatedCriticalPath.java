@@ -16,6 +16,7 @@ package com.google.devtools.build.lib.runtime;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.lib.actions.AggregatedSpawnMetrics;
 import com.google.devtools.build.lib.actions.SpawnMetrics;
 import java.time.Duration;
 
@@ -25,15 +26,15 @@ import java.time.Duration;
  */
 public class AggregatedCriticalPath {
   public static final AggregatedCriticalPath EMPTY =
-      new AggregatedCriticalPath(Duration.ZERO, SpawnMetrics.EMPTY, ImmutableList.of());
+      new AggregatedCriticalPath(Duration.ZERO, AggregatedSpawnMetrics.EMPTY, ImmutableList.of());
 
   private final Duration totalTime;
-  private final SpawnMetrics aggregatedSpawnMetrics;
+  private final AggregatedSpawnMetrics aggregatedSpawnMetrics;
   private final ImmutableList<CriticalPathComponent> criticalPathComponents;
 
   public AggregatedCriticalPath(
       Duration totalTime,
-      SpawnMetrics aggregatedSpawnMetrics,
+      AggregatedSpawnMetrics aggregatedSpawnMetrics,
       ImmutableList<CriticalPathComponent> criticalPathComponents) {
     this.totalTime = totalTime;
     this.aggregatedSpawnMetrics = aggregatedSpawnMetrics;
@@ -45,13 +46,25 @@ public class AggregatedCriticalPath {
     return totalTime;
   }
 
-  public SpawnMetrics getSpawnMetrics() {
+  public AggregatedSpawnMetrics getSpawnMetrics() {
     return aggregatedSpawnMetrics;
   }
 
   /** Returns a list of all the component stats for the critical path. */
   public ImmutableList<CriticalPathComponent> components() {
     return criticalPathComponents;
+  }
+
+  public String getNewStringSummary() {
+    Duration executionWallTime =
+        aggregatedSpawnMetrics.getTotalDuration(SpawnMetrics::executionWallTime);
+    Duration overheadTime =
+        aggregatedSpawnMetrics.getTotalDuration(SpawnMetrics::totalTime).minus(executionWallTime);
+    return String.format(
+        "Critical path %.2fs (setup %.2fs, action wall time %.2fs)",
+        totalTime.toMillis() / 1000.0,
+        overheadTime.toMillis() / 1000.0,
+        executionWallTime.toMillis() / 1000.0);
   }
 
   @Override
@@ -64,7 +77,7 @@ public class AggregatedCriticalPath {
     sb.append(String.format("%.2f", totalTime.toMillis() / 1000.0));
     sb.append("s");
     if (remote) {
-      sb.append(", Remote ");
+      sb.append(", ");
       sb.append(getSpawnMetrics().toString(totalTime(), summary));
     }
     if (summary || criticalPathComponents.isEmpty()) {
@@ -76,8 +89,8 @@ public class AggregatedCriticalPath {
   }
 
   /**
-   * Returns a summary version of the critical path stats that omits stats that are not useful
-   * to the user.
+   * Returns a summary version of the critical path stats that omits stats that are not useful to
+   * the user.
    */
   public String toStringSummary() {
     return toString(true, true);
@@ -91,4 +104,3 @@ public class AggregatedCriticalPath {
     return toString(true, false);
   }
 }
-

@@ -16,6 +16,7 @@ package com.google.devtools.build.buildjar.javac;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Iterables.getOnlyElement;
+import static com.google.common.collect.MoreCollectors.toOptional;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Comparator.comparing;
 
@@ -23,6 +24,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.buildjar.InvalidCommandLineException;
+import com.google.devtools.build.buildjar.javac.BlazeJavacResult.Status;
 import com.google.devtools.build.buildjar.javac.FormattedDiagnostic.Listener;
 import com.google.devtools.build.buildjar.javac.plugins.BlazeJavaCompilerPlugin;
 import com.google.devtools.build.buildjar.javac.statistics.BlazeJavacStatistics;
@@ -33,6 +35,8 @@ import com.sun.tools.javac.file.CacheFSInfo;
 import com.sun.tools.javac.file.JavacFileManager;
 import com.sun.tools.javac.main.JavaCompiler;
 import com.sun.tools.javac.util.Context;
+import com.sun.tools.javac.util.Log;
+import com.sun.tools.javac.util.Options;
 import com.sun.tools.javac.util.PropagatedException;
 import java.io.IOError;
 import java.io.IOException;
@@ -43,7 +47,9 @@ import java.net.URLClassLoader;
 import java.nio.file.Path;
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
 import javax.tools.Diagnostic;
+import javax.tools.DiagnosticListener;
 import javax.tools.StandardLocation;
 
 /**
@@ -73,7 +79,8 @@ public class BlazeJavacMain {
 
     List<String> javacArguments = arguments.javacOptions();
     try {
-      javacArguments = processPluginArgs(arguments.plugins(), javacArguments);
+      processPluginArgs(
+          arguments.plugins(), arguments.javacOptions(), arguments.blazeJavacOptions());
     } catch (InvalidCommandLineException e) {
       return BlazeJavacResult.error(e.getMessage());
     }
@@ -84,41 +91,45 @@ public class BlazeJavacMain {
     setupBlazeJavaCompiler(arguments.plugins(), context);
     BlazeJavacStatistics.Builder builder = context.get(BlazeJavacStatistics.Builder.class);
 
-    boolean ok = false;
+    Status status = Status.ERROR;
     StringWriter errOutput = new StringWriter();
     // TODO(cushon): where is this used when a diagnostic listener is registered? Consider removing
     // it and handling exceptions directly in callers.
     PrintWriter errWriter = new PrintWriter(errOutput);
-    Listener diagnostics = new Listener(context);
+    Listener diagnosticsBuilder = new Listener(arguments.failFast(), context);
     BlazeJavaCompiler compiler;
 
-    try (JavacFileManager fileManager = new ClassloaderMaskingFileManager()) {
+    // Initialize parts of context that the filemanager depends on
+    context.put(DiagnosticListener.class, diagnosticsBuilder);
+    Log.instance(context).setWriters(errWriter);
+    Options.instance(context).put("-Xlint:path", "path");
+
+    try (JavacFileManager fileManager =
+        new ClassloaderMaskingFileManager(context, arguments.builtinProcessors())) {
+
+      setLocations(fileManager, arguments);
+
       JavacTask task =
           JavacTool.create()
               .getTask(
                   errWriter,
                   fileManager,
-                  diagnostics,
+                  diagnosticsBuilder,
                   javacArguments,
                   /* classes= */ ImmutableList.of(),
                   fileManager.getJavaFileObjectsFromPaths(arguments.sourceFiles()),
                   context);
-      if (arguments.processors() != null) {
-        task.setProcessors(arguments.processors());
-      }
-      fileManager.setContext(context);
-      setLocations(fileManager, arguments);
       try {
-        ok = task.call();
+        status = task.call() ? Status.OK : Status.ERROR;
       } catch (PropagatedException e) {
         throw e.getCause();
       }
     } catch (Throwable t) {
       t.printStackTrace(errWriter);
-      ok = false;
+      status = Status.ERROR;
     } finally {
       compiler = (BlazeJavaCompiler) JavaCompiler.instance(context);
-      if (ok) {
+      if (status == Status.OK) {
         // There could be situations where we incorrectly skip Error Prone and the compilation
         // ends up succeeding, e.g., if there are errors that are fixed by subsequent round of
         // annotation processing.  This check ensures that if there were any flow events at all,
@@ -126,17 +137,47 @@ public class BlazeJavacMain {
         // or empty source files.
         if (compiler.skippedFlowEvents() > 0 && compiler.flowEvents() == 0) {
           errWriter.println("Expected at least one FLOW event");
-          ok = false;
+          status = Status.ERROR;
         }
       }
     }
     errWriter.flush();
+    ImmutableList<FormattedDiagnostic> diagnostics = diagnosticsBuilder.build();
+
+    boolean werror =
+        diagnostics.stream().anyMatch(d -> d.getCode().equals("compiler.err.warnings.and.werror"));
+    if (status.equals(Status.OK)) {
+      Optional<WerrorCustomOption> maybeWerrorCustom =
+          arguments.blazeJavacOptions().stream()
+              .filter(arg -> arg.startsWith("-Werror:"))
+              .collect(toOptional())
+              .map(WerrorCustomOption::create);
+      if (maybeWerrorCustom.isPresent()) {
+        WerrorCustomOption werrorCustom = maybeWerrorCustom.get();
+        if (diagnostics.stream().anyMatch(d -> isWerror(werrorCustom, d))) {
+          errOutput.append("error: warnings found and -Werror specified\n");
+          status = Status.ERROR;
+          werror = true;
+        }
+      }
+    }
+
     return BlazeJavacResult.createFullResult(
-        ok,
-        filterDiagnostics(diagnostics.build()),
+        status,
+        filterDiagnostics(werror, diagnostics),
         errOutput.toString(),
         compiler,
         builder.build());
+  }
+
+  private static boolean isWerror(WerrorCustomOption werrorCustom, FormattedDiagnostic diagnostic) {
+    switch (diagnostic.getKind()) {
+      case WARNING:
+      case MANDATORY_WARNING:
+        return werrorCustom.isEnabled(diagnostic.getLintCategory());
+      default:
+        return false;
+    }
   }
 
   private static final ImmutableSet<String> IGNORED_DIAGNOSTIC_CODES =
@@ -160,12 +201,13 @@ public class BlazeJavacMain {
           "compiler.warn.big.major.version",
           // don't want about incompatible processor source versions when running javac9 on JDK 10
           // TODO(cushon): remove after the next javac update
-          "compiler.warn.proc.processor.incompatible.source.version");
+          "compiler.warn.proc.processor.incompatible.source.version",
+          // https://github.com/bazelbuild/bazel/issues/5985
+          "compiler.warn.unknown.enum.constant",
+          "compiler.warn.unknown.enum.constant.reason");
 
   private static ImmutableList<FormattedDiagnostic> filterDiagnostics(
-      ImmutableList<FormattedDiagnostic> diagnostics) {
-    boolean werror =
-        diagnostics.stream().anyMatch(d -> d.getCode().equals("compiler.err.warnings.and.werror"));
+      boolean werror, ImmutableList<FormattedDiagnostic> diagnostics) {
     return diagnostics.stream()
         .filter(d -> shouldReportDiagnostic(werror, d))
         // Print errors last to make them more visible.
@@ -186,14 +228,14 @@ public class BlazeJavacMain {
 
   /** Processes Plugin-specific arguments and removes them from the args array. */
   @VisibleForTesting
-  static List<String> processPluginArgs(
-      ImmutableList<BlazeJavaCompilerPlugin> plugins, List<String> args)
+  static void processPluginArgs(
+      ImmutableList<BlazeJavaCompilerPlugin> plugins,
+      ImmutableList<String> standardJavacopts,
+      ImmutableList<String> blazeJavacopts)
       throws InvalidCommandLineException {
-    List<String> processedArgs = args;
     for (BlazeJavaCompilerPlugin plugin : plugins) {
-      processedArgs = plugin.processArgs(processedArgs);
+      plugin.processArgs(standardJavacopts, blazeJavacopts);
     }
-    return processedArgs;
   }
 
   private static void setLocations(JavacFileManager fileManager, BlazeJavacArguments arguments) {
@@ -226,6 +268,11 @@ public class BlazeJavacMain {
       }
       fileManager.setLocationFromPaths(StandardLocation.SOURCE_PATH, sourcePath);
 
+      Path system = arguments.system();
+      if (system != null) {
+        fileManager.setLocationFromPaths(
+            StandardLocation.locationFor("SYSTEM_MODULES"), ImmutableList.of(system));
+      }
       // The bootclasspath may legitimately be empty if --release is being used.
       Collection<Path> bootClassPath = arguments.bootClassPath();
       if (!bootClassPath.isEmpty()) {
@@ -251,14 +298,11 @@ public class BlazeJavacMain {
   @Trusted
   private static class ClassloaderMaskingFileManager extends JavacFileManager {
 
-    private static Context getContext() {
-      Context context = new Context();
-      CacheFSInfo.preRegister(context);
-      return context;
-    }
+    private final ImmutableSet<String> builtinProcessors;
 
-    public ClassloaderMaskingFileManager() {
-      super(getContext(), false, UTF_8);
+    public ClassloaderMaskingFileManager(Context context, ImmutableSet<String> builtinProcessors) {
+      super(context, true, UTF_8);
+      this.builtinProcessors = builtinProcessors;
     }
 
     @Override
@@ -269,10 +313,16 @@ public class BlazeJavacMain {
             @Override
             protected Class<?> findClass(String name) throws ClassNotFoundException {
               if (name.startsWith("com.google.errorprone.")
-                  || name.startsWith("org.checkerframework.dataflow.")
+                  || name.startsWith("com.google.common.collect.")
+                  || name.startsWith("com.google.common.base.")
+                  || name.startsWith("com.google.common.graph.")
+                  || name.startsWith("org.checkerframework.shaded.dataflow.")
                   || name.startsWith("com.sun.source.")
                   || name.startsWith("com.sun.tools.")
-                  || name.startsWith("com.google.devtools.build.buildjar.javac.statistics.")) {
+                  || name.startsWith("com.google.devtools.build.buildjar.javac.statistics.")
+                  || name.startsWith("dagger.model.")
+                  || name.startsWith("dagger.spi.")
+                  || builtinProcessors.contains(name)) {
                 return Class.forName(name);
               }
               throw new ClassNotFoundException(name);

@@ -16,18 +16,19 @@ package com.google.devtools.build.lib.rules.android;
 import static com.google.devtools.build.lib.packages.Attribute.attr;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL_KEYED_STRING_DICT;
+import static com.google.devtools.build.lib.packages.Type.BOOLEAN;
+import static com.google.devtools.build.lib.packages.Type.STRING;
+import static com.google.devtools.build.lib.packages.Type.STRING_DICT;
+import static com.google.devtools.build.lib.packages.Type.STRING_LIST;
 import static com.google.devtools.build.lib.rules.android.AndroidRuleClasses.getAndroidSdkLabel;
-import static com.google.devtools.build.lib.syntax.Type.STRING;
-import static com.google.devtools.build.lib.syntax.Type.STRING_DICT;
 
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
-import com.google.devtools.build.lib.analysis.config.HostTransition;
-import com.google.devtools.build.lib.packages.Attribute.AllowedValueSet;
+import com.google.devtools.build.lib.analysis.config.ExecutionTransitionFactory;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
-import com.google.devtools.build.lib.rules.android.AndroidConfiguration.AndroidAaptVersion;
+import com.google.devtools.build.lib.rules.android.databinding.DataBinding;
 import com.google.devtools.build.lib.rules.config.ConfigFeatureFlagProvider;
 import com.google.devtools.build.lib.rules.java.JavaConfiguration;
 import com.google.devtools.build.lib.util.FileTypeSet;
@@ -39,7 +40,9 @@ public class AndroidLocalTestBaseRule implements RuleDefinition {
   public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment environment) {
     return builder
         .requiresConfigurationFragments(
-            JavaConfiguration.class, AndroidLocalTestConfiguration.class)
+            JavaConfiguration.class,
+            AndroidLocalTestConfiguration.class,
+            AndroidConfiguration.class)
 
         // Update documentation for inherited attributes
 
@@ -87,12 +90,12 @@ public class AndroidLocalTestBaseRule implements RuleDefinition {
                 .allowedFileTypes()
                 .nonconfigurable("defines an aspect of configuration")
                 .mandatoryProviders(ImmutableList.of(ConfigFeatureFlagProvider.id())))
-        .add(AndroidFeatureFlagSetProvider.getWhitelistAttribute(environment))
+        .add(AndroidFeatureFlagSetProvider.getAllowlistAttribute(environment))
         // TODO(b/38314524): Move $android_resources_busybox and :android_sdk to a separate
         // rule so they're not defined in multiple places
         .add(
             attr("$android_resources_busybox", LABEL)
-                .cfg(HostTransition.INSTANCE)
+                .cfg(ExecutionTransitionFactory.create())
                 .exec()
                 .value(environment.getToolsLabel(AndroidRuleClasses.DEFAULT_RESOURCES_BUSYBOX)))
         .add(
@@ -136,23 +139,41 @@ public class AndroidLocalTestBaseRule implements RuleDefinition {
         you will likely need to use <code>test_class</code> as well.
         <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
         .add(attr("custom_package", STRING))
-        /* <!-- #BLAZE_RULE($android_local_test_base).ATTRIBUTE(aapt_version) -->
-        Select the version of aapt for this rule.<br/>
-        Possible values:
-        <ul>
-            <li><code>aapt_version = "aapt"</code>: Use aapt. This is the current default
-              behaviour, and should be used for production binaries.</li>
-            <li><code>aapt_version = "aapt2"</code>: Use aapt2. This is the new resource
-             packaging system that provides improved incremental resource processing, smaller apks
-             and more.</li>
-            <li><code>aapt_version = "auto"</code>: aapt is controlled by the
-              --android_aapt flag.</li>
-        </ul>
+        /* <!-- #BLAZE_RULE($android_resource_support).ATTRIBUTE(enable_data_binding) -->
+        If true, this rule processes
+        <a href="https://developer.android.com/topic/libraries/data-binding/index.html">data
+        binding</a> references used in data-binding enabled dependencies used by this test. Without
+        this setting, data-binding dependencies won't have necessary binary-level code generation,
+        and may produce build failures.
         <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
+        .add(attr("enable_data_binding", BOOLEAN))
+        // The javac annotation processor from Android's data binding library that turns
+        // processed XML expressions into Java code.
         .add(
-            attr("aapt_version", STRING)
-                .allowedValues(new AllowedValueSet(AndroidAaptVersion.getAttributeValues()))
-                .value(AndroidAaptVersion.getRuleAttributeDefault()))
+            attr(DataBinding.DATABINDING_ANNOTATION_PROCESSOR_ATTR, LABEL)
+                .cfg(ExecutionTransitionFactory.create())
+                .value(
+                    environment.getToolsLabel("//tools/android:databinding_annotation_processor")))
+        .add(
+            attr(DataBinding.DATABINDING_EXEC_PROCESSOR_ATTR, LABEL)
+                .cfg(ExecutionTransitionFactory.create())
+                .exec()
+                .value(environment.getToolsLabel("//tools/android:databinding_exec")))
+        /* <!-- #BLAZE_RULE($android_local_test_base).ATTRIBUTE(nocompress_extensions) -->
+        A list of file extensions to leave uncompressed in the resource apk.
+        <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
+        .add(attr("nocompress_extensions", STRING_LIST))
+        /* <!-- #BLAZE_RULE($android_local_test_base).ATTRIBUTE(resource_configuration_filters) -->
+        A list of resource configuration filters, such as 'en' that will limit the resources in the
+        apk to only the ones in the 'en' configuration.
+        <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
+        .add(attr("resource_configuration_filters", STRING_LIST))
+        /* <!-- #BLAZE_RULE($android_local_test_base).ATTRIBUTE(densities) -->
+        Densities to filter for when building the apk. A corresponding compatible-screens
+        section will also be added to the manifest if it does not already contain a
+        superset StarlarkListing.
+        <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
+        .add(attr("densities", STRING_LIST))
         .build();
   }
 

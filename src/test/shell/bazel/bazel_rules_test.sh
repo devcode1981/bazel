@@ -42,8 +42,27 @@ fi
 source "$(rlocation "io_bazel/src/test/shell/integration_test_setup.sh")" \
   || { echo "integration_test_setup.sh not found!" >&2; exit 1; }
 
-export MSYS_NO_PATHCONV=1
-export MSYS2_ARG_CONV_EXCL="*"
+# `uname` returns the current platform, e.g "MSYS_NT-10.0" or "Linux".
+# `tr` converts all upper case letters to lower case.
+# `case` matches the result if the `uname | tr` expression to string prefixes
+# that use the same wildcards as names do in Bash, i.e. "msys*" matches strings
+# starting with "msys", and "*" matches everything (it's the default case).
+case "$(uname -s | tr [:upper:] [:lower:])" in
+msys*)
+  # As of 2019-01-15, Bazel on Windows only supports MSYS Bash.
+  declare -r is_windows=true
+  ;;
+*)
+  declare -r is_windows=false
+  ;;
+esac
+
+if "$is_windows"; then
+  # Disable MSYS path conversion that converts path-looking command arguments to
+  # Windows paths (even if they arguments are not in fact paths).
+  export MSYS_NO_PATHCONV=1
+  export MSYS2_ARG_CONV_EXCL="*"
+fi
 
 function test_sh_test() {
   mkdir -p a
@@ -85,7 +104,10 @@ function test_extra_action() {
   # Make a program to run on each action that just prints the path to the extra
   # action file. This file is a proto, but I don't want to bother implementing
   # a program that parses the proto here.
-  cat > mypkg/echoer.sh <<'EOF'
+  # The workspace name is initialized in testenv.sh; use that var rather than
+  # hardcoding it here. The extra sed pass is so we can selectively expand that
+  # one var while keeping the rest of the heredoc literal.
+  sed "s/{{WORKSPACE_NAME}}/$WORKSPACE_NAME/" > mypkg/echoer.sh << 'EOF'
 #!/bin/bash
 set -euo pipefail
 # --- begin runfiles.bash initialization ---
@@ -109,7 +131,7 @@ else
 fi
 # --- end runfiles.bash initialization ---
 
-if [[ ! -e "$(rlocation __main__/mypkg/runfile)" ]]; then
+if [[ ! -e "$(rlocation {{WORKSPACE_NAME}}/mypkg/runfile)" ]]; then
   echo "ERROR: Runfile not found" >&2
   exit 1
 fi
@@ -271,64 +293,38 @@ EOF
 
 function test_genrule_default_env() {
   mkdir -p pkg
-  cat <<'EOF' >pkg/BUILD
+  cat >pkg/BUILD  <<'EOF'
 genrule(
     name = "test",
     outs = ["test.out"],
-    cmd = select({
-        "@bazel_tools//src/conditions:windows":
-            "(echo \"PATH=$$PATH\"; echo \"TMPDIR=$$TMP\") > $@",
-        "//conditions:default":
-            "(echo \"PATH=$$PATH\"; echo \"TMPDIR=$$TMPDIR\") > $@",
-    }),
+    cmd = "env > $@",
 )
 EOF
-  local old_path="${PATH}"
+
   local new_tmpdir="$(mktemp -d "${TEST_TMPDIR}/newfancytmpdirXXXXXX")"
-  [ -d "${new_tmpdir}" ] || \
-    fail "Could not create new temporary directory ${new_tmpdir}"
-  export PATH="$PATH_TO_BAZEL_WRAPPER:/bin:/usr/bin:/random/path"
-  if is_windows; then
-    local old_tmpdir="${TMP:-}"
-    export TMP="${new_tmpdir}"
-  else
-    local old_tmpdir="${TMPDIR:-}"
-    export TMPDIR="${new_tmpdir}"
-  fi
-  # shut down to force reload of the environment
-  bazel shutdown
-  bazel build //pkg:test --spawn_strategy=standalone \
-    || fail "Failed to build //pkg:test"
-  if is_windows; then
-    # As of 2018-07-10, Bazel on Windows sets the PATH to
-    # "/usr/bin:/bin:" + $PATH of the Bazel server process.
-    #
-    # MSYS appears to convert path entries in PATH to Windows style when running
-    # a native Windows process such as Bazel, but "cygpath -w /bin" returns
-    # MSYS_ROOT + "\usr\bin".
-    # The point is, the PATH will be quite different from what we expect on
-    # Linux. Therefore only assert that the PATH contains
-    # "$PATH_TO_BAZEL_WRAPPER" and "/random/path", ignore the rest.
-    local -r EXPECTED_PATH=".*:$PATH_TO_BAZEL_WRAPPER:.*:/random/path"
+  if $is_windows; then
+    PATH="/random/path:$PATH" TMP="${new_tmpdir}" \
+      bazel build //pkg:test --spawn_strategy=standalone --action_env=PATH \
+      &> $TEST_log || fail "Failed to build //pkg:test"
+
+    # Test that Bazel respects the client environment's TMP.
     # new_tmpdir is based on $TEST_TMPDIR which is not Unix-style -- convert it.
-    local -r EXPECTED_TMP="$(cygpath -u "$new_tmpdir")"
+    assert_contains "TMP=$(cygpath -u "${new_tmpdir}")" bazel-bin/pkg/test.out
   else
-    local -r EXPECTED_PATH="$PATH_TO_BAZEL_WRAPPER:/bin:/usr/bin:/random/path"
-    local -r EXPECTED_TMP="$new_tmpdir"
+    PATH="/random/path:$PATH" TMPDIR="${new_tmpdir}" \
+      bazel build //pkg:test --spawn_strategy=standalone --action_env=PATH \
+      &> $TEST_log || fail "Failed to build //pkg:test"
+
+    # Test that Bazel respects the client environment's TMPDIR.
+    assert_contains "TMPDIR=${new_tmpdir}" bazel-bin/pkg/test.out
   fi
-  assert_contains "PATH=$EXPECTED_PATH" bazel-genfiles/pkg/test.out
-  # Bazel respectes the client environment's TMPDIR.
-  assert_contains "TMPDIR=${EXPECTED_TMP}$" bazel-genfiles/pkg/test.out
-  if is_windows; then
-    export TMP="${old_tmpdir}"
-  else
-    export TMPDIR="${old_tmpdir}"
-  fi
-  export PATH="${old_path}"
+
+  # Test that Bazel passed through the PATH from --action_env.
+  assert_contains "PATH=/random/path" bazel-bin/pkg/test.out
 }
 
 function test_genrule_remote() {
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(
     name = "r",
     path = __workspace_dir__,
@@ -359,7 +355,7 @@ EOF
 }
 
 function test_genrule_remote_d() {
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(
     name = "r",
     path = __workspace_dir__,
@@ -378,8 +374,8 @@ genrule(
 EOF
 
   bazel build @r//package:hi >$TEST_log 2>&1 || fail "Should build"
-  expect_log "bazel-.*genfiles/external/r/package/a/b"
-  expect_log "bazel-.*genfiles/external/r/package/c/d"
+  expect_log "bazel-.*bin/external/r/package/a/b"
+  expect_log "bazel-.*bin/external/r/package/c/d"
 }
 
 function test_genrule_toolchain_dependency {
@@ -393,7 +389,7 @@ genrule(
 )
 EOF
   bazel build //t:toolchain_check >$TEST_log 2>&1 || fail "Should build"
-  expect_log "bazel-.*genfiles/t/version"
+  expect_log "bazel-.*bin/t/version"
   expect_not_log "ls: cannot access"
 }
 
@@ -433,8 +429,8 @@ EOF
 
  cd ${WORKSPACE_DIR}
  mkdir -p {module1,module2}
- cat > WORKSPACE <<EOF
-workspace(name = "foobar")
+ rm WORKSPACE
+ cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(name="remote", path="${remote_path}")
 EOF
  cat > module1/BUILD <<EOF
@@ -526,6 +522,75 @@ EOF
 
   bazel build //visibility:foo &> $TEST_log && fail "Expected failure" || true
   expect_log "Public or private visibility labels (e.g. //visibility:public or //visibility:private) cannot be used in combination with other labels"
+}
+
+function test_executable_without_default_files() {
+  mkdir pkg
+  cat >pkg/BUILD <<'EOF'
+load(":rules.bzl", "bin_rule", "out_rule")
+bin_rule(name = "hello_bin")
+out_rule(name = "hello_out")
+
+genrule(
+    name = "hello_gen",
+    tools = [":hello_bin"],
+    outs = ["hello_gen.txt"],
+    cmd = "$(location :hello_bin) $@",
+)
+EOF
+
+  # On Windows this file needs to be acceptable by CreateProcessW(), rather
+  # than a Bourne script.
+  if "$is_windows"; then
+    cat >pkg/rules.bzl <<'EOF'
+_SCRIPT_EXT = ".bat"
+_SCRIPT_CONTENT = "@ECHO OFF\necho hello world > %1"
+EOF
+  else
+    cat >pkg/rules.bzl <<'EOF'
+_SCRIPT_EXT = ".sh"
+_SCRIPT_CONTENT = "#!/bin/sh\necho 'hello world' > $@"
+EOF
+  fi
+
+  cat >>pkg/rules.bzl <<'EOF'
+def _bin_rule(ctx):
+    out_sh = ctx.actions.declare_file(ctx.attr.name + _SCRIPT_EXT)
+    ctx.actions.write(
+        output = out_sh,
+        content = _SCRIPT_CONTENT,
+        is_executable = True,
+    )
+    return DefaultInfo(
+        files = depset(direct = []),
+        executable = out_sh,
+    )
+
+def _out_rule(ctx):
+    out = ctx.actions.declare_file(ctx.attr.name + ".txt")
+    ctx.actions.run(
+        executable = ctx.executable._hello_bin,
+        outputs = [out],
+        arguments = [out.path],
+        mnemonic = "HelloOut",
+    )
+    return DefaultInfo(
+        files = depset(direct = [out]),
+    )
+
+bin_rule = rule(_bin_rule, executable = True)
+out_rule = rule(_out_rule, attrs = {
+    "_hello_bin": attr.label(
+        default = ":hello_bin",
+        executable = True,
+        cfg = "host",
+    ),
+})
+EOF
+
+  bazel build //pkg:hello_out //pkg:hello_gen >$TEST_log 2>&1 || fail "Should build"
+  assert_contains "hello world" bazel-bin/pkg/hello_out.txt
+  assert_contains "hello world" bazel-bin/pkg/hello_gen.txt
 }
 
 run_suite "rules test"

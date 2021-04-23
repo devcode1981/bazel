@@ -21,16 +21,17 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Interner;
-import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.ActionKeyContext;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Artifact.ArtifactExpander;
 import com.google.devtools.build.lib.actions.Artifact.TreeFileArtifact;
 import com.google.devtools.build.lib.actions.CommandLine;
+import com.google.devtools.build.lib.actions.CommandLineExpansionException;
 import com.google.devtools.build.lib.actions.CommandLineItem;
 import com.google.devtools.build.lib.actions.SingleStringArgFormatter;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.concurrent.BlazeInterners;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
@@ -68,13 +69,15 @@ public final class CustomCommandLine extends CommandLine {
      * @return The index of the next argument, after the ArgvFragment has consumed its args. If the
      *     ArgvFragment doesn't have any args, it should return {@code argi} unmodified.
      */
-    int eval(List<Object> arguments, int argi, ImmutableList.Builder<String> builder);
+    int eval(List<Object> arguments, int argi, ImmutableList.Builder<String> builder)
+        throws CommandLineExpansionException, InterruptedException;
 
     int addToFingerprint(
         List<Object> arguments,
         int argi,
         ActionKeyContext actionKeyContext,
-        Fingerprint fingerprint);
+        Fingerprint fingerprint)
+        throws CommandLineExpansionException, InterruptedException;
   }
 
   /**
@@ -89,6 +92,8 @@ public final class CustomCommandLine extends CommandLine {
       return argi; // Doesn't consume any arguments, so return argi unmodified
     }
 
+    abstract void eval(ImmutableList.Builder<String> builder);
+
     @Override
     public int addToFingerprint(
         List<Object> arguments,
@@ -98,8 +103,6 @@ public final class CustomCommandLine extends CommandLine {
       addToFingerprint(actionKeyContext, fingerprint);
       return argi; // Doesn't consume any arguments, so return argi unmodified
     }
-
-    abstract void eval(ImmutableList.Builder<String> builder);
 
     abstract void addToFingerprint(ActionKeyContext actionKeyContext, Fingerprint fingerprint);
   }
@@ -122,20 +125,20 @@ public final class CustomCommandLine extends CommandLine {
    *   <li>Simply add all arguments
    * </ul>
    *
-   * <pre>
-   *   Examples:
+   * <pre>{@code
+   * Examples:
    *
-   *   List<String> values = ImmutableList.of("1", "2", "3");
+   * List<String> values = ImmutableList.of("1", "2", "3");
    *
-   *   commandBuilder.addAll(VectorArg.format("-l%s").each(values))
-   *   -> ["-l1", "-l2", "-l3"]
+   * commandBuilder.addAll(VectorArg.format("-l%s").each(values))
+   * -> ["-l1", "-l2", "-l3"]
    *
-   *   commandBuilder.addAll(VectorArg.addBefore("-l").each(values))
-   *   -> ["-l", "1", "-l", "2", "-l", "3"]
+   * commandBuilder.addAll(VectorArg.addBefore("-l").each(values))
+   * -> ["-l", "1", "-l", "2", "-l", "3"]
    *
-   *   commandBuilder.addAll(VectorArg.join(":").each(values))
-   *   -> ["1:2:3"]
-   * </pre>
+   * commandBuilder.addAll(VectorArg.join(":").each(values))
+   * -> ["1:2:3"]
+   * }</pre>
    */
   @AutoCodec
   public static class VectorArg<T> {
@@ -171,7 +174,7 @@ public final class CustomCommandLine extends CommandLine {
      */
     @AutoCodec
     public static class SimpleVectorArg<T> extends VectorArg<T> {
-      private final Iterable<T> values;
+      private final Object values;
 
       private SimpleVectorArg(Builder builder, @Nullable Collection<T> values) {
         this(
@@ -204,7 +207,7 @@ public final class CustomCommandLine extends CommandLine {
           String formatEach,
           String beforeEach,
           String joinWith,
-          @Nullable Iterable<T> values) {
+          @Nullable Object values) {
         super(isNestedSet, isEmpty, count, formatEach, beforeEach, joinWith);
         this.values = values;
       }
@@ -217,7 +220,7 @@ public final class CustomCommandLine extends CommandLine {
 
     /** A vector arg that maps some type T to strings. */
     static class MappedVectorArg<T> extends VectorArg<String> {
-      private final Iterable<T> values;
+      private final Object values;
       private final CommandLineItem.MapFn<? super T> mapFn;
 
       private MappedVectorArg(SimpleVectorArg<T> other, CommandLineItem.MapFn<? super T> mapFn) {
@@ -291,9 +294,9 @@ public final class CustomCommandLine extends CommandLine {
       }
     }
 
-    @SuppressWarnings("unchecked")
     private static void push(List<Object> arguments, VectorArg<?> vectorArg) {
-      final Iterable<?> values;
+      // This is either a Collection or a NestedSet.
+      final Object values;
       final CommandLineItem.MapFn<?> mapFn;
       if (vectorArg instanceof SimpleVectorArg) {
         values = ((SimpleVectorArg) vectorArg).values;
@@ -322,7 +325,7 @@ public final class CustomCommandLine extends CommandLine {
       } else {
         // Simply expand any ordinary collection into the argv
         arguments.add(vectorArg.count);
-        Iterables.addAll(arguments, values);
+        arguments.addAll((Collection<?>) values);
       }
       if (vectorArgFragment.hasFormatEach) {
         arguments.add(vectorArg.formatEach);
@@ -368,21 +371,22 @@ public final class CustomCommandLine extends CommandLine {
 
       @SuppressWarnings("unchecked")
       @Override
-      public int eval(List<Object> arguments, int argi, ImmutableList.Builder<String> builder) {
+      public int eval(List<Object> arguments, int argi, ImmutableList.Builder<String> builder)
+          throws CommandLineExpansionException, InterruptedException {
         final List<String> mutatedValues;
         CommandLineItem.MapFn<Object> mapFn =
             hasMapEach ? (CommandLineItem.MapFn<Object>) arguments.get(argi++) : null;
         if (isNestedSet) {
           NestedSet<Object> values = (NestedSet<Object>) arguments.get(argi++);
-          Collection<Object> collection = values.toCollection();
-          mutatedValues = new ArrayList<>(collection.size());
+          ImmutableList<Object> list = values.toList();
+          mutatedValues = new ArrayList<>(list.size());
           if (mapFn != null) {
             Consumer<String> args = mutatedValues::add; // Hoist out of loop to reduce GC
-            for (Object object : collection) {
+            for (Object object : list) {
               mapFn.expandToCommandLine(object, args);
             }
           } else {
-            for (Object object : collection) {
+            for (Object object : list) {
               mutatedValues.add(CommandLineItem.expandToCommandLine(object));
             }
           }
@@ -430,7 +434,8 @@ public final class CustomCommandLine extends CommandLine {
           List<Object> arguments,
           int argi,
           ActionKeyContext actionKeyContext,
-          Fingerprint fingerprint) {
+          Fingerprint fingerprint)
+          throws CommandLineExpansionException, InterruptedException {
         CommandLineItem.MapFn<Object> mapFn =
             hasMapEach ? (CommandLineItem.MapFn<Object>) arguments.get(argi++) : null;
         if (isNestedSet) {
@@ -444,7 +449,7 @@ public final class CustomCommandLine extends CommandLine {
           int count = (Integer) arguments.get(argi++);
           if (mapFn != null) {
             for (int i = 0; i < count; ++i) {
-              mapFn.expandToCommandLine(arguments.get(argi++), fingerprint);
+              mapFn.expandToCommandLine(arguments.get(argi++), fingerprint::addString);
             }
           } else {
             for (int i = 0; i < count; ++i) {
@@ -597,12 +602,6 @@ public final class CustomCommandLine extends CommandLine {
     abstract void eval(ImmutableList.Builder<String> builder, ArtifactExpander artifactExpander);
 
     /**
-     * Returns a string that describes this argument fragment. The string can be used as part of an
-     * action key for the command line at analysis time.
-     */
-    abstract String describe();
-
-    /**
      * Evaluates this argument fragment by serializing it into a string. Note that the returned
      * argument is not suitable to be used as part of an actual command line. The purpose of this
      * method is to provide a unique command line argument string to be used as part of an action
@@ -614,6 +613,12 @@ public final class CustomCommandLine extends CommandLine {
     void eval(ImmutableList.Builder<String> builder) {
       builder.add(describe());
     }
+
+    /**
+     * Returns a string that describes this argument fragment. The string can be used as part of an
+     * action key for the command line at analysis time.
+     */
+    abstract String describe();
   }
 
   @AutoCodec
@@ -717,8 +722,7 @@ public final class CustomCommandLine extends CommandLine {
       return arguments.isEmpty();
     }
 
-    private final ImmutableList.Builder<Artifact> treeArtifactInputs =
-        new ImmutableList.Builder<>();
+    private final NestedSetBuilder<Artifact> treeArtifactInputs = NestedSetBuilder.stableOrder();
 
     private boolean treeArtifactsRequested = false;
 
@@ -729,6 +733,15 @@ public final class CustomCommandLine extends CommandLine {
      */
     public Builder add(@CompileTimeConstant String value) {
       return addObjectInternal(value);
+    }
+
+    /**
+     * Adds a string argument to the command line.
+     *
+     * <p>If the value is null, neither the arg nor the value is added.
+     */
+    public Builder add(@CompileTimeConstant String arg, @Nullable String value) {
+      return addObjectInternal(arg, value);
     }
 
     /**
@@ -762,6 +775,18 @@ public final class CustomCommandLine extends CommandLine {
     }
 
     /**
+     * Adds a label value by calling {@link Label#getCanonicalForm}.
+     *
+     * <p>Prefer this over manually calling {@link Label#getCanonicalForm}, as it avoids storing a
+     * copy of the label value.
+     *
+     * <p>If the value is null, neither the arg nor the value is added.
+     */
+    public Builder addLabel(@CompileTimeConstant String arg, @Nullable Label value) {
+      return addObjectInternal(arg, value);
+    }
+
+    /**
      * Adds an artifact by calling {@link PathFragment#getPathString}.
      *
      * <p>Prefer this over manually calling {@link PathFragment#getPathString}, as it avoids storing
@@ -772,39 +797,13 @@ public final class CustomCommandLine extends CommandLine {
     }
 
     /**
-     * Adds an artifact by calling {@link Artifact#getExecPath}.
+     * Adds an artifact by calling {@link PathFragment#getCallablePathString}.
      *
-     * <p>Prefer this over manually calling {@link Artifact#getExecPath}, as it avoids storing a
-     * copy of the artifact path string.
+     * <p>Prefer this over manually calling {@link PathFragment#getCallablePathString}, as it avoids
+     * storing a copy of the path string.
      */
-    public Builder addExecPath(@Nullable Artifact value) {
-      return addObjectInternal(value);
-    }
-
-    /** Adds a lazily expanded string. */
-    public Builder addLazyString(@Nullable LazyString value) {
-      return addObjectInternal(value);
-    }
-
-    /**
-     * Adds a string argument to the command line.
-     *
-     * <p>If the value is null, neither the arg nor the value is added.
-     */
-    public Builder add(@CompileTimeConstant String arg, @Nullable String value) {
-      return addObjectInternal(arg, value);
-    }
-
-    /**
-     * Adds a label value by calling {@link Label#getCanonicalForm}.
-     *
-     * <p>Prefer this over manually calling {@link Label#getCanonicalForm}, as it avoids storing a
-     * copy of the label value.
-     *
-     * <p>If the value is null, neither the arg nor the value is added.
-     */
-    public Builder addLabel(@CompileTimeConstant String arg, @Nullable Label value) {
-      return addObjectInternal(arg, value);
+    public Builder addCallablePath(@Nullable PathFragment value) {
+      return addObjectInternal(new CallablePathFragment(value));
     }
 
     /**
@@ -824,11 +823,26 @@ public final class CustomCommandLine extends CommandLine {
      *
      * <p>Prefer this over manually calling {@link Artifact#getExecPath}, as it avoids storing a
      * copy of the artifact path string.
+     */
+    public Builder addExecPath(@Nullable Artifact value) {
+      return addObjectInternal(value);
+    }
+
+    /**
+     * Adds an artifact by calling {@link Artifact#getExecPath}.
+     *
+     * <p>Prefer this over manually calling {@link Artifact#getExecPath}, as it avoids storing a
+     * copy of the artifact path string.
      *
      * <p>If the value is null, neither the arg nor the value is added.
      */
     public Builder addExecPath(@CompileTimeConstant String arg, @Nullable Artifact value) {
       return addObjectInternal(arg, value);
+    }
+
+    /** Adds a lazily expanded string. */
+    public Builder addLazyString(@Nullable LazyString value) {
+      return addObjectInternal(value);
     }
 
     /** Adds a lazily expanded string. */
@@ -874,22 +888,6 @@ public final class CustomCommandLine extends CommandLine {
       return addCollectionInternal(values);
     }
 
-    /** Adds the passed paths to the command line. */
-    public Builder addPaths(@Nullable Collection<PathFragment> values) {
-      return addCollectionInternal(values);
-    }
-
-    /**
-     * Adds the artifacts' exec paths to the command line.
-     *
-     * <p>Do not use this method if the list is derived from a flattened nested set. Instead, figure
-     * out how to avoid flattening the set and use {@link
-     * Builder#addExecPaths(NestedSet<Artifact>)}.
-     */
-    public Builder addExecPaths(@Nullable Collection<Artifact> values) {
-      return addCollectionInternal(values);
-    }
-
     /**
      * Adds the passed strings to the command line.
      *
@@ -897,16 +895,6 @@ public final class CustomCommandLine extends CommandLine {
      * please try to use a different method that supports what you are trying to do directly.
      */
     public Builder addAll(@Nullable NestedSet<String> values) {
-      return addNestedSetInternal(values);
-    }
-
-    /** Adds the passed paths to the command line. */
-    public Builder addPaths(@Nullable NestedSet<PathFragment> values) {
-      return addNestedSetInternal(values);
-    }
-
-    /** Adds the artifacts' exec paths to the command line. */
-    public Builder addExecPaths(@Nullable NestedSet<Artifact> values) {
       return addNestedSetInternal(values);
     }
 
@@ -923,6 +911,39 @@ public final class CustomCommandLine extends CommandLine {
     }
 
     /**
+     * Adds the arg followed by the passed strings.
+     *
+     * <p>If values is empty, the arg isn't added.
+     */
+    public Builder addAll(@CompileTimeConstant String arg, @Nullable NestedSet<String> values) {
+      return addNestedSetInternal(arg, values);
+    }
+
+    /** Adds the passed vector arg. See {@link VectorArg}. */
+    public Builder addAll(VectorArg<String> vectorArg) {
+      return addVectorArgInternal(vectorArg);
+    }
+
+    /**
+     * Adds the arg followed by the passed vector arg. See {@link VectorArg}.
+     *
+     * <p>If values is empty, the arg isn't added.
+     */
+    public Builder addAll(@CompileTimeConstant String arg, VectorArg<String> vectorArg) {
+      return addVectorArgInternal(arg, vectorArg);
+    }
+
+    /** Adds the passed paths to the command line. */
+    public Builder addPaths(@Nullable Collection<PathFragment> values) {
+      return addCollectionInternal(values);
+    }
+
+    /** Adds the passed paths to the command line. */
+    public Builder addPaths(@Nullable NestedSet<PathFragment> values) {
+      return addNestedSetInternal(values);
+    }
+
+    /**
      * Adds the arg followed by the path strings.
      *
      * <p>If values is empty, the arg isn't added.
@@ -930,6 +951,46 @@ public final class CustomCommandLine extends CommandLine {
     public Builder addPaths(
         @CompileTimeConstant String arg, @Nullable Collection<PathFragment> values) {
       return addCollectionInternal(arg, values);
+    }
+
+    /**
+     * Adds the arg followed by the path fragments.
+     *
+     * <p>If values is empty, the arg isn't added.
+     */
+    public Builder addPaths(
+        @CompileTimeConstant String arg, @Nullable NestedSet<PathFragment> values) {
+      return addNestedSetInternal(arg, values);
+    }
+
+    /** Adds the passed vector arg. See {@link VectorArg}. */
+    public Builder addPaths(VectorArg<PathFragment> vectorArg) {
+      return addVectorArgInternal(vectorArg);
+    }
+
+    /**
+     * Adds the arg followed by the passed vector arg. See {@link VectorArg}.
+     *
+     * <p>If values is empty, the arg isn't added.
+     */
+    public Builder addPaths(@CompileTimeConstant String arg, VectorArg<PathFragment> vectorArg) {
+      return addVectorArgInternal(arg, vectorArg);
+    }
+
+    /**
+     * Adds the artifacts' exec paths to the command line.
+     *
+     * <p>Do not use this method if the list is derived from a flattened nested set. Instead, figure
+     * out how to avoid flattening the set and use {@link
+     * Builder#addExecPaths(NestedSet<Artifact>)}.
+     */
+    public Builder addExecPaths(@Nullable Collection<Artifact> values) {
+      return addCollectionInternal(values);
+    }
+
+    /** Adds the artifacts' exec paths to the command line. */
+    public Builder addExecPaths(@Nullable NestedSet<Artifact> values) {
+      return addNestedSetInternal(values);
     }
 
     /**
@@ -947,25 +1008,6 @@ public final class CustomCommandLine extends CommandLine {
     }
 
     /**
-     * Adds the arg followed by the passed strings.
-     *
-     * <p>If values is empty, the arg isn't added.
-     */
-    public Builder addAll(@CompileTimeConstant String arg, @Nullable NestedSet<String> values) {
-      return addNestedSetInternal(arg, values);
-    }
-
-    /**
-     * Adds the arg followed by the path fragments.
-     *
-     * <p>If values is empty, the arg isn't added.
-     */
-    public Builder addPaths(
-        @CompileTimeConstant String arg, @Nullable NestedSet<PathFragment> values) {
-      return addNestedSetInternal(arg, values);
-    }
-
-    /**
      * Adds the arg followed by the artifacts' exec paths.
      *
      * <p>If values is empty, the arg isn't added.
@@ -976,36 +1018,8 @@ public final class CustomCommandLine extends CommandLine {
     }
 
     /** Adds the passed vector arg. See {@link VectorArg}. */
-    public Builder addAll(VectorArg<String> vectorArg) {
-      return addVectorArgInternal(vectorArg);
-    }
-
-    /** Adds the passed vector arg. See {@link VectorArg}. */
-    public Builder addPaths(VectorArg<PathFragment> vectorArg) {
-      return addVectorArgInternal(vectorArg);
-    }
-
-    /** Adds the passed vector arg. See {@link VectorArg}. */
     public Builder addExecPaths(VectorArg<Artifact> vectorArg) {
       return addVectorArgInternal(vectorArg);
-    }
-
-    /**
-     * Adds the arg followed by the passed vector arg. See {@link VectorArg}.
-     *
-     * <p>If values is empty, the arg isn't added.
-     */
-    public Builder addAll(@CompileTimeConstant String arg, VectorArg<String> vectorArg) {
-      return addVectorArgInternal(arg, vectorArg);
-    }
-
-    /**
-     * Adds the arg followed by the passed vector arg. See {@link VectorArg}.
-     *
-     * <p>If values is empty, the arg isn't added.
-     */
-    public Builder addPaths(@CompileTimeConstant String arg, VectorArg<PathFragment> vectorArg) {
-      return addVectorArgInternal(arg, vectorArg);
     }
 
     /**
@@ -1080,9 +1094,9 @@ public final class CustomCommandLine extends CommandLine {
     }
 
     /**
-     * Adds the arguments for all {@link TreeFileArtifact}s under
-     * {@code treeArtifact}, one argument per file. Using {@code expandingFunction} to expand each
-     * {@link TreeFileArtifact} to expected argument.
+     * Adds the arguments for all {@link TreeFileArtifact}s under {@code treeArtifact}, one argument
+     * per file. Using {@code expandFunction} to expand each {@link TreeFileArtifact} to expected
+     * argument.
      *
      * @param treeArtifact the TreeArtifact containing the {@link TreeFileArtifact}s to add.
      * @param expandFunction the function to generate the argument for each{@link TreeFileArtifact}.
@@ -1097,7 +1111,7 @@ public final class CustomCommandLine extends CommandLine {
     }
 
     /** Gets all the tree artifact inputs for command line */
-    public Iterable<Artifact> getTreeArtifactInputs() {
+    public NestedSet<Artifact> getTreeArtifactInputs() {
       treeArtifactsRequested = true;
       return treeArtifactInputs.build();
     }
@@ -1230,22 +1244,27 @@ public final class CustomCommandLine extends CommandLine {
   }
 
   @Override
-  public Iterable<String> arguments() {
+  public ImmutableList<String> arguments()
+      throws CommandLineExpansionException, InterruptedException {
     return argumentsInternal(null);
   }
 
   @Override
-  public Iterable<String> arguments(ArtifactExpander artifactExpander) {
+  public ImmutableList<String> arguments(ArtifactExpander artifactExpander)
+      throws CommandLineExpansionException, InterruptedException {
     return argumentsInternal(Preconditions.checkNotNull(artifactExpander));
   }
 
-  private Iterable<String> argumentsInternal(@Nullable ArtifactExpander artifactExpander) {
+  private ImmutableList<String> argumentsInternal(@Nullable ArtifactExpander artifactExpander)
+      throws CommandLineExpansionException, InterruptedException {
     ImmutableList.Builder<String> builder = ImmutableList.builder();
     int count = arguments.size();
     for (int i = 0; i < count; ) {
       Object arg = arguments.get(i++);
       Object substitutedArg = substituteTreeFileArtifactArgvFragment(arg);
-      if (substitutedArg instanceof Iterable) {
+      if (substitutedArg instanceof NestedSet) {
+        evalSimpleVectorArg(((NestedSet<?>) substitutedArg).toList(), builder);
+      } else if (substitutedArg instanceof Iterable) {
         evalSimpleVectorArg((Iterable<?>) substitutedArg, builder);
       } else if (substitutedArg instanceof ArgvFragment) {
         if (artifactExpander != null
@@ -1286,14 +1305,22 @@ public final class CustomCommandLine extends CommandLine {
   }
 
   @Override
-  public void addToFingerprint(ActionKeyContext actionKeyContext, Fingerprint fingerprint) {
+  @SuppressWarnings("unchecked")
+  public void addToFingerprint(
+      ActionKeyContext actionKeyContext,
+      @Nullable ArtifactExpander artifactExpander,
+      Fingerprint fingerprint)
+      throws CommandLineExpansionException, InterruptedException {
     int count = arguments.size();
     for (int i = 0; i < count; ) {
       Object arg = arguments.get(i++);
       Object substitutedArg = substituteTreeFileArtifactArgvFragment(arg);
-      if (substitutedArg instanceof Iterable) {
-        addSimpleVectorArgToFingerprint(
-            (Iterable<?>) substitutedArg, actionKeyContext, fingerprint);
+      if (substitutedArg instanceof NestedSet) {
+        actionKeyContext.addNestedSetToFingerprint(fingerprint, (NestedSet<Object>) substitutedArg);
+      } else if (substitutedArg instanceof Iterable) {
+        for (Object value : (Iterable<Object>) substitutedArg) {
+          fingerprint.addString(CommandLineItem.expandToCommandLine(value));
+        }
       } else if (substitutedArg instanceof ArgvFragment) {
         i =
             ((ArgvFragment) substitutedArg)
@@ -1304,15 +1331,17 @@ public final class CustomCommandLine extends CommandLine {
     }
   }
 
-  @SuppressWarnings("unchecked")
-  private void addSimpleVectorArgToFingerprint(
-      Iterable<?> arg, ActionKeyContext actionKeyContext, Fingerprint fingerprint) {
-    if (arg instanceof NestedSet) {
-      actionKeyContext.addNestedSetToFingerprint(fingerprint, (NestedSet<Object>) arg);
-    } else {
-      for (Object value : arg) {
-        fingerprint.addString(CommandLineItem.expandToCommandLine(value));
-      }
+  /** A {@link PathFragment} that is expanded with {@link PathFragment#getCallablePathString()}. */
+  private static final class CallablePathFragment {
+    public final PathFragment fragment;
+
+    CallablePathFragment(PathFragment fragment) {
+      this.fragment = fragment;
+    }
+
+    @Override
+    public String toString() {
+      return fragment.getCallablePathString();
     }
   }
 }

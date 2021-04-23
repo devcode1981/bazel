@@ -29,12 +29,12 @@ import com.google.devtools.build.lib.bazel.rules.java.BazelJavaRuleClasses.BaseJ
 import com.google.devtools.build.lib.packages.ImplicitOutputsFunction;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
-import com.google.devtools.build.lib.packages.SkylarkProviderIdentifier;
+import com.google.devtools.build.lib.packages.RuleClass.ToolchainTransitionMode;
+import com.google.devtools.build.lib.packages.StarlarkProviderIdentifier;
 import com.google.devtools.build.lib.packages.TriState;
 import com.google.devtools.build.lib.rules.android.AndroidFeatureFlagSetProvider;
 import com.google.devtools.build.lib.rules.android.AndroidLocalTestBaseRule;
 import com.google.devtools.build.lib.rules.config.ConfigFeatureFlagTransitionFactory;
-import com.google.devtools.build.lib.rules.cpp.CppRuleClasses;
 import com.google.devtools.build.lib.rules.java.JavaConfiguration;
 import com.google.devtools.build.lib.rules.java.JavaInfo;
 import com.google.devtools.build.lib.rules.java.JavaSemantics;
@@ -69,13 +69,12 @@ public class BazelAndroidLocalTestRule implements RuleDefinition {
                 .mandatoryProvidersList(
                     ImmutableList.of(
                         ImmutableList.of(
-                            SkylarkProviderIdentifier.forKey(JavaInfo.PROVIDER.getKey())))))
+                            StarlarkProviderIdentifier.forKey(JavaInfo.PROVIDER.getKey())))))
         .override(attr("$testsupport", LABEL).value(environment.getToolsLabel(JUNIT_TESTRUNNER)))
         .add(
             attr("$robolectric_implicit_classpath", LABEL_LIST)
                 .value(ImmutableList.of(environment.getToolsLabel("//tools/android:android_jar"))))
         .override(attr("stamp", TRISTATE).value(TriState.NO))
-        .removeAttribute("$experimental_testsupport")
         .removeAttribute("classpath_resources")
         .removeAttribute("create_executable")
         .removeAttribute("deploy_manifest_lines")
@@ -87,7 +86,7 @@ public class BazelAndroidLocalTestRule implements RuleDefinition {
         .removeAttribute(":java_launcher")
         .cfg(
             new ConfigFeatureFlagTransitionFactory(AndroidFeatureFlagSetProvider.FEATURE_FLAG_ATTR))
-        .addRequiredToolchains(CppRuleClasses.ccToolchainTypeAttribute(environment))
+        .useToolchainTransition(ToolchainTransitionMode.ENABLED)
         .build();
   }
 
@@ -121,8 +120,8 @@ ${IMPLICIT_OUTPUTS}
 
 <p>
 To use Robolectric with <code>android_local_test</code>, add
-<a href="https://github.com/robolectric/robolectric/tree/master/bazel">Robolectric's repository</a>
-to your <code>WORKSPACE</code> file:
+<a href="https://github.com/robolectric/robolectric-bazel/tree/master/bazel">Robolectric's
+repository</a> to your <code>WORKSPACE</code> file:
 <pre class="code">
 http_archive(
     name = "robolectric",
@@ -165,7 +164,6 @@ android_library(
 </pre>
 
 <!-- #END_BLAZE_RULE --> */
-
 
 /* <!-- #BLAZE_RULE(android_local_test).IMPLICIT_OUTPUTS -->
 <ul>

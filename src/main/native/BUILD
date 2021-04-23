@@ -1,11 +1,11 @@
 genrule(
     name = "copy_link_jni_md_header",
     srcs = select({
-        "//src/conditions:darwin": ["//tools/jdk:jni_md_header-darwin"],
-        "//src/conditions:darwin_x86_64": ["//tools/jdk:jni_md_header-darwin"],
-        "//src/conditions:freebsd": ["//tools/jdk:jni_md_header-freebsd"],
-        "//src/conditions:windows": ["//tools/jdk:jni_md_header-windows"],
-        "//conditions:default": ["//tools/jdk:jni_md_header-linux"],
+        "//src/conditions:darwin": ["@bazel_tools//tools/jdk:jni_md_header-darwin"],
+        "//src/conditions:freebsd": ["@bazel_tools//tools/jdk:jni_md_header-freebsd"],
+        "//src/conditions:openbsd": ["@bazel_tools//tools/jdk:jni_md_header-openbsd"],
+        "//src/conditions:windows": ["@bazel_tools//tools/jdk:jni_md_header-windows"],
+        "//conditions:default": ["@bazel_tools//tools/jdk:jni_md_header-linux"],
     }),
     outs = ["jni_md.h"],
     cmd = "cp -f $< $@",
@@ -14,7 +14,7 @@ genrule(
 
 genrule(
     name = "copy_link_jni_header",
-    srcs = ["//tools/jdk:jni_header"],
+    srcs = ["@bazel_tools//tools/jdk:jni_header"],
     outs = ["jni.h"],
     cmd = "cp -f $< $@",
     visibility = ["//src/main/native:__subpackages__"],
@@ -27,17 +27,25 @@ filegroup(
             "unix_jni_darwin.cc",
             "fsevents.cc",
         ],
-        "//src/conditions:darwin_x86_64": [
-            "unix_jni_darwin.cc",
-            "fsevents.cc",
-        ],
-        "//src/conditions:freebsd": ["unix_jni_freebsd.cc"],
+        "//src/conditions:freebsd": ["unix_jni_bsd.cc"],
+        "//src/conditions:openbsd": ["unix_jni_bsd.cc"],
         "//conditions:default": ["unix_jni_linux.cc"],
     }),
 )
 
+cc_library(
+    name = "latin1_jni_path",
+    srcs = [
+        "latin1_jni_path.cc",
+        ":jni.h",
+        ":jni_md.h",
+    ],
+    hdrs = ["latin1_jni_path.h"],
+    includes = ["."],  # For jni headers.
+)
+
 cc_binary(
-    name = "libunix.so",
+    name = "libunix_jni.so",
     srcs = [
         "macros.h",
         "process.cc",
@@ -54,12 +62,12 @@ cc_binary(
     includes = ["."],  # For jni headers.
     linkopts = select({
         "//src/conditions:darwin": ["-framework CoreServices"],
-        "//src/conditions:darwin_x86_64": ["-framework CoreServices"],
         "//conditions:default": [],
     }),
     linkshared = 1,
-    visibility = ["//src:__subpackages__"],
+    visibility = ["//src/main/java/com/google/devtools/build/lib/jni:__pkg__"],
     deps = [
+        ":latin1_jni_path",
         "//src/main/cpp/util",
         "//src/main/cpp/util:md5",
     ],
@@ -69,11 +77,11 @@ cc_binary(
 # library extensions.  This is issue #914.
 genrule(
     name = "mac-compat",
-    srcs = ["libunix.so"],
-    outs = ["libunix.dylib"],
+    srcs = ["libunix_jni.so"],
+    outs = ["libunix_jni.dylib"],
     cmd = "cp $< $@",
     output_to_bindir = 1,
-    visibility = ["//src:__subpackages__"],
+    visibility = ["//src/main/java/com/google/devtools/build/lib/jni:__pkg__"],
 )
 
 filegroup(

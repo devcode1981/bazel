@@ -3,22 +3,15 @@ layout: documentation
 title: Common C++ Build Use Cases
 ---
 
-Introduction to Bazel: Common C++ Build Use Cases
-==========
+# Common C++ Build Use Cases
 
 Here you will find some of the most common use cases for building C++ projects
 with Bazel. If you have not done so already, get started with building C++
 projects with Bazel by completing the tutorial
 [Introduction to Bazel: Build a C++ Project](tutorial/cpp.html).
 
-## Contents
-
-*  [Including multiple files in a target](#including-multiple-files-in-a-target)
-*  [Using transitive includes](#using-transitive-includes)
-*  [Adding include paths](#adding-include-paths)
-*  [Including external libraries](#including-external-libraries)
-*  [Writing and running C++ tests](#writing-and-running-c-tests)
-*  [Adding dependencies on precompiled libraries](#adding-dependencies-on-precompiled-libraries)
+For information on cc_library and hdrs header files, see
+<a href="be/c-cpp.html#cc_library">cc_library</a>.
 
 ## Including multiple files in a target
 
@@ -41,9 +34,9 @@ subdirectories).
 ## Using transitive includes
 
 If a file includes a header, then the file's rule should depend on that header's
-library.  Conversely, only direct dependencies need to be specified as
-dependencies.  For example, suppose `sandwich.h` includes `bread.h` and
-`bread.h` includes `flour.h`.  `sandwich.h` doesn't include `flour.h` (who wants
+library. Conversely, only direct dependencies need to be specified as
+dependencies. For example, suppose `sandwich.h` includes `bread.h` and
+`bread.h` includes `flour.h`. `sandwich.h` doesn't include `flour.h` (who wants
 flour in their sandwich?), so the `BUILD` file would look like this:
 
 ```python
@@ -75,7 +68,7 @@ on the `flour` library.
 
 Sometimes you cannot (or do not want to) root include paths at the workspace
 root. Existing libraries might already have an include directory that doesn't
-match its path in your workspace.  For example, suppose you have the following
+match its path in your workspace. For example, suppose you have the following
 directory structure:
 
 ```
@@ -91,8 +84,8 @@ directory structure:
 
 Bazel will expect `some_lib.h` to be included as
 `legacy/some_lib/include/some_lib.h`, but suppose `some_lib.cc` includes
-`"include/some_lib.h"`.  To make that include path valid,
-`legacy/some_lib/BUILD` will need to specify that the `some_lib/`
+`"some_lib.h"`. To make that include path valid,
+`legacy/some_lib/BUILD` will need to specify that the `some_lib/include`
 directory is an include directory:
 
 ```python
@@ -110,34 +103,36 @@ must otherwise be included with a `/` prefix.
 ## Including external libraries
 
 Suppose you are using [Google Test](https://github.com/google/googletest). You
-can use one of the `new_` repository functions in the `WORKSPACE` file to
+can use one of the repository functions in the `WORKSPACE` file to
 download Google Test and make it available in your repository:
 
 ```python
-new_http_archive(
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
     name = "gtest",
-    url = "https://github.com/google/googletest/archive/release-1.7.0.zip",
-    sha256 = "b58cb7547a28b2c718d1e38aee18a3659c9e3ff52440297e965f5edffe34b6d0",
-    build_file = "gtest.BUILD",
+    url = "https://github.com/google/googletest/archive/release-1.10.0.zip",
+    sha256 = "94c634d499558a76fa649edb13721dce6e98fb1e7018dfaeba3cd7a083945e91",
+    build_file = "@//:gtest.BUILD",
 )
 ```
 
-**NOTE:** If the destination already contains a `BUILD` file, you can use one of
-the `non-new_` functions.
+**NOTE:** If the destination already contains a `BUILD` file, you can leave
+out the `build_file` attribute.
 
 Then create `gtest.BUILD`, a `BUILD` file used to compile Google Test.
 Google Test has several "special" requirements that make its `cc_library` rule
 more complicated:
 
-*  `googletest-release-1.7.0/src/gtest-all.cc` `#include`s all of the other
-   files in `googletest-release-1.7.0/src/`, so we need to exclude it from the
-   compile or we'll get link errors for duplicate symbols.
+*  `googletest-release-1.10.0/src/gtest-all.cc` `#include`s all other
+   files in `googletest-release-1.10.0/src/`: exclude it from the
+   compile to prevent link errors for duplicate symbols.
 
 *  It uses header files that are relative to the
-`googletest-release-1.7.0/include/` directory  (`"gtest/gtest.h"`), so we must
+`googletest-release-1.10.0/include/` directory  (`"gtest/gtest.h"`), so you must
 add that directory to the include paths.
 
-*  It needs to link in `pthread`, so we add that as a `linkopt`.
+*  It needs to link in `pthread`, so add that as a `linkopt`.
 
 The final rule therefore looks like this:
 
@@ -145,32 +140,35 @@ The final rule therefore looks like this:
 cc_library(
     name = "main",
     srcs = glob(
-        ["googletest-release-1.7.0/src/*.cc"],
-        exclude = ["googletest-release-1.7.0/src/gtest-all.cc"]
+        ["googletest-release-1.10.0/src/*.cc"],
+        exclude = ["googletest-release-1.10.0/src/gtest-all.cc"]
     ),
     hdrs = glob([
-        "googletest-release-1.7.0/include/**/*.h",
-        "googletest-release-1.7.0/src/*.h"
+        "googletest-release-1.10.0/include/**/*.h",
+        "googletest-release-1.10.0/src/*.h"
     ]),
     copts = [
-        "-Iexternal/gtest/googletest-release-1.7.0/include"
+        "-Iexternal/gtest/googletest-release-1.10.0/include",
+        "-Iexternal/gtest/googletest-release-1.10.0"
     ],
     linkopts = ["-pthread"],
     visibility = ["//visibility:public"],
 )
 ```
 
-This is somewhat messy: everything is prefixed with `googletest-release-1.7.0`
-as a byproduct of the archive's structure. You can make `new_http_archive` strip
+This is somewhat messy: everything is prefixed with `googletest-release-1.10.0`
+as a byproduct of the archive's structure. You can make `http_archive` strip
 this prefix by adding the `strip_prefix` attribute:
 
 ```python
-new_http_archive(
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
     name = "gtest",
-    url = "https://github.com/google/googletest/archive/release-1.7.0.zip",
-    sha256 = "b58cb7547a28b2c718d1e38aee18a3659c9e3ff52440297e965f5edffe34b6d0",
-    build_file = "gtest.BUILD",
-    strip_prefix = "googletest-release-1.7.0",
+    url = "https://github.com/google/googletest/archive/release-1.10.0.zip",
+    sha256 = "94c634d499558a76fa649edb13721dce6e98fb1e7018dfaeba3cd7a083945e91",
+    build_file = "@//:gtest.BUILD",
+    strip_prefix = "googletest-release-1.10.0",
 )
 ```
 
@@ -197,11 +195,11 @@ Now `cc_` rules can depend on `@gtest//:main`.
 
 ## Writing and running C++ tests
 
-For example, we could create a test `./test/hello-test.cc` such as:
+For example, you could create a test `./test/hello-test.cc`, such as:
 
 ```cpp
 #include "gtest/gtest.h"
-#include "lib/hello-greet.h"
+#include "main/hello-greet.h"
 
 TEST(HelloTest, GetGreet) {
   EXPECT_EQ(get_greet("Bazel"), "Hello Bazel");
@@ -217,13 +215,13 @@ cc_test(
     copts = ["-Iexternal/gtest/include"],
     deps = [
         "@gtest//:main",
-        "//lib:hello-greet",
+        "//main:hello-greet",
     ],
 )
 ```
 
-Note that in order to make `hello-greet` visible to `hello-test`, we have to add
-`"//test:__pkg__",` to the `visibility` attribute in `./lib/BUILD`.
+To make `hello-greet` visible to `hello-test`, you must add
+`"//test:__pkg__",` to the `visibility` attribute in `./main/BUILD`.
 
 Now you can use `bazel test` to run the test.
 
@@ -258,4 +256,3 @@ cc_library(
 ```
 
 This way, other C++ targets in your workspace can depend on this rule.
-

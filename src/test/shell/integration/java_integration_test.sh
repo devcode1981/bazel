@@ -23,6 +23,9 @@ source "${CURRENT_DIR}/../shell_utils.sh" \
 source "${CURRENT_DIR}/../integration_test_setup.sh" \
   || { echo "integration_test_setup.sh not found!" >&2; exit 1; }
 
+# Load the helper utils.
+source "${CURRENT_DIR}/java_integration_test_utils.sh" \
+  || { echo "java_integration_test_utils.sh not found!" >&2; exit 1; }
 set -eu
 
 declare -r runfiles_relative_javabase="$1"
@@ -254,20 +257,25 @@ function assert_singlejar_works() {
   mkdir -p "$pkg/jvm"
   cat > "$pkg/jvm/BUILD" <<EOF
 package(default_visibility=["//visibility:public"])
-java_runtime(name='runtime', java_home='$javabase')
+java_runtime(
+    name='runtime',
+    java_home='$javabase',
+)
 EOF
-
+  create_java_test_platforms
 
   # Set javabase to an absolute path.
   bazel build //$pkg/java/hello:hello //$pkg/java/hello:hello_deploy.jar \
-      "$stamp_arg" --javabase="//$pkg/jvm:runtime" "$embed_label" >&"$TEST_log" \
+      "$stamp_arg" \
+      --extra_toolchains="//$pkg/jvm:all,//tools/jdk:all" \
+      --platforms="//$pkg/jvm:platform" \
+      "$embed_label" >&"$TEST_log" \
       || fail "Build failed"
 
   mkdir $pkg/ugly/ || fail "mkdir failed"
   # The stub script follows symlinks, so copy the files.
   cp ${PRODUCT_NAME}-bin/$pkg/java/hello/hello $pkg/ugly/
   cp ${PRODUCT_NAME}-bin/$pkg/java/hello/hello_deploy.jar $pkg/ugly/
-
   $pkg/ugly/hello build.target build.time build.timestamp \
       main.class=hello.Hello "$expected_build_data" >> $TEST_log 2>&1
   expect_log 'Hello, World!'
@@ -837,6 +845,42 @@ EOF
       || fail "Expected success"
   bazel run //$pkg/java/hello:hello -- --singlejar >& "$TEST_log"
   expect_log "Hello World!"
+}
+
+
+function test_arg_compile_action() {
+  local package="${FUNCNAME[0]}"
+  mkdir -p "${package}"
+
+  cat > "${package}/lib.bzl" <<EOF
+def _actions_test_impl(target, ctx):
+    action = target.actions[0] # digest action
+    if action.mnemonic != "Javac":
+      fail("Expected the first action to be Javac.")
+    aspect_out = ctx.actions.declare_file('aspect_out')
+    ctx.actions.run_shell(inputs = action.inputs,
+                          outputs = [aspect_out],
+                          command = "echo \$@ > " + aspect_out.path,
+                          arguments = action.args)
+    return [OutputGroupInfo(out=[aspect_out])]
+
+actions_test_aspect = aspect(implementation = _actions_test_impl)
+EOF
+
+  touch "${package}/x.java"
+  cat > "${package}/BUILD" <<EOF
+java_library(
+  name = "x",
+  srcs = ["x.java"],
+)
+EOF
+
+  bazel build "${package}:x" \
+      --aspects="//${package}:lib.bzl%actions_test_aspect" \
+      --output_groups=out
+
+  cat "${PRODUCT_NAME}-bin/${package}/aspect_out" | grep "0.params .*1.params" \
+      || fail "aspect Args do not contain both params files"
 }
 
 run_suite "Java integration tests"

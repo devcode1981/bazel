@@ -58,7 +58,36 @@ function tear_down() {
 
 #### TESTS #############################################################
 
-function test_glob_with_io_error() {
+function test_glob_control_chars() {
+  local char escape raw
+  for char in {1..31} 127; do
+    local pkg="$FUNCNAME/char$char"
+    mkdir -p $pkg
+    echo "filegroup(name='t', srcs=glob(['*']))" > $pkg/BUILD
+    printf -v escape \\%03o $char
+    printf -v raw %b "$escape"
+    touch "$pkg/$raw"
+    bazel query "//$pkg:*" >& $TEST_log && fail "Expected failure"
+    expect_log 'invalid label'
+  done
+}
+
+function test_glob_utf8() {
+  local -r pkg="$FUNCNAME"
+  mkdir $pkg
+  echo "filegroup(name='t', srcs=glob(['*']))" > $pkg/BUILD
+  cd $pkg
+  # This might print error messages for individual file names on systems like
+  # macOS that use a file system that only permits correct UTF-8 strings as file
+  # names. The errors can be ignored - we just test with whatever files the OS
+  # allowed us to create.
+  perl -CS -e 'for $i (160..0xd7ff) {print chr $i, $i%20?"":"\n"}' | xargs touch || true
+  cd ..
+  bazel query "//$pkg:*" >& $TEST_log || fail "Expected success"
+}
+
+function run_test_glob_with_io_error() {
+  local option=$1
   local -r pkg="${FUNCNAME}"
   mkdir -p "$pkg" || fail "could not create \"$pkg\""
 
@@ -68,14 +97,24 @@ function test_glob_with_io_error() {
   echo "filegroup(name='t', srcs=glob(['u/*']))" > $pkg/t/BUILD
   chmod 000 $pkg/t/u
 
-  bazel query "//$pkg/t:*" >& $TEST_log && fail "Expected failure"
-  expect_log 'error globbing.*Permission denied'
+  bazel query "$option" "//$pkg/t:*" >& $TEST_log && fail "Expected failure"
+  # TODO(katre): when error message from ErrorDeterminingRepositoryException is
+  #  improved, add it here too.
+  expect_log 'error globbing'
 
   chmod 755 $pkg/t/u
-  bazel query "//$pkg/t:*" >& $TEST_log || fail "Expected success"
-  expect_not_log 'error globbing.*Permission denied'
+  bazel query "$option" "//$pkg/t:*" >& $TEST_log || fail "Expected success"
+  expect_not_log 'error globbing'
   expect_log "//$pkg/t:u"
   expect_log "//$pkg/t:u/v"
+}
+
+function test_glob_with_io_error_nokeep_going() {
+  run_test_glob_with_io_error "--nokeep_going"
+}
+
+function test_glob_with_io_error_keep_going() {
+  run_test_glob_with_io_error "--keep_going"
 }
 
 function test_build_file_symlinks() {

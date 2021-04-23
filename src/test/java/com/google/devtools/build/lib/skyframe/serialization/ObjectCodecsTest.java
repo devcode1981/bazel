@@ -15,22 +15,20 @@
 package com.google.devtools.build.lib.skyframe.serialization;
 
 import static com.google.common.truth.Truth.assertThat;
-import static com.google.devtools.build.lib.testutil.MoreAsserts.assertThrows;
-import static org.junit.Assert.fail;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.eq;
+import static org.junit.Assert.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.spy;
 
+import com.google.common.collect.ImmutableClassToInstanceMap;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.CodedInputStream;
 import com.google.protobuf.CodedOutputStream;
 import java.io.IOException;
-import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.Before;
 import org.junit.Test;
@@ -51,7 +49,7 @@ public class ObjectCodecsTest {
     // We have to override the default explicitly here because Mockito can't delegate to default
     // methods on interfaces.
     @Override
-    public List<Class<? extends Integer>> additionalEncodedClasses() {
+    public ImmutableList<Class<? extends Integer>> additionalEncodedClasses() {
       return ImmutableList.of();
     }
 
@@ -68,6 +66,7 @@ public class ObjectCodecsTest {
     }
 
     /** Disables auto-registration. */
+    @SuppressWarnings("unused") // Used reflectively.
     private static class IntegerCodecRegisterer implements CodecRegisterer<IntegerCodec> {}
   }
 
@@ -80,7 +79,8 @@ public class ObjectCodecsTest {
     spyObjectCodec = spy(new IntegerCodec());
     this.underTest =
         new ObjectCodecs(
-            ObjectCodecRegistry.newBuilder().add(spyObjectCodec).build(), ImmutableMap.of());
+            ObjectCodecRegistry.newBuilder().add(spyObjectCodec).build(),
+            ImmutableClassToInstanceMap.of());
   }
 
   @Test
@@ -123,12 +123,10 @@ public class ObjectCodecsTest {
             })
         .when(spyObjectCodec)
         .serialize(any(SerializationContext.class), eq(1), any(CodedOutputStream.class));
-    try {
-      underTest.deserialize(underTest.serialize(1));
-      fail("Expected exception");
-    } catch (SerializationException e) {
-      assertThat(e).hasMessageThat().isEqualTo("input stream not exhausted after deserializing 1");
-    }
+    SerializationException e =
+        assertThrows(
+            SerializationException.class, () -> underTest.deserialize(underTest.serialize(1)));
+    assertThat(e).hasMessageThat().isEqualTo("input stream not exhausted after deserializing 1");
   }
 
   @Test
@@ -139,12 +137,9 @@ public class ObjectCodecsTest {
     doThrow(staged)
         .when(spyObjectCodec)
         .serialize(any(SerializationContext.class), eq(original), any(CodedOutputStream.class));
-    try {
-      underTest.serialize(original);
-      fail("Expected exception");
-    } catch (SerializationException e) {
-      assertThat(e).isSameAs(staged);
-    }
+    SerializationException e =
+        assertThrows(SerializationException.class, () -> underTest.serialize(original));
+    assertThat(e).isSameInstanceAs(staged);
   }
 
   @Test
@@ -156,12 +151,9 @@ public class ObjectCodecsTest {
     doThrow(staged)
         .when(spyObjectCodec)
         .serialize(any(SerializationContext.class), eq(original), any(CodedOutputStream.class));
-    try {
-      underTest.serialize(original);
-      fail("Expected exception");
-    } catch (SerializationException e) {
-      assertThat(e).hasCauseThat().isSameAs(staged);
-    }
+    SerializationException e =
+        assertThrows(SerializationException.class, () -> underTest.serialize(original));
+    assertThat(e).hasCauseThat().isSameInstanceAs(staged);
   }
 
   @Test
@@ -173,7 +165,7 @@ public class ObjectCodecsTest {
     SerializationException thrown =
         assertThrows(
             SerializationException.class, () -> underTest.deserialize(underTest.serialize(1)));
-    assertThat(thrown).isSameAs(staged);
+    assertThat(thrown).isSameInstanceAs(staged);
   }
 
   @Test
@@ -183,12 +175,10 @@ public class ObjectCodecsTest {
     doThrow(staged)
         .when(spyObjectCodec)
         .deserialize(any(DeserializationContext.class), any(CodedInputStream.class));
-    try {
-      underTest.deserialize(underTest.serialize(1));
-      fail("Expected exception");
-    } catch (SerializationException e) {
-      assertThat(e).hasCauseThat().isSameAs(staged);
-    }
+    SerializationException e =
+        assertThrows(
+            SerializationException.class, () -> underTest.deserialize(underTest.serialize(1)));
+    assertThat(e).hasCauseThat().isSameInstanceAs(staged);
   }
 
   @Test
@@ -203,7 +193,7 @@ public class ObjectCodecsTest {
     ObjectCodecs underTest =
         new ObjectCodecs(
             ObjectCodecRegistry.newBuilder().setAllowDefaultCodec(false).build(),
-            ImmutableMap.of());
+            ImmutableClassToInstanceMap.of());
     SerializationException.NoCodecException expected =
         assertThrows(SerializationException.NoCodecException.class, () -> underTest.serialize("Y"));
     assertThat(expected)
@@ -217,15 +207,29 @@ public class ObjectCodecsTest {
     ObjectCodecs underTest =
         new ObjectCodecs(
             ObjectCodecRegistry.newBuilder().setAllowDefaultCodec(false).build(),
-            ImmutableMap.of());
+            ImmutableClassToInstanceMap.of());
     assertThrows(
         SerializationException.NoCodecException.class, () -> underTest.deserialize(serialized));
   }
 
   @Test
   public void testSerializeDeserialize() throws Exception {
-    ObjectCodecs underTest = new ObjectCodecs(AutoRegistry.get(), ImmutableMap.of());
+    ObjectCodecs underTest = new ObjectCodecs(AutoRegistry.get(), ImmutableClassToInstanceMap.of());
     assertThat((String) underTest.deserialize(underTest.serialize("hello"))).isEqualTo("hello");
     assertThat(underTest.deserialize(underTest.serialize(null))).isNull();
+  }
+
+  private static class MyException extends Exception {}
+
+  @Test
+  public void exception() throws SerializationException {
+    MyException exception = new MyException();
+    // Force initialization of stack trace.
+    StackTraceElement[] stackTrace = exception.getStackTrace();
+    ObjectCodecs underTest = new ObjectCodecs(AutoRegistry.get(), ImmutableClassToInstanceMap.of());
+    assertThat(
+            ((MyException) underTest.deserializeMemoized(underTest.serializeMemoized(exception)))
+                .getStackTrace())
+        .isEqualTo(stackTrace);
   }
 }

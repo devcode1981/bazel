@@ -22,22 +22,19 @@ import com.google.devtools.build.lib.analysis.OutputGroupInfo;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.analysis.RuleContext;
-import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.packages.AttributeMap;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.TriState;
-import com.google.devtools.build.lib.rules.android.AndroidConfiguration.AndroidAaptVersion;
+import com.google.devtools.build.lib.packages.Type;
 import com.google.devtools.build.lib.rules.android.AndroidLibraryAarInfo.Aar;
 import com.google.devtools.build.lib.rules.android.databinding.DataBinding;
 import com.google.devtools.build.lib.rules.java.JavaCommon;
 import com.google.devtools.build.lib.rules.java.JavaSemantics;
-import com.google.devtools.build.lib.rules.java.JavaSourceInfoProvider;
 import com.google.devtools.build.lib.rules.java.JavaTargetAttributes;
 import com.google.devtools.build.lib.rules.java.ProguardLibrary;
 import com.google.devtools.build.lib.rules.java.ProguardSpecProvider;
-import com.google.devtools.build.lib.syntax.Type;
 
 /** An implementation for the "android_library" rule. */
 public abstract class AndroidLibrary implements RuleConfiguredTargetFactory {
@@ -46,12 +43,9 @@ public abstract class AndroidLibrary implements RuleConfiguredTargetFactory {
 
   protected abstract AndroidSemantics createAndroidSemantics();
 
-  protected abstract AndroidMigrationSemantics createAndroidMigrationSemantics();
-
   /** Checks expected rule invariants, throws rule errors if anything is set wrong. */
   private static void validateRuleContext(RuleContext ruleContext)
       throws InterruptedException, RuleErrorException {
-
     /**
      * TODO(b/14473160): Remove when deps are no longer implicitly exported.
      *
@@ -115,15 +109,13 @@ public abstract class AndroidLibrary implements RuleConfiguredTargetFactory {
   @Override
   public ConfiguredTarget create(RuleContext ruleContext)
       throws InterruptedException, RuleErrorException, ActionConflictException {
-    validateRuleContext(ruleContext);
-
     // Create semantics objects, which are different between Blaze and Bazel.
     JavaSemantics javaSemantics = createJavaSemantics();
     AndroidSemantics androidSemantics = createAndroidSemantics();
+    androidSemantics.checkForMigrationTag(ruleContext);
     androidSemantics.validateAndroidLibraryRuleContext(ruleContext);
-    createAndroidMigrationSemantics().validateRuleContext(ruleContext);
-
     AndroidSdkProvider.verifyPresence(ruleContext);
+    validateRuleContext(ruleContext);
 
     // Create wrappers for the ProGuard configuration files.
     NestedSetBuilder<Artifact> proguardConfigsbuilder = NestedSetBuilder.stableOrder();
@@ -170,10 +162,7 @@ public abstract class AndroidLibrary implements RuleConfiguredTargetFactory {
                   DataBinding.contextFrom(ruleContext, dataContext.getAndroidConfig()),
                   isNeverLink);
 
-      MergedAndroidAssets assets =
-          AndroidAssets.from(ruleContext)
-              .process(
-                  dataContext, assetDeps, AndroidAaptVersion.chooseTargetAaptVersion(ruleContext));
+      MergedAndroidAssets assets = AndroidAssets.from(ruleContext).process(dataContext, assetDeps);
 
       resourceApk = ResourceApk.of(resources, assets, null, null);
 
@@ -196,7 +185,11 @@ public abstract class AndroidLibrary implements RuleConfiguredTargetFactory {
     // rules respectively.
     JavaCommon javaCommon =
         AndroidCommon.createJavaCommonWithAndroidDataBinding(
-            ruleContext, javaSemantics, resourceApk.asDataBindingContext(), /* isLibrary */ true);
+            ruleContext,
+            javaSemantics,
+            resourceApk.asDataBindingContext(),
+            /* isLibrary */ true,
+            /* shouldCompileJavaSrcs */ true);
     javaSemantics.checkRule(ruleContext, javaCommon);
     AndroidCommon androidCommon = new AndroidCommon(javaCommon);
 
@@ -250,9 +243,6 @@ public abstract class AndroidLibrary implements RuleConfiguredTargetFactory {
             new AndroidNativeLibsInfo(
                 AndroidCommon.collectTransitiveNativeLibs(ruleContext).build()))
         .addNativeDeclaredProvider(new AndroidCcLinkParamsProvider(androidCommon.getCcInfo()))
-        .add(
-            JavaSourceInfoProvider.class,
-            JavaSourceInfoProvider.fromJavaTargetAttributes(javaTargetAttributes, javaSemantics))
         .addNativeDeclaredProvider(new ProguardSpecProvider(transitiveProguardConfigs))
         .addNativeDeclaredProvider(
             new AndroidProguardInfo(proguardLibrary.collectLocalProguardSpecs()))
@@ -265,7 +255,6 @@ public abstract class AndroidLibrary implements RuleConfiguredTargetFactory {
       builder.addNativeDeclaredProvider(aar.toProvider(ruleContext, definesLocalResources));
     }
 
-
     return builder.build();
   }
 
@@ -273,7 +262,7 @@ public abstract class AndroidLibrary implements RuleConfiguredTargetFactory {
     NestedSetBuilder<Artifact> builder = NestedSetBuilder.naiveLinkOrder();
     Iterable<AndroidLibraryResourceClassJarProvider> providers =
         AndroidCommon.getTransitivePrerequisites(
-            ruleContext, Mode.TARGET, AndroidLibraryResourceClassJarProvider.PROVIDER);
+            ruleContext, AndroidLibraryResourceClassJarProvider.PROVIDER);
     for (AndroidLibraryResourceClassJarProvider resourceJarProvider : providers) {
       builder.addTransitive(resourceJarProvider.getResourceClassJars());
     }

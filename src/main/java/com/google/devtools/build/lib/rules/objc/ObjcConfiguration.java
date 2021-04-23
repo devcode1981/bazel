@@ -17,20 +17,22 @@ package com.google.devtools.build.lib.rules.objc;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.analysis.config.BuildOptions;
 import com.google.devtools.build.lib.analysis.config.CompilationMode;
-import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.analysis.config.CoreOptions;
+import com.google.devtools.build.lib.analysis.config.Fragment;
+import com.google.devtools.build.lib.analysis.config.RequiresOptions;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.rules.apple.ApplePlatform.PlatformType;
 import com.google.devtools.build.lib.rules.apple.DottedVersion;
-import com.google.devtools.build.lib.rules.cpp.HeaderDiscovery;
-import com.google.devtools.build.lib.skylarkbuildapi.apple.ObjcConfigurationApi;
+import com.google.devtools.build.lib.rules.cpp.CppOptions;
+import com.google.devtools.build.lib.starlarkbuildapi.apple.ObjcConfigurationApi;
 import javax.annotation.Nullable;
 
 /** A compiler configuration containing flags required for Objective-C compilation. */
 @Immutable
-public class ObjcConfiguration extends BuildConfiguration.Fragment
-    implements ObjcConfigurationApi<PlatformType> {
+@RequiresOptions(options = {CppOptions.class, ObjcCommandLineOptions.class})
+public class ObjcConfiguration extends Fragment implements ObjcConfigurationApi<PlatformType> {
   @VisibleForTesting
   static final ImmutableList<String> DBG_COPTS =
       ImmutableList.of("-O0", "-DDEBUG=1", "-fstack-protector", "-fstack-protector-all", "-g");
@@ -58,59 +60,40 @@ public class ObjcConfiguration extends BuildConfiguration.Fragment
   private final CompilationMode compilationMode;
   private final ImmutableList<String> fastbuildOptions;
   private final boolean enableBinaryStripping;
-  private final boolean moduleMapsEnabled;
   @Nullable private final String signingCertName;
   private final boolean debugWithGlibcxx;
-  @Nullable private final Label extraEntitlements;
   private final boolean deviceDebugEntitlements;
   private final boolean enableAppleBinaryNativeProtos;
-  private final HeaderDiscovery.DotdPruningMode dotdPruningPlan;
-  private final boolean experimentalHeaderThinning;
-  private final int objcHeaderThinningPartitionSize;
-  private final Label objcHeaderScannerTool;
-  private final Label appleSdk;
-  private final boolean strictObjcModuleMaps;
+  private final boolean avoidHardcodedCompilationFlags;
+  private final boolean disableNativeAppleBinaryRule;
 
-  ObjcConfiguration(ObjcCommandLineOptions objcOptions, BuildConfiguration.Options options) {
-    this.iosSimulatorDevice =
-        Preconditions.checkNotNull(objcOptions.iosSimulatorDevice, "iosSimulatorDevice");
-    this.iosSimulatorVersion =
-        Preconditions.checkNotNull(DottedVersion.maybeUnwrap(objcOptions.iosSimulatorVersion),
-            "iosSimulatorVersion");
-    this.watchosSimulatorDevice =
-        Preconditions.checkNotNull(objcOptions.watchosSimulatorDevice, "watchosSimulatorDevice");
-    this.watchosSimulatorVersion =
-        Preconditions.checkNotNull(DottedVersion.maybeUnwrap(objcOptions.watchosSimulatorVersion),
-            "watchosSimulatorVersion");
-    this.tvosSimulatorDevice =
-        Preconditions.checkNotNull(objcOptions.tvosSimulatorDevice, "tvosSimulatorDevice");
-    this.tvosSimulatorVersion =
-        Preconditions.checkNotNull(DottedVersion.maybeUnwrap(objcOptions.tvosSimulatorVersion),
-            "tvosSimulatorVersion");
+  public ObjcConfiguration(BuildOptions buildOptions) {
+    CoreOptions options = buildOptions.get(CoreOptions.class);
+    CppOptions cppOptions = buildOptions.get(CppOptions.class);
+    ObjcCommandLineOptions objcOptions = buildOptions.get(ObjcCommandLineOptions.class);
+
+    this.iosSimulatorDevice = objcOptions.iosSimulatorDevice;
+    this.iosSimulatorVersion = DottedVersion.maybeUnwrap(objcOptions.iosSimulatorVersion);
+    this.watchosSimulatorDevice = objcOptions.watchosSimulatorDevice;
+    this.watchosSimulatorVersion = DottedVersion.maybeUnwrap(objcOptions.watchosSimulatorVersion);
+    this.tvosSimulatorDevice = objcOptions.tvosSimulatorDevice;
+    this.tvosSimulatorVersion = DottedVersion.maybeUnwrap(objcOptions.tvosSimulatorVersion);
     this.generateLinkmap = objcOptions.generateLinkmap;
     this.runMemleaks = objcOptions.runMemleaks;
     this.copts = ImmutableList.copyOf(objcOptions.copts);
     this.compilationMode = Preconditions.checkNotNull(options.compilationMode, "compilationMode");
     this.generateDsym =
-        objcOptions.appleGenerateDsym
-            || (objcOptions.appleEnableAutoDsymDbg && this.compilationMode == CompilationMode.DBG);
+        cppOptions.appleGenerateDsym
+            || (cppOptions.appleEnableAutoDsymDbg && this.compilationMode == CompilationMode.DBG);
     this.fastbuildOptions = ImmutableList.copyOf(objcOptions.fastbuildOptions);
     this.enableBinaryStripping = objcOptions.enableBinaryStripping;
-    this.moduleMapsEnabled = objcOptions.enableModuleMaps;
     this.signingCertName = objcOptions.iosSigningCertName;
     this.debugWithGlibcxx = objcOptions.debugWithGlibcxx;
-    this.extraEntitlements = objcOptions.extraEntitlements;
     this.deviceDebugEntitlements = objcOptions.deviceDebugEntitlements;
     this.enableAppleBinaryNativeProtos = objcOptions.enableAppleBinaryNativeProtos;
-    this.dotdPruningPlan =
-        objcOptions.useDotdPruning
-            ? HeaderDiscovery.DotdPruningMode.USE
-            : HeaderDiscovery.DotdPruningMode.DO_NOT_USE;
-    this.experimentalHeaderThinning = objcOptions.experimentalObjcHeaderThinning;
-    this.objcHeaderThinningPartitionSize = objcOptions.objcHeaderThinningPartitionSize;
-    this.objcHeaderScannerTool = objcOptions.objcHeaderScannerTool;
-    this.appleSdk = objcOptions.appleSdk;
-    this.strictObjcModuleMaps = objcOptions.strictObjcModuleMaps;
+    this.avoidHardcodedCompilationFlags =
+        objcOptions.incompatibleAvoidHardcodedObjcCompilationFlags;
+    this.disableNativeAppleBinaryRule = objcOptions.incompatibleDisableNativeAppleBinaryRule;
   }
 
   /**
@@ -193,18 +176,18 @@ public class ObjcConfiguration extends BuildConfiguration.Fragment
   public ImmutableList<String> getCoptsForCompilationMode() {
     switch (compilationMode) {
       case DBG:
-        if (this.debugWithGlibcxx) {
-          return ImmutableList.<String>builder()
-              .addAll(DBG_COPTS)
-              .addAll(GLIBCXX_DBG_COPTS)
-              .build();
-        } else {
-          return DBG_COPTS;
+        ImmutableList.Builder<String> opts = ImmutableList.builder();
+        if (!this.avoidHardcodedCompilationFlags) {
+          opts.addAll(DBG_COPTS);
         }
+        if (this.debugWithGlibcxx) {
+          opts.addAll(GLIBCXX_DBG_COPTS);
+        }
+        return opts.build();
       case FASTBUILD:
         return fastbuildOptions;
       case OPT:
-        return OPT_COPTS;
+        return this.avoidHardcodedCompilationFlags ? ImmutableList.of() : OPT_COPTS;
       default:
         throw new AssertionError();
     }
@@ -220,16 +203,10 @@ public class ObjcConfiguration extends BuildConfiguration.Fragment
   }
 
   /**
-   * Whether module map generation and interpretation is enabled.
-   */
-  public boolean moduleMapsEnabled() {
-    return moduleMapsEnabled;
-  }
-
-  /**
    * Returns whether to perform symbol and dead-code strippings on linked binaries. The strippings
    * are performed iff --compilation_mode=opt and --objc_enable_binary_stripping are specified.
    */
+  @Override
   public boolean shouldStripBinary() {
     return this.enableBinaryStripping && getCompilationMode() == CompilationMode.OPT;
   }
@@ -241,14 +218,6 @@ public class ObjcConfiguration extends BuildConfiguration.Fragment
   @Override
   public String getSigningCertName() {
     return this.signingCertName;
-  }
-
-  /**
-   * Returns the extra entitlements plist specified as a flag or {@code null} if none was given.
-   */
-  @Nullable
-  public Label getExtraEntitlements() {
-    return extraEntitlements;
   }
 
   /**
@@ -268,33 +237,8 @@ public class ObjcConfiguration extends BuildConfiguration.Fragment
     return enableAppleBinaryNativeProtos;
   }
 
-  /** Returns the DotdPruningPlan for compiles in this build. */
-  public HeaderDiscovery.DotdPruningMode getDotdPruningPlan() {
-    return dotdPruningPlan;
-  }
-
-  /** Returns true if header thinning of ObjcCompile actions is enabled to reduce action inputs. */
-  public boolean useExperimentalHeaderThinning() {
-    return experimentalHeaderThinning;
-  }
-
-  /** Returns the max number of source files to add to each header scanning action. */
-  public int objcHeaderThinningPartitionSize() {
-    return objcHeaderThinningPartitionSize;
-  }
-
-  /** Returns the label for the ObjC header scanner tool. */
-  public Label getObjcHeaderScannerTool() {
-    return objcHeaderScannerTool;
-  }
-
-  /** Returns the label for the Apple SDK for current build configuration. */
-  public Label getAppleSdk() {
-    return appleSdk;
-  }
-
-  /** Returns true if Objective-C module maps should only be propagated to direct dependencies. */
-  public boolean useStrictObjcModuleMaps() {
-    return strictObjcModuleMaps;
+  /** Returns true iff the native {@code apple_binary} rule should be disabled. */
+  public boolean disableNativeAppleBinaryRule() {
+    return disableNativeAppleBinaryRule;
   }
 }

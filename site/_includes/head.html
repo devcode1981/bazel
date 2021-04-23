@@ -2,12 +2,14 @@
     <meta charset="utf-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{{ page.title }} - Bazel</title>
+
+    <!-- Only show Bazel version in title if it's a release -->
+    <title>{{ page.title }} - Bazel {{ current_version | replace:'master','' }}</title>
 
     <link rel="canonical" href="{{ page.url | replace:'index.html','' | prepend: site_root }}">
 
     <!-- Webfont -->
-    <link href="//fonts.googleapis.com/css?family=RobotoDraft:300,400,500,700|Source+Code+Pro:400,500,700" rel="stylesheet">
+    <link href="//fonts.googleapis.com/css?family=Source+Code+Pro:400,500,700|Open+Sans:400,600,700,800" rel="stylesheet">
 
     <link rel="shortcut icon" type="image/png" href="/images/favicon.ico">
 

@@ -31,7 +31,7 @@ bool Concatenator::Merge(const CDH *cdh, const LH *lh) {
   if (Z_NO_COMPRESSION == lh->compression_method()) {
     buffer_->ReadEntryContents(lh);
   } else if (Z_DEFLATED == lh->compression_method()) {
-    if (!inflater_.get()) {
+    if (!inflater_) {
       inflater_.reset(new Inflater());
     }
     buffer_->DecompressEntryContents(cdh, lh, inflater_.get());
@@ -42,7 +42,7 @@ bool Concatenator::Merge(const CDH *cdh, const LH *lh) {
 }
 
 void *Concatenator::OutputEntry(bool compress) {
-  if (!buffer_.get()) {
+  if (!buffer_) {
     return nullptr;
   }
 
@@ -125,7 +125,7 @@ void *NullCombiner::OutputEntry(bool /*compress*/) { return nullptr; }
 XmlCombiner::~XmlCombiner() {}
 
 bool XmlCombiner::Merge(const CDH *cdh, const LH *lh) {
-  if (!concatenator_.get()) {
+  if (!concatenator_) {
     concatenator_.reset(new Concatenator(filename_, false));
     concatenator_->Append(start_tag_);
     concatenator_->Append("\n");
@@ -136,7 +136,7 @@ bool XmlCombiner::Merge(const CDH *cdh, const LH *lh) {
   if (Z_NO_COMPRESSION == lh->compression_method()) {
     bytes_.ReadEntryContents(lh);
   } else if (Z_DEFLATED == lh->compression_method()) {
-    if (!inflater_.get()) {
+    if (!inflater_) {
       inflater_.reset(new Inflater());
     }
     bytes_.DecompressEntryContents(cdh, lh, inflater_.get());
@@ -166,7 +166,7 @@ bool XmlCombiner::Merge(const CDH *cdh, const LH *lh) {
 }
 
 void *XmlCombiner::OutputEntry(bool compress) {
-  if (!concatenator_.get()) {
+  if (!concatenator_) {
     return nullptr;
   }
   concatenator_->Append(end_tag_);
@@ -178,4 +178,51 @@ PropertyCombiner::~PropertyCombiner() {}
 
 bool PropertyCombiner::Merge(const CDH * /*cdh*/, const LH * /*lh*/) {
   return false;  // This should not be called.
+}
+
+ManifestCombiner::~ManifestCombiner() {}
+
+static const char *MULTI_RELEASE = "Multi-Release: true";
+static const size_t MULTI_RELEASE_LENGTH = strlen(MULTI_RELEASE);
+
+bool ManifestCombiner::Merge(const CDH *cdh, const LH *lh) {
+  TransientBytes bytes_;
+  if (Z_NO_COMPRESSION == lh->compression_method()) {
+    bytes_.ReadEntryContents(lh);
+  } else if (Z_DEFLATED == lh->compression_method()) {
+    if (!inflater_) {
+      inflater_.reset(new Inflater());
+    }
+    bytes_.DecompressEntryContents(cdh, lh, inflater_.get());
+  } else {
+    diag_errx(2, "%s is neither stored nor deflated", filename().c_str());
+  }
+  uint32_t checksum;
+  char *buf = reinterpret_cast<char *>(malloc(bytes_.data_size()));
+  bytes_.CopyOut(reinterpret_cast<uint8_t *>(buf), &checksum);
+
+  const char *line_start = buf;
+  const char *data_end = buf + bytes_.data_size();
+
+  while (line_start < data_end && line_start[0] != '\r' &&
+         line_start[0] != '\n') {
+    const char *line_end = strchr(line_start, '\n');
+    // Go past return char to point to next line, or to end of data buffer
+
+    line_end = line_end != nullptr ? line_end + 1 : data_end;
+    if (strncmp(line_start, MULTI_RELEASE, MULTI_RELEASE_LENGTH) == 0) {
+      multi_release_ = true;
+    }
+    line_start = line_end;
+  }
+  free(buf);
+  return true;
+}
+
+void *ManifestCombiner::OutputEntry(bool compress) {
+  if (multi_release_) {
+    Append(MULTI_RELEASE);
+  }
+  Append("\r\n");
+  return Concatenator::OutputEntry(compress);
 }

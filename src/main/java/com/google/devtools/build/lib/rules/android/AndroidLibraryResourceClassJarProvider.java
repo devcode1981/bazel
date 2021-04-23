@@ -15,13 +15,14 @@
 package com.google.devtools.build.lib.rules.android;
 
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
+import com.google.devtools.build.lib.collect.nestedset.Depset;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.packages.BuiltinProvider;
 import com.google.devtools.build.lib.packages.NativeInfo;
-import com.google.devtools.build.lib.skylarkbuildapi.android.AndroidLibraryResourceClassJarProviderApi;
-import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
-import javax.annotation.Nonnull;
+import com.google.devtools.build.lib.starlarkbuildapi.android.AndroidLibraryResourceClassJarProviderApi;
+import net.starlark.java.eval.EvalException;
 
 /**
  * A provider which contains the resource class jars from android_library rules. See {@link
@@ -30,14 +31,23 @@ import javax.annotation.Nonnull;
 public final class AndroidLibraryResourceClassJarProvider extends NativeInfo
     implements AndroidLibraryResourceClassJarProviderApi<Artifact> {
 
-  public static final String PROVIDER_NAME = "AndroidLibraryResourceClassJarProvider";
   public static final Provider PROVIDER = new Provider();
 
   private final NestedSet<Artifact> resourceClassJars;
 
   private AndroidLibraryResourceClassJarProvider(NestedSet<Artifact> resourceClassJars) {
-    super(PROVIDER);
     this.resourceClassJars = resourceClassJars;
+  }
+
+  @Override
+  public Provider getProvider() {
+    return PROVIDER;
+  }
+
+  // TODO(adonovan): rename to avoid unrelated overloading.
+  static AndroidLibraryResourceClassJarProvider getProvider(TransitiveInfoCollection target) {
+    return (AndroidLibraryResourceClassJarProvider)
+        target.get(AndroidLibraryResourceClassJarProvider.PROVIDER.getKey());
   }
 
   public static AndroidLibraryResourceClassJarProvider create(
@@ -45,8 +55,11 @@ public final class AndroidLibraryResourceClassJarProvider extends NativeInfo
     return new AndroidLibraryResourceClassJarProvider(resourceClassJars);
   }
 
-  @Nonnull
   @Override
+  public Depset /*<Artifact>*/ getResourceClassJarsForStarlark() {
+    return Depset.of(Artifact.TYPE, resourceClassJars);
+  }
+
   public NestedSet<Artifact> getResourceClassJars() {
     return resourceClassJars;
   }
@@ -56,18 +69,18 @@ public final class AndroidLibraryResourceClassJarProvider extends NativeInfo
       implements AndroidLibraryResourceClassJarProviderApi.Provider<Artifact> {
 
     private Provider() {
-      super(PROVIDER_NAME, AndroidLibraryResourceClassJarProvider.class);
+      super(NAME, AndroidLibraryResourceClassJarProvider.class);
     }
 
     public String getName() {
-      return PROVIDER_NAME;
+      return NAME;
     }
 
     @Override
-    public AndroidLibraryResourceClassJarProvider create(SkylarkNestedSet jars) {
+    public AndroidLibraryResourceClassJarProvider create(Depset jars) throws EvalException {
       return new AndroidLibraryResourceClassJarProvider(
           NestedSetBuilder.<Artifact>stableOrder()
-              .addTransitive(jars.getSet(Artifact.class))
+              .addTransitive(Depset.cast(jars, Artifact.class, "jars"))
               .build());
     }
   }

@@ -17,16 +17,16 @@ import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.devtools.build.lib.actions.util.ActionsTestUtil.NULL_ACTION_OWNER;
 import static com.google.devtools.build.lib.actions.util.ActionsTestUtil.NULL_ARTIFACT_OWNER;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
+import com.google.devtools.build.lib.actions.ArtifactRoot.RootType;
 import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
-import com.google.devtools.build.lib.testutil.MoreAsserts;
 import com.google.devtools.build.lib.testutil.Scratch;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -76,7 +76,7 @@ public class ArtifactFactoryTest {
     clientRoot = Root.fromPath(scratch.dir("/client/workspace"));
     clientRoRoot = Root.fromPath(scratch.dir("/client/RO/workspace"));
     alienRoot = Root.fromPath(scratch.dir("/client/workspace"));
-    outRoot = ArtifactRoot.asDerivedRoot(execRoot, execRoot.getRelative("out-root/x/bin"));
+    outRoot = ArtifactRoot.asDerivedRoot(execRoot, RootType.Output, "out-root", "x", "bin");
 
     fooPath = PathFragment.create("foo");
     fooPackage = PackageIdentifier.createInMainRepo(fooPath);
@@ -90,7 +90,7 @@ public class ArtifactFactoryTest {
     alienPackage = PackageIdentifier.create("@alien", alienPath);
     alienRelative = alienPath.getRelative("alien.txt");
 
-    artifactFactory = new ArtifactFactory(execRoot, "bazel-out");
+    artifactFactory = new ArtifactFactory(execRoot.getParentDirectory(), "bazel-out");
     setupRoots();
   }
 
@@ -100,21 +100,12 @@ public class ArtifactFactoryTest {
     packageRootMap.put(barPackage, clientRoRoot);
     packageRootMap.put(alienPackage, alienRoot);
     artifactFactory.setPackageRoots(packageRootMap::get);
-    Root absoluteRoot = Root.absoluteRoot(clientRoot.asPath().getFileSystem());
-    artifactFactory.setSourceArtifactRoots(
-        ImmutableMap.of(
-            clientRoot,
-            ArtifactRoot.asSourceRoot(clientRoot),
-            clientRoRoot,
-            ArtifactRoot.asSourceRoot(clientRoRoot),
-            absoluteRoot,
-            ArtifactRoot.asSourceRoot(absoluteRoot)));
   }
 
   @Test
   public void testGetSourceArtifactYieldsSameArtifact() throws Exception {
     assertThat(artifactFactory.getSourceArtifact(fooRelative, clientRoot))
-        .isSameAs(artifactFactory.getSourceArtifact(fooRelative, clientRoot));
+        .isSameInstanceAs(artifactFactory.getSourceArtifact(fooRelative, clientRoot));
   }
 
   @Test
@@ -122,22 +113,22 @@ public class ArtifactFactoryTest {
     assertThat(
             artifactFactory.getSourceArtifact(
                 PathFragment.create("foo/./foosource.txt"), clientRoot))
-        .isSameAs(artifactFactory.getSourceArtifact(fooRelative, clientRoot));
+        .isSameInstanceAs(artifactFactory.getSourceArtifact(fooRelative, clientRoot));
   }
 
   @Test
   public void testResolveArtifact_noDerived_simpleSource() throws Exception {
     assertThat(artifactFactory.resolveSourceArtifact(fooRelative, MAIN))
-        .isSameAs(artifactFactory.getSourceArtifact(fooRelative, clientRoot));
+        .isSameInstanceAs(artifactFactory.getSourceArtifact(fooRelative, clientRoot));
     assertThat(artifactFactory.resolveSourceArtifact(barRelative, MAIN))
-        .isSameAs(artifactFactory.getSourceArtifact(barRelative, clientRoRoot));
+        .isSameInstanceAs(artifactFactory.getSourceArtifact(barRelative, clientRoRoot));
   }
 
   @Test
   public void testResolveArtifact_inExternalRepo() throws Exception {
     Artifact a1 = artifactFactory.getSourceArtifact(alienRelative, alienRoot);
     Artifact a2 = artifactFactory.resolveSourceArtifact(alienRelative, MAIN);
-    assertThat(a1).isSameAs(a2);
+    assertThat(a1).isSameInstanceAs(a2);
   }
 
   @Test
@@ -155,9 +146,10 @@ public class ArtifactFactoryTest {
   @Test
   public void testResolveArtifact_noDerived_simpleSource_other() throws Exception {
     Artifact actual = artifactFactory.resolveSourceArtifact(fooRelative, MAIN);
-    assertThat(actual).isSameAs(artifactFactory.getSourceArtifact(fooRelative, clientRoot));
+    assertThat(actual).isSameInstanceAs(artifactFactory.getSourceArtifact(fooRelative, clientRoot));
     actual = artifactFactory.resolveSourceArtifact(barRelative, MAIN);
-    assertThat(actual).isSameAs(artifactFactory.getSourceArtifact(barRelative, clientRoRoot));
+    assertThat(actual)
+        .isSameInstanceAs(artifactFactory.getSourceArtifact(barRelative, clientRoRoot));
   }
 
   @Test
@@ -189,7 +181,8 @@ public class ArtifactFactoryTest {
     Artifact fooArtifact = artifactFactory.getSourceArtifact(fooRelative, clientRoot);
     artifactFactory.clear();
     setupRoots();
-    assertThat(artifactFactory.getSourceArtifact(fooRelative, clientRoot)).isNotSameAs(fooArtifact);
+    assertThat(artifactFactory.getSourceArtifact(fooRelative, clientRoot))
+        .isNotSameInstanceAs(fooArtifact);
   }
 
   @Test
@@ -211,31 +204,32 @@ public class ArtifactFactoryTest {
                 .getSourceArtifact(PathFragment.create("/foo"), absoluteRoot)
                 .getExecPath())
         .isEqualTo(PathFragment.create("/foo"));
-    MoreAsserts.assertThrows(
+    assertThrows(
         IllegalArgumentException.class,
         () -> artifactFactory.getSourceArtifact(PathFragment.create("/foo"), clientRoot));
-    MoreAsserts.assertThrows(
+    assertThrows(
         IllegalArgumentException.class,
         () -> artifactFactory.getSourceArtifact(PathFragment.create("foo"), absoluteRoot));
   }
 
   @Test
   public void testSetGeneratingActionIdempotenceNewActionGraph() throws Exception {
-    Artifact a = artifactFactory.getDerivedArtifact(fooRelative, outRoot, NULL_ARTIFACT_OWNER);
-    Artifact b = artifactFactory.getDerivedArtifact(barRelative, outRoot, NULL_ARTIFACT_OWNER);
+    Artifact.DerivedArtifact a =
+        artifactFactory.getDerivedArtifact(fooRelative, outRoot, NULL_ARTIFACT_OWNER);
+    Artifact.DerivedArtifact b =
+        artifactFactory.getDerivedArtifact(barRelative, outRoot, NULL_ARTIFACT_OWNER);
+    a.setGeneratingActionKey(ActionsTestUtil.NULL_ACTION_LOOKUP_DATA);
+    b.setGeneratingActionKey(ActionsTestUtil.NULL_ACTION_LOOKUP_DATA);
     MutableActionGraph actionGraph = new MapBasedActionGraph(actionKeyContext);
     Action originalAction = new ActionsTestUtil.NullAction(NULL_ACTION_OWNER, a);
     actionGraph.registerAction(originalAction);
 
     // Creating a second Action referring to the Artifact should create a conflict.
-    try {
-      Action action = new ActionsTestUtil.NullAction(NULL_ACTION_OWNER, a, b);
-      actionGraph.registerAction(action);
-      fail();
-    } catch (ActionConflictException e) {
-      assertThat(e.getArtifact()).isSameAs(a);
-      assertThat(actionGraph.getGeneratingAction(a)).isSameAs(originalAction);
-    }
+    Action action = new ActionsTestUtil.NullAction(NULL_ACTION_OWNER, a, b);
+    ActionConflictException e =
+        assertThrows(ActionConflictException.class, () -> actionGraph.registerAction(action));
+    assertThat(e.getArtifact()).isSameInstanceAs(a);
+    assertThat(actionGraph.getGeneratingAction(a)).isSameInstanceAs(originalAction);
   }
 
   private static class MockPackageRootResolver implements PackageRootResolver {

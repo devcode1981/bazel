@@ -14,15 +14,15 @@
 
 package com.google.devtools.build.lib.rules.objc;
 
-import com.google.devtools.build.lib.actions.ActionInputHelper;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Artifact.ArtifactExpander;
 import com.google.devtools.build.lib.actions.Artifact.SpecialArtifact;
+import com.google.devtools.build.lib.actions.Artifact.TreeFileArtifact;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
-import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.packages.util.MockJ2ObjcSupport;
 import com.google.devtools.build.lib.packages.util.MockObjcSupport;
 import com.google.devtools.build.lib.packages.util.MockProtoSupport;
+import com.google.devtools.build.lib.testutil.TestConstants;
 import java.util.Collection;
 import org.junit.Before;
 
@@ -34,8 +34,9 @@ public class J2ObjcLibraryTest extends ObjcRuleTestCase {
       new ArtifactExpander() {
         @Override
         public void expand(Artifact artifact, Collection<? super Artifact> output) {
-          output.add(ActionInputHelper.treeFileArtifact((SpecialArtifact) artifact, "children1"));
-          output.add(ActionInputHelper.treeFileArtifact((SpecialArtifact) artifact, "children2"));
+          SpecialArtifact parent = (SpecialArtifact) artifact;
+          output.add(TreeFileArtifact.createTreeOutput(parent, "children1"));
+          output.add(TreeFileArtifact.createTreeOutput(parent, "children2"));
         }
       };
 
@@ -52,11 +53,9 @@ public class J2ObjcLibraryTest extends ObjcRuleTestCase {
         "    deps = ['" + label + "'],",
         ")");
 
-    return view.getPrerequisiteConfiguredTargetForTesting(
-        reporter,
-        getConfiguredTarget("//java/com/google/dummy/aspect:transpile"),
-        Label.parseAbsoluteUnchecked(label),
-        masterConfig);
+    ConfiguredTarget configuredTarget =
+        getConfiguredTarget("//java/com/google/dummy/aspect:transpile");
+    return getDirectPrerequisite(configuredTarget, label);
   }
 
   @Before
@@ -79,6 +78,7 @@ public class J2ObjcLibraryTest extends ObjcRuleTestCase {
 
     mockToolsConfig.create(
         "tools/proto/toolchains/BUILD",
+        TestConstants.LOAD_PROTO_LANG_TOOLCHAIN,
         "package(default_visibility=['//visibility:public'])",
         "proto_lang_toolchain(name = 'java', command_line = 'dont_care')",
         "proto_lang_toolchain(name='java_stubby1_immutable', command_line = 'dont_care')",
@@ -86,6 +86,7 @@ public class J2ObjcLibraryTest extends ObjcRuleTestCase {
         "proto_lang_toolchain(name='java_stubby_compatible13_immutable', "
             + "command_line = 'dont_care')");
 
+    MockProtoSupport.setupWorkspace(scratch);
     invalidatePackages();
   }
 }

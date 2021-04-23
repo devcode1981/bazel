@@ -13,10 +13,12 @@
 // limitations under the License.
 package com.google.devtools.build.skyframe;
 
+import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.util.GroupedList;
 import com.google.devtools.build.lib.util.GroupedList.GroupedListHelper;
 import java.util.Collection;
+import java.util.List;
 import java.util.Set;
 import javax.annotation.Nullable;
 
@@ -81,7 +83,7 @@ public interface NodeEntry extends ThinNodeEntry {
     /**
      * A forced rebuilding is in progress, likely because of a transient error on the previous build
      * or a recoverable inconsistency in the current one. The distinction between this and {@link
-     * #REBUILDING} is only needed for internal sanity checks.
+     * #REBUILDING} is only needed for internal checks.
      */
     FORCED_REBUILDING
   }
@@ -104,6 +106,16 @@ public interface NodeEntry extends ThinNodeEntry {
    */
   @ThreadSafe
   Iterable<SkyKey> getDirectDeps() throws InterruptedException;
+
+  /**
+   * Returns {@code true} if this node has at least one direct dep.
+   *
+   * <p>Prefer calling this over {@link #getDirectDeps} if possible.
+   *
+   * <p>This method may only be called after the evaluation of this node is complete.
+   */
+  @ThreadSafe
+  boolean hasAtLeastOneDep() throws InterruptedException;
 
   /** Removes a reverse dependency. */
   @ThreadSafe
@@ -207,8 +219,8 @@ public interface NodeEntry extends ThinNodeEntry {
       throws InterruptedException;
 
   /**
-   * Similar to {@link #addReverseDepAndCheckIfDone}, except that {@param reverseDep} must already
-   * be a reverse dep of this entry. Should be used when reverseDep has been marked dirty and is
+   * Similar to {@link #addReverseDepAndCheckIfDone}, except that {@code reverseDep} must already be
+   * a reverse dep of this entry. Should be used when reverseDep has been marked dirty and is
    * checking its dependencies for changes or is rebuilding. The caller must treat the return value
    * just as they would the return value of {@link #addReverseDepAndCheckIfDone} by scheduling this
    * node for evaluation if needed.
@@ -217,16 +229,6 @@ public interface NodeEntry extends ThinNodeEntry {
   DependencyState checkIfDoneForDirtyReverseDep(SkyKey reverseDep) throws InterruptedException;
 
   Iterable<SkyKey> getAllReverseDepsForNodeBeingDeleted();
-
-  /**
-   * Tell this node that one of its dependencies is now done. Callers must check the return value,
-   * and if true, they must re-schedule this node for evaluation. Equivalent to
-   * {@code #signalDep(Long.MAX_VALUE)}. Since this entry was last evaluated at a version less than
-   * {@link Long#MAX_VALUE}, informing this entry that a child of it has version
-   * {@link Long#MAX_VALUE} will force it to re-evaluate.
-   */
-  @ThreadSafe
-  boolean signalDep();
 
   /**
    * Tell this entry that one of its dependencies is now done. Callers must check the return value,
@@ -254,10 +256,33 @@ public interface NodeEntry extends ThinNodeEntry {
   /**
    * Marks this entry as up-to-date at this version.
    *
-   * @return {@link Set} of reverse dependencies to signal that this node is done.
+   * @return {@link NodeValueAndRdepsToSignal} containing the SkyValue and reverse deps to signal.
    */
   @ThreadSafe
-  Set<SkyKey> markClean() throws InterruptedException;
+  NodeValueAndRdepsToSignal markClean() throws InterruptedException;
+
+  /**
+   * Returned by {@link #markClean} after making a node as clean. This is an aggregate object that
+   * contains the NodeEntry's SkyValue and its reverse dependencies that signal this node is done (a
+   * subset of all of the node's reverse dependencies).
+   */
+  final class NodeValueAndRdepsToSignal {
+    private final SkyValue value;
+    private final Set<SkyKey> rDepsToSignal;
+
+    public NodeValueAndRdepsToSignal(SkyValue value, Set<SkyKey> rDepsToSignal) {
+      this.value = value;
+      this.rDepsToSignal = rDepsToSignal;
+    }
+
+    SkyValue getValue() {
+      return this.value;
+    }
+
+    Set<SkyKey> getRdepsToSignal() {
+      return this.rDepsToSignal;
+    }
+  }
 
   /**
    * Forces this node to be re-evaluated, even if none of its dependencies are known to have
@@ -304,7 +329,7 @@ public interface NodeEntry extends ThinNodeEntry {
    * @see DirtyBuildingState#getNextDirtyDirectDeps()
    */
   @ThreadSafe
-  Collection<SkyKey> getNextDirtyDirectDeps() throws InterruptedException;
+  List<SkyKey> getNextDirtyDirectDeps() throws InterruptedException;
 
   /**
    * Returns all deps of a node that has not yet finished evaluating. In other words, if a node has
@@ -342,7 +367,7 @@ public interface NodeEntry extends ThinNodeEntry {
    * always produce the same result until the entry finishes evaluation. Contrast with {@link
    * #getAllDirectDepsForIncompleteNode}.
    */
-  Set<SkyKey> getAllRemainingDirtyDirectDeps() throws InterruptedException;
+  ImmutableSet<SkyKey> getAllRemainingDirtyDirectDeps() throws InterruptedException;
 
   /**
    * Notifies a node that it is about to be rebuilt. This method can only be called if the node
@@ -394,7 +419,9 @@ public interface NodeEntry extends ThinNodeEntry {
    * checking.
    */
   @ThreadSafe
-  void addTemporaryDirectDepsGroupToDirtyEntry(Collection<SkyKey> group);
+  void addTemporaryDirectDepsGroupToDirtyEntry(List<SkyKey> group);
+
+  void addExternalDep();
 
   /**
    * Returns true if the node is ready to be evaluated, i.e., it has been signaled exactly as many
@@ -406,14 +433,14 @@ public interface NodeEntry extends ThinNodeEntry {
 
   /** Which edges a done NodeEntry stores (dependencies and/or reverse dependencies. */
   enum KeepEdgesPolicy {
-    /** Both deps and rdeps are stored. Incremental builds and sanity checks are possible. */
+    /** Both deps and rdeps are stored. Incremental builds and checking are possible. */
     ALL,
     /**
      * Only deps are stored. Incremental builds may be possible with a "top-down" evaluation
-     * framework. Sanity checking of reverse deps is not possible.
+     * framework. Checking of reverse deps is not possible.
      */
     JUST_DEPS,
-    /** Neither deps nor rdeps are stored. Incremental builds and sanity checking are disabled. */
+    /** Neither deps nor rdeps are stored. Incremental builds and checking are disabled. */
     NONE
   }
 }

@@ -12,8 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <string.h>
 #include <windows.h>
+
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -23,16 +27,13 @@
 #include "src/main/cpp/util/file_platform.h"
 #include "src/main/cpp/util/path_platform.h"
 #include "src/main/cpp/util/strings.h"
+#include "src/main/native/windows/file.h"
 
 using std::ifstream;
 using std::string;
 using std::stringstream;
 using std::unordered_map;
 using std::wstring;
-
-#ifndef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
-#define SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE 0x2
-#endif
 
 #ifndef SYMBOLIC_LINK_FLAG_DIRECTORY
 #define SYMBOLIC_LINK_FLAG_DIRECTORY 0x1
@@ -53,8 +54,8 @@ string GetLastErrorString() {
   size_t size = FormatMessageA(
       FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
           FORMAT_MESSAGE_IGNORE_INSERTS,
-      NULL, last_error, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-      (LPSTR)&message_buffer, 0, NULL);
+      nullptr, last_error, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+      (LPSTR)&message_buffer, 0, nullptr);
 
   stringstream result;
   result << "(error: " << last_error << "): " << message_buffer;
@@ -102,6 +103,43 @@ wstring GetParentDirFromPath(const wstring& path) {
 inline void Trim(wstring& str) {
   str.erase(0, str.find_first_not_of(' '));
   str.erase(str.find_last_not_of(' ') + 1);
+}
+
+bool ReadSymlink(const wstring& abs_path, wstring* target, wstring* error) {
+  switch (bazel::windows::ReadSymlinkOrJunction(abs_path, target, error)) {
+    case bazel::windows::ReadSymlinkOrJunctionResult::kSuccess:
+      return true;
+    case bazel::windows::ReadSymlinkOrJunctionResult::kAccessDenied:
+      *error = L"access is denied";
+      break;
+    case bazel::windows::ReadSymlinkOrJunctionResult::kDoesNotExist:
+      *error = L"path does not exist";
+      break;
+    case bazel::windows::ReadSymlinkOrJunctionResult::kNotALink:
+      *error = L"path is not a link";
+      break;
+    case bazel::windows::ReadSymlinkOrJunctionResult::kUnknownLinkType:
+      *error = L"unknown link type";
+      break;
+    default:
+      // This is bazel::windows::ReadSymlinkOrJunctionResult::kError (1).
+      // The JNI code puts a custom message in 'error'.
+      break;
+  }
+  return false;
+}
+
+bool IsDeveloperModeEnabled() {
+  DWORD val = 0;
+  DWORD valSize = sizeof(val);
+  if (RegGetValueW(
+          HKEY_LOCAL_MACHINE,
+          L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\AppModelUnlock",
+          L"AllowDevelopmentWithoutDevLicense", RRF_RT_DWORD, nullptr, &val,
+          &valSize) != ERROR_SUCCESS) {
+    return false;
+  }
+  return val != 0;
 }
 
 }  // namespace
@@ -210,36 +248,44 @@ class RunfilesCreator {
   }
 
   bool DoesCreatingSymlinkNeedAdminPrivilege(const wstring& runfiles_base_dir) {
+    // Creating symlinks without admin privilege is enabled by Developer Mode,
+    // available since Windows Version 1703.
+    if (IsDeveloperModeEnabled()) {
+      return false;
+    }
     wstring dummy_link = runfiles_base_dir + L"\\dummy_link";
     wstring dummy_target = runfiles_base_dir + L"\\dummy_target";
 
-    // Try creating symlink without admin privilege.
-    if (CreateSymbolicLinkW(dummy_link.c_str(), dummy_target.c_str(),
-                            SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
-      DeleteFileOrDie(dummy_link);
-      return false;
-    }
-
     // Try creating symlink with admin privilege
-    if (CreateSymbolicLinkW(dummy_link.c_str(), dummy_target.c_str(), 0)) {
+    bool created =
+        CreateSymbolicLinkW(dummy_link.c_str(), dummy_target.c_str(), 0);
+
+    // on a rare occasion the dummy_link may exist from a previous run
+    // retry after deleting the existing link
+    if (!created && GetLastError() == ERROR_ALREADY_EXISTS) {
       DeleteFileOrDie(dummy_link);
-      return true;
+      created =
+          CreateSymbolicLinkW(dummy_link.c_str(), dummy_target.c_str(), 0);
     }
 
     // If we couldn't create symlink, print out an error message and exit.
-    if (GetLastError() == ERROR_PRIVILEGE_NOT_HELD) {
-      die(L"CreateSymbolicLinkW failed:\n%hs\n",
-          "Bazel needs to create symlink for building runfiles tree.\n"
-          "Creating symlink on Windows requires either of the following:\n"
-          "    1. Program is running with elevated privileges (Admin rights).\n"
-          "    2. The system version is Windows 10 Creators Update (1703) or "
-          "later and "
-          "developer mode is enabled.",
-          GetLastErrorString().c_str());
-    } else {
-      die(L"CreateSymbolicLinkW failed: %hs", GetLastErrorString().c_str());
+    if (!created) {
+      if (GetLastError() == ERROR_PRIVILEGE_NOT_HELD) {
+        die(L"CreateSymbolicLinkW failed:\n%hs\n",
+            "Bazel needs to create symlink for building runfiles tree.\n"
+            "Creating symlink on Windows requires either of the following:\n"
+            "    1. Program is running with elevated privileges (Admin "
+            "rights).\n"
+            "    2. The system version is Windows 10 Creators Update (1703) or "
+            "later and "
+            "developer mode is enabled.",
+            GetLastErrorString().c_str());
+      } else {
+        die(L"CreateSymbolicLinkW failed: %hs", GetLastErrorString().c_str());
+      }
     }
 
+    DeleteFileOrDie(dummy_link);
     return true;
   }
 
@@ -266,10 +312,10 @@ class RunfilesCreator {
         bool is_symlink =
             (metadata.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
         if (is_symlink) {
-          wstring target;
-          if (!blaze_util::ReadSymlinkW(subpath, &target)) {
+          wstring target, werror;
+          if (!ReadSymlink(subpath, &target, &werror)) {
             die(L"ReadSymlinkW failed (%s): %hs", subpath.c_str(),
-                GetLastErrorString().c_str());
+                werror.c_str());
           }
 
           target = AsAbsoluteWindowsPath(target.c_str());
@@ -330,7 +376,10 @@ class RunfilesCreator {
         // Create an empty file
         HANDLE h = CreateFileW(it.first.c_str(),  // name of the file
                                GENERIC_WRITE,     // open for writing
-                               0,  // sharing mode, none in this case
+                               // Must share for reading, otherwise
+                               // symlink-following file existence checks (e.g.
+                               // java.nio.file.Files.exists()) fail.
+                               FILE_SHARE_READ,
                                0,  // use default security descriptor
                                CREATE_ALWAYS,  // overwrite if exists
                                FILE_ATTRIBUTE_NORMAL, 0);

@@ -18,21 +18,22 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Optional;
 import com.google.common.base.Strings;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
+import com.google.devtools.build.lib.packages.BuiltinProvider;
 import com.google.devtools.build.lib.packages.NativeInfo;
-import com.google.devtools.build.lib.packages.NativeProvider;
-import com.google.devtools.build.lib.skylarkbuildapi.apple.XcodePropertiesApi;
+import com.google.devtools.build.lib.starlarkbuildapi.apple.XcodePropertiesApi;
+import java.util.Objects;
 import javax.annotation.Nullable;
 
 /** A tuple containing information about a version of xcode and its properties. */
 @Immutable
 public class XcodeVersionProperties extends NativeInfo implements XcodePropertiesApi {
 
-  /** Skylark name for the XcodeVersionProperties provider. */
-  public static final String SKYLARK_NAME = "XcodeProperties";
+  /** Starlark name for the XcodeVersionProperties provider. */
+  public static final String STARLARK_NAME = "XcodeProperties";
 
-  /** Skylark constructor and identifier for XcodeVersionProperties provider. */
-  public static final NativeProvider<XcodeVersionProperties> SKYLARK_CONSTRUCTOR =
-      new NativeProvider<XcodeVersionProperties>(XcodeVersionProperties.class, SKYLARK_NAME) {};
+  /** Starlark constructor and identifier for XcodeVersionProperties provider. */
+  public static final BuiltinProvider<XcodeVersionProperties> STARLARK_CONSTRUCTOR =
+      new BuiltinProvider<XcodeVersionProperties>(STARLARK_NAME, XcodeVersionProperties.class) {};
 
   @VisibleForTesting public static final String DEFAULT_IOS_SDK_VERSION = "8.4";
   @VisibleForTesting public static final String DEFAULT_WATCHOS_SDK_VERSION = "2.0";
@@ -75,24 +76,28 @@ public class XcodeVersionProperties extends NativeInfo implements XcodePropertie
       @Nullable String defaultWatchosSdkVersion,
       @Nullable String defaultTvosSdkVersion,
       @Nullable String defaultMacosSdkVersion) {
-    super(SKYLARK_CONSTRUCTOR);
     this.xcodeVersion = Optional.fromNullable(xcodeVersion);
     this.defaultIosSdkVersion =
         Strings.isNullOrEmpty(defaultIosSdkVersion)
-            ? DottedVersion.fromString(DEFAULT_IOS_SDK_VERSION)
-            : DottedVersion.fromString(defaultIosSdkVersion);
+            ? DottedVersion.fromStringUnchecked(DEFAULT_IOS_SDK_VERSION)
+            : DottedVersion.fromStringUnchecked(defaultIosSdkVersion);
     this.defaultWatchosSdkVersion =
         Strings.isNullOrEmpty(defaultWatchosSdkVersion)
-            ? DottedVersion.fromString(DEFAULT_WATCHOS_SDK_VERSION)
-            : DottedVersion.fromString(defaultWatchosSdkVersion);
+            ? DottedVersion.fromStringUnchecked(DEFAULT_WATCHOS_SDK_VERSION)
+            : DottedVersion.fromStringUnchecked(defaultWatchosSdkVersion);
     this.defaultTvosSdkVersion =
         Strings.isNullOrEmpty(defaultTvosSdkVersion)
-            ? DottedVersion.fromString(DEFAULT_TVOS_SDK_VERSION)
-            : DottedVersion.fromString(defaultTvosSdkVersion);
+            ? DottedVersion.fromStringUnchecked(DEFAULT_TVOS_SDK_VERSION)
+            : DottedVersion.fromStringUnchecked(defaultTvosSdkVersion);
     this.defaultMacosSdkVersion =
         Strings.isNullOrEmpty(defaultMacosSdkVersion)
-            ? DottedVersion.fromString(DEFAULT_MACOS_SDK_VERSION)
-            : DottedVersion.fromString(defaultMacosSdkVersion);
+            ? DottedVersion.fromStringUnchecked(DEFAULT_MACOS_SDK_VERSION)
+            : DottedVersion.fromStringUnchecked(defaultMacosSdkVersion);
+  }
+
+  @Override
+  public BuiltinProvider<XcodeVersionProperties> getProvider() {
+    return STARLARK_CONSTRUCTOR;
   }
 
   /** Returns the xcode version, or null if the xcode version is unknown. */
@@ -151,5 +156,31 @@ public class XcodeVersionProperties extends NativeInfo implements XcodePropertie
   @Nullable
   public DottedVersion getDefaultMacosSdkVersion() {
     return defaultMacosSdkVersion;
+  }
+
+  @Override
+  public boolean equals(Object other) {
+    if (other == null) {
+      return false;
+    }
+    if (!(other instanceof XcodeVersionProperties)) {
+      return false;
+    }
+    XcodeVersionProperties otherData = (XcodeVersionProperties) other;
+    return xcodeVersion.equals(otherData.getXcodeVersion())
+        && defaultIosSdkVersion.equals(otherData.getDefaultIosSdkVersion())
+        && defaultWatchosSdkVersion.equals(otherData.getDefaultWatchosSdkVersion())
+        && defaultTvosSdkVersion.equals(otherData.getDefaultTvosSdkVersion())
+        && defaultMacosSdkVersion.equals(otherData.getDefaultMacosSdkVersion());
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(
+        xcodeVersion,
+        defaultIosSdkVersion,
+        defaultWatchosSdkVersion,
+        defaultTvosSdkVersion,
+        defaultMacosSdkVersion);
   }
 }

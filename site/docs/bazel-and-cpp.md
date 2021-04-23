@@ -9,22 +9,16 @@ This page contains resources that help you use Bazel with C++ projects. It links
 to a tutorial, build rules, and other information specific to building C++
 projects with Bazel.
 
-## Contents
-
-- [Working with Bazel](#working-with-bazel)
-- [Best practices](#best-practices)
-   - [BUILD files](#build-files)
-   - [Include paths](#include-paths)
-
 ## Working with Bazel
 
 The following resources will help you work with Bazel on C++ projects:
 
 *  [Tutorial: Building a C++ project](tutorial/cpp.html)
 *  [C++ common use cases](cpp-use-cases.html)
-*  [C/C++ rules](https://docs.bazel.build/versions/master/be/c-cpp.html)
-*  [Understanding CROSSTOOL](crosstool-reference.html)
-*  [Configuring CROSSTOOL](tutorial/crosstool.html)
+*  [C/C++ rules](be/c-cpp.html)
+*  [C++ toolchain configuration](cc-toolchain-config-reference.html)
+*  [Tutorial: Configuring C++ toolchains](tutorial/cc-toolchain-config.html)
+*  [Integrating with C++ rules](integrating-with-rules-cc.html)
 
 ## Best practices
 
@@ -35,11 +29,11 @@ best practices specific to C++ projects.
 
 Follow the guidelines below when creating your BUILD files:
 
-*  Each BUILD file should contain one [`cc_library`](https://docs.bazel.build/versions/master/be/c-cpp.html#cc_library)
+*  Each BUILD file should contain one [`cc_library`](be/c-cpp.html#cc_library)
    rule target per compilation unit in the directory.
 
-*  We recommend that you granularize your C++ libraries as much as possible to
-   maximize incrementality and parallelize the build.
+*  You should granularize your C++ libraries as much as
+   possible to maximize incrementality and parallelize the build.
 
 *  If there is a single source file in `srcs`, name the library the same as
    that C++ file's name. This library should contain C++ file(s), any matching
@@ -81,6 +75,6 @@ Follow these guidelines for include paths:
 
 *  For legacy or `third_party` code that requires includes pointing outside the
    project repository, such as external repository includes requiring a prefix,
-   use the [`include_prefix`](https://docs.bazel.build/versions/master/be/c-cpp.html#cc_library.include_prefix)
-   and [`strip_include_prefix`](https://docs.bazel.build/versions/master/be/c-cpp.html#cc_library.strip_include_prefix)
+   use the [`include_prefix`](be/c-cpp.html#cc_library.include_prefix) and
+   [`strip_include_prefix`](be/c-cpp.html#cc_library.strip_include_prefix)
    arguments on the `cc_library` rule target.

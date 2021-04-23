@@ -1,5 +1,6 @@
-load("//tools/build_defs/pkg:pkg.bzl", "pkg_tar")
+load("@rules_pkg//:pkg.bzl", "pkg_tar")
 load("//scripts/docs:jekyll.bzl", "jekyll_build")
+load("//scripts/docs:doc_versions.bzl", "DOC_VERSIONS")
 
 exports_files(
     [
@@ -27,6 +28,15 @@ filegroup(
     visibility = ["//:__pkg__"],
 )
 
+# Required to move the shared CSS Files from the external repo's execroot location
+# to the _sass location expected by the local css/main.scss imports.
+genrule(
+    name = "style-common",
+    srcs = ["@bazel_website//:_sass/style.scss"],
+    outs = ["_sass/style.scss"],
+    cmd = "cp $< $@",
+)
+
 filegroup(
     name = "jekyll-srcs",
     srcs = glob(
@@ -39,7 +49,9 @@ filegroup(
             "command-line-reference-suffix.html",
             "site/README.md",
         ] + DOT_GRAPH_HTML_FILES,
-    ),
+    ) + [
+        ":style-common",
+    ],
 )
 
 pkg_tar(
@@ -125,6 +137,7 @@ tar cf $$origdir/$@ *
     tools = ["//scripts/docs:generate_dot_graphs"],
 )
 
+# Generate the documentation tree in the current git worktree
 genrule(
     name = "jekyll-tree",
     srcs = [
@@ -133,14 +146,17 @@ genrule(
         "//src/main/java/com/google/devtools/build/lib:gen_buildencyclopedia",
         "//src/main/java/com/google/devtools/build/lib:gen_skylarklibrary",
         "//src/main/java/com/google/devtools/build/lib:gen_command-line-reference",
+        "//tools/build_defs/repo:doc",
     ],
     outs = ["jekyll-tree.tar"],
     cmd = ("$(location jekyll-tree.sh) $@ " +
+           DOC_VERSIONS[0]["version"].split("-")[0] + " " +
            "$(location :jekyll-base) " +
            "$(location :skylark-rule-docs) " +
            "$(location //src/main/java/com/google/devtools/build/lib:gen_buildencyclopedia) " +
            "$(location //src/main/java/com/google/devtools/build/lib:gen_skylarklibrary) " +
-           "$(location //src/main/java/com/google/devtools/build/lib:gen_command-line-reference)"),
+           "$(location //src/main/java/com/google/devtools/build/lib:gen_command-line-reference) " +
+           "$(location //tools/build_defs/repo:doc)"),
     tools = [
         "jekyll-tree.sh",
     ],
@@ -148,6 +164,18 @@ genrule(
 
 jekyll_build(
     name = "site",
-    srcs = [":jekyll-tree"],
+    srcs = [
+        "@jekyll_tree_%s//file" % DOC_VERSION["version"].split("-")[0].replace(".", "_")
+        for DOC_VERSION in DOC_VERSIONS
+    ] + [":jekyll-tree"],  # jekyll-tree *must* come last to use layouts and includes from master
     bucket = "docs.bazel.build",
+)
+
+# A smaller site build target. Contains just the docs for latest released version and master.
+jekyll_build(
+    name = "site_latest",
+    srcs = [
+        "@jekyll_tree_%s//file" % DOC_VERSIONS[0]["version"].split("-")[0].replace(".", "_"),
+        ":jekyll-tree",  # jekyll-tree *must* come last to use layouts and includes from master
+    ],
 )

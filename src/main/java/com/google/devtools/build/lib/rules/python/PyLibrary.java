@@ -21,16 +21,13 @@ import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
-import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * An implementation for the {@code py_library} rule.
- */
+/** Base implementation of {@code py_library}. */
 public abstract class PyLibrary implements RuleConfiguredTargetFactory {
 
   /**
@@ -40,15 +37,15 @@ public abstract class PyLibrary implements RuleConfiguredTargetFactory {
   protected abstract PythonSemantics createSemantics();
 
   @Override
-  public ConfiguredTarget create(final RuleContext ruleContext)
+  public ConfiguredTarget create(RuleContext ruleContext)
       throws InterruptedException, RuleErrorException, ActionConflictException {
     PythonSemantics semantics = createSemantics();
-    PyCommon common = new PyCommon(ruleContext);
-    common.initCommon(common.getDefaultPythonVersion());
-    common.validatePackageName();
+    PyCommon common =
+        new PyCommon(
+            ruleContext, semantics, /*validateSources=*/ true, /*requiresMainFile=*/ false);
     semantics.validate(ruleContext, common);
 
-    List<Artifact> srcs = common.validateSrcs();
+    List<Artifact> srcs = common.getPythonSources();
     List<Artifact> allOutputs =
         new ArrayList<>(semantics.precompiledPythonFiles(ruleContext, srcs, common));
     if (ruleContext.hasErrors()) {
@@ -58,11 +55,6 @@ public abstract class PyLibrary implements RuleConfiguredTargetFactory {
     NestedSet<Artifact> filesToBuild =
         NestedSetBuilder.wrap(Order.STABLE_ORDER, allOutputs);
     common.addPyExtraActionPseudoAction();
-
-    NestedSet<String> imports = common.collectImports(ruleContext, semantics);
-    if (ruleContext.hasErrors()) {
-      return null;
-    }
 
     Runfiles.Builder runfilesBuilder = new Runfiles.Builder(
         ruleContext.getWorkspaceName(), ruleContext.getConfiguration().legacyExternalRunfiles());
@@ -75,14 +67,14 @@ public abstract class PyLibrary implements RuleConfiguredTargetFactory {
     runfilesBuilder.addRunfiles(ruleContext, RunfilesProvider.DEFAULT_RUNFILES);
 
     RuleConfiguredTargetBuilder builder = new RuleConfiguredTargetBuilder(ruleContext);
-    common.addCommonTransitiveInfoProviders(builder, semantics, filesToBuild, imports);
+    common.addCommonTransitiveInfoProviders(builder, filesToBuild);
 
     return builder
         .setFilesToBuild(filesToBuild)
         .addNativeDeclaredProvider(
-            semantics.buildCcInfoProvider(ruleContext.getPrerequisites("deps", Mode.TARGET)))
+            new PyCcLinkParamsProvider(
+                semantics.buildCcInfoProvider(ruleContext.getPrerequisites("deps"))))
         .add(RunfilesProvider.class, RunfilesProvider.simple(runfilesBuilder.build()))
-        .add(PythonImportsProvider.class, new PythonImportsProvider(imports))
         .build();
   }
 }

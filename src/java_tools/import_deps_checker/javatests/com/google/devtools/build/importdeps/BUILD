@@ -1,3 +1,6 @@
+load("@rules_java//java:defs.bzl", "java_binary", "java_library", "java_test")
+load("//src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps:tests.bzl", "create_golden_test")
+
 # Description:
 #   Tests for the checker to check the completeness of the deps of java_import or aar_import targets.
 package(
@@ -38,7 +41,6 @@ java_test(
     srcs = ["LazyClassEntryStateTest.java"],
     deps = [
         "//src/java_tools/import_deps_checker/java/com/google/devtools/build/importdeps:import_deps_checker",
-        "//src/test/java/com/google/devtools/build/lib:testutil",
         "//third_party:guava",
         "//third_party:junit4",
         "//third_party:truth",
@@ -57,6 +59,7 @@ java_test(
         "//src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:testdata_lib_LibraryAnnotations",
         "//src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:testdata_lib_LibraryException",
         "//src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:testdata_lib_LibraryInterface",
+        "//src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:testdata_lib_LibraryModuleInfo",
         "//src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:testdata_lib_Library_no_members",
         "@local_jdk//:jre/lib/rt.jar",
     ],
@@ -68,11 +71,11 @@ java_test(
         "-Dclasscache.test.LibraryAnnotations=$(location //src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:testdata_lib_LibraryAnnotations)",
         "-Dclasscache.test.LibraryException=$(location //src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:testdata_lib_LibraryException)",
         "-Dclasscache.test.LibraryInterface=$(location //src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:testdata_lib_LibraryInterface)",
+        "-Dclasscache.test.LibraryModuleInfo=$(location //src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:testdata_lib_LibraryModuleInfo)",
     ],
     test_class = "com.google.devtools.build.importdeps.ClassCacheTest",
     deps = [
         "//src/java_tools/import_deps_checker/java/com/google/devtools/build/importdeps:import_deps_checker",
-        "//src/test/java/com/google/devtools/build/lib:testutil",
         "//third_party:guava",
         "//third_party:junit4",
         "//third_party:truth",
@@ -91,6 +94,7 @@ java_test(
         "//src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:testdata_lib_LibraryAnnotations",
         "//src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:testdata_lib_LibraryException",
         "//src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:testdata_lib_LibraryInterface",
+        "//src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:testdata_lib_LibraryModuleInfo",
         "//src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:testdata_lib_Library_no_members",
         "@local_jdk//:jre/lib/rt.jar",
     ],
@@ -102,6 +106,7 @@ java_test(
         "-Dclasscache.test.LibraryAnnotations=$(location //src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:testdata_lib_LibraryAnnotations)",
         "-Dclasscache.test.LibraryException=$(location //src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:testdata_lib_LibraryException)",
         "-Dclasscache.test.LibraryInterface=$(location //src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:testdata_lib_LibraryInterface)",
+        "-Dclasscache.test.LibraryModuleInfo=$(location //src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:testdata_lib_LibraryModuleInfo)",
     ],
     test_class = "com.google.devtools.build.importdeps.DepsCheckerClassVisitorTest",
     deps = [
@@ -113,8 +118,6 @@ java_test(
         "@local_jdk//:jre/lib/rt.jar",
     ],
 )
-
-load("//src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps:tests.bzl", "create_golden_test")
 
 create_golden_test(
     name = "bootclasspath_missing_golden_test",
@@ -135,8 +138,8 @@ create_golden_test(
     check_missing = True,
     checking_mode = "warning",
     expect_errors = False,
-    golden_output_file = "golden_warn_on_bootclasspath_missing.txt.txt",
-    golden_stderr_file = "golden_bootclasspath_missing.stderr.warningtxt",
+    golden_output_file = "golden_warn_on_bootclasspath_missing.txt",
+    golden_stderr_file = "golden_bootclasspath_missing.stderr.warning.txt",
     has_bootclasspath = False,
     import_deps_checker = "//src/java_tools/import_deps_checker/java/com/google/devtools/build/importdeps:ImportDepsChecker",
     missing_jar = None,
@@ -258,10 +261,9 @@ java_test(
     name = "MainTest",
     srcs = ["MainTest.java"],
     deps = [
+        "//src/java_tools/import_deps_checker/java/com/google/devtools/build/importdeps:ImportDepsChecker",
         "//third_party:junit4",
         "//third_party:truth",
-        "//third_party/bazel/src/java_tools/import_deps_checker/java/com/google/devtools/build/importdeps:main",
-        "//third_party/bazel/src/test/java/com/google/devtools/build/lib/testutil",
     ],
 )
 
@@ -278,28 +280,28 @@ sh_test(
         "$(location golden_string_annotation_value_test.stderr.txt)",
         "199",
         "$(location :DumpProto)",
-        "$(location //third_party/bazel/src/java_tools/import_deps_checker/java/com/google/devtools/build/importdeps:ImportDepsChecker)",
+        "$(location //src/java_tools/import_deps_checker/java/com/google/devtools/build/importdeps:ImportDepsChecker)",
         "--checking_mode=error",
         "--bootclasspath_entry",
         "$(location :libempty.jar)",
         "--classpath_entry",
-        "$(location //third_party/bazel/src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:libStringAnnotation.jar)",
+        "$(location //src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:libStringAnnotation.jar)",
         "--input",
-        "$(location //third_party/bazel/src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:libOneAnnotationValue.jar)",
+        "$(location //src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:libOneAnnotationValue.jar)",
     ],
     data = [
         ":DumpProto",
         ":libempty.jar",
-        "//third_party/bazel/src/java_tools/import_deps_checker/java/com/google/devtools/build/importdeps:ImportDepsChecker",
-        "//third_party/bazel/src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps:golden_string_annotation_value_test.stderr.txt",
-        "//third_party/bazel/src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps:golden_string_annotation_value_test.txt",
-        "//third_party/bazel/src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:libOneAnnotationValue.jar",
-        "//third_party/bazel/src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:libStringAnnotation.jar",
+        "//src/java_tools/import_deps_checker/java/com/google/devtools/build/importdeps:ImportDepsChecker",
+        "//src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps:golden_string_annotation_value_test.stderr.txt",
+        "//src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps:golden_string_annotation_value_test.txt",
+        "//src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:libOneAnnotationValue.jar",
+        "//src/java_tools/import_deps_checker/javatests/com/google/devtools/build/importdeps/testdata:libStringAnnotation.jar",
     ],
 )
 
 java_binary(
     name = "DumpProto",
     srcs = ["DumpProto.java"],
-    deps = ["//third_party/bazel/src/main/protobuf:deps_java_proto"],
+    deps = ["//src/main/protobuf:deps_java_proto"],
 )

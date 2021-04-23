@@ -14,12 +14,15 @@
 
 package com.google.devtools.build.lib.rules.cpp;
 
-import com.google.devtools.build.lib.actions.Artifact;
+import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.analysis.RuleContext;
-import com.google.devtools.build.lib.collect.nestedset.NestedSet;
-import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
-import com.google.devtools.build.lib.collect.nestedset.Order;
+import com.google.devtools.build.lib.analysis.RuleErrorConsumer;
+import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
+import com.google.devtools.build.lib.packages.AspectDescriptor;
+import com.google.devtools.build.lib.packages.StructImpl;
+import com.google.devtools.build.lib.rules.cpp.CcToolchainFeatures.FeatureConfiguration;
 import com.google.devtools.build.lib.rules.cpp.CppConfiguration.HeadersCheckingMode;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 
@@ -35,20 +38,14 @@ public final class MockCppSemantics implements CppSemantics {
 
   @Override
   public void finalizeCompileActionBuilder(
-      RuleContext ruleContext, CppCompileActionBuilder actionBuilder) {}
+      BuildConfiguration configuration,
+      FeatureConfiguration featureConfiguration,
+      CppCompileActionBuilder actionBuilder,
+      RuleErrorConsumer ruleErrorConsumer) {}
 
   @Override
-  public void setupCcCompilationContext(
-      RuleContext ruleContext, CcCompilationContext.Builder ccCompilationContextBuilder) {}
-
-  @Override
-  public NestedSet<Artifact> getAdditionalPrunableIncludes() {
-    return NestedSetBuilder.emptySet(Order.STABLE_ORDER);
-  }
-
-  @Override
-  public IncludeProcessing getIncludeProcessing() {
-    return null;
+  public boolean allowIncludeScanning() {
+    return false;
   }
 
   @Override
@@ -57,7 +54,13 @@ public final class MockCppSemantics implements CppSemantics {
   }
 
   @Override
-  public boolean needsDotdInputPruning() {
+  public HeadersCheckingMode determineStarlarkHeadersCheckingMode(
+      RuleContext context, CppConfiguration cppConfig, CcToolchainProvider toolchain) {
+    return HeadersCheckingMode.LOOSE;
+  }
+
+  @Override
+  public boolean needsDotdInputPruning(BuildConfiguration configuration) {
     return true;
   }
 
@@ -68,4 +71,16 @@ public final class MockCppSemantics implements CppSemantics {
   public boolean needsIncludeValidation() {
     return true;
   }
+
+  @Override
+  public StructImpl getCcSharedLibraryInfo(TransitiveInfoCollection dep) {
+    return null;
+  }
+
+  @Override
+  public void validateLayeringCheckFeatures(
+      RuleContext ruleContext,
+      AspectDescriptor aspectDescriptor,
+      CcToolchainProvider ccToolchain,
+      ImmutableSet<String> unsupportedFeatures) {}
 }

@@ -20,18 +20,6 @@ source "${CURRENT_DIR}/../integration_test_setup.sh" \
   || { echo "integration_test_setup.sh not found!" >&2; exit 1; }
 
 
-function set_up() {
-  write_default_bazelrc
-  # Print client log statements to stderr so they get picked up by the test log
-  # in the event of a failure.
-  add_to_bazelrc "startup --client_debug"
-  add_to_bazelrc "startup --nobatch"
-}
-
-function tear_down() {
-  bazel --nobatch shutdown
-}
-
 #### TESTS #############################################################
 
 function test_client_debug() {
@@ -75,12 +63,91 @@ function test_multiple_requests_same_server() {
   expect_not_log "WARNING.* Running B\\(azel\\|laze\\) server needs to be killed"
 }
 
+function test_no_server_restart_if_options_order_changes() {
+  local server_pid1=$(bazel \
+                      --host_jvm_args=-Dfoo \
+                      --host_jvm_args=-Dfoo \
+                      --host_jvm_args=-Dbar \
+                      --client_debug info server_pid 2>$TEST_log)
+  local server_pid2=$(bazel \
+                      --host_jvm_args=-Dfoo \
+                      --host_jvm_args=-Dbar \
+                      --host_jvm_args=-Dfoo \
+                      --client_debug info server_pid 2>$TEST_log)
+  assert_equals "$server_pid1" "$server_pid2"
+  expect_not_log "WARNING.* Running B\\(azel\\|laze\\) server needs to be killed"
+}
+
+function test_server_restart_if_number_of_option_instances_increases() {
+  local server_pid1=$(bazel \
+                      --host_jvm_args=-Dfoo \
+                      --client_debug info server_pid 2>$TEST_log)
+  local server_pid2=$(bazel \
+                      --host_jvm_args -Dfoo \
+                      --host_jvm_args -Dfoo \
+                      --client_debug info server_pid 2>$TEST_log)
+  assert_not_equals "$server_pid1" "$server_pid2"
+  expect_log "\\[WARNING .*\\] Running B\\(azel\\|laze\\) server needs to be killed"
+  expect_log "\\[INFO .*\\] Args from the current request that were not included when creating the server:"
+  expect_log "\\[INFO .*\\]   --host_jvm_args=-Dfoo"
+}
+
+function test_server_restart_if_number_of_option_instances_decreases() {
+  local server_pid1=$(bazel \
+                      --host_jvm_args=-Dfoo \
+                      --host_jvm_args -Dfoo \
+                      --client_debug info server_pid 2>$TEST_log)
+  local server_pid2=$(bazel \
+                      --host_jvm_args -Dfoo \
+                      --client_debug info server_pid 2>$TEST_log)
+  assert_not_equals "$server_pid1" "$server_pid2"
+  expect_log "\\[WARNING .*\\] Running B\\(azel\\|laze\\) server needs to be killed"
+  expect_log "\\[INFO .*\\] Args from the running server that are not included in the current request:"
+  expect_log "\\[INFO .*\\]   --host_jvm_args=-Dfoo"
+}
+
+function test_server_not_restarted_when_only_TMPDIR_changes() {
+  mkdir tmp1
+  mkdir tmp2
+  tmp1path="$(pwd)/tmp1"
+  tmp2path="$(pwd)/tmp2"
+  PID1=$(export TMPDIR="$tmp1path" && bazel info server_pid 2>$TEST_log) \
+     || fail "bazel info failed"
+  PID2=$(export TMPDIR="$tmp2path" && bazel info server_pid 2>$TEST_log) \
+     || fail "bazel info failed"
+  expect_not_log "Running B\\(azel\\|laze\\) server needs to be killed."
+
+  assert_equals "$PID1" "$PID2"
+}
+
+function test_server_restarted_on_explicit_heap_dump_path_change() {
+  mkdir tmp1
+  mkdir tmp2
+  tmp1path="$(pwd)/tmp1"
+  tmp2path="$(pwd)/tmp2"
+  PID1=$(bazel --host_jvm_args=-XX:HeapDumpPath="$tmp1path" info server_pid \
+     2>$TEST_log) || fail "bazel info failed"
+  PID2=$(bazel --host_jvm_args=-XX:HeapDumpPath="$tmp2path" info server_pid \
+     2>$TEST_log) || fail "bazel info failed"
+  expect_log "Running B\\(azel\\|laze\\) server needs to be killed."
+
+  assert_not_equals "$PID1" "$PID2"
+}
+
 function test_shutdown() {
   local server_pid1=$(bazel info server_pid 2>$TEST_log)
   bazel shutdown >& $TEST_log || fail "Expected success"
   local server_pid2=$(bazel info server_pid 2>$TEST_log)
   assert_not_equals "$server_pid1" "$server_pid2"
   expect_not_log "WARNING.* Running B\\(azel\\|laze\\) server needs to be killed"
+  expect_log "Starting local B\\(azel\\|laze\\) server and connecting to it"
+}
+
+function test_shutdown_different_options() {
+  bazel --host_jvm_args=-Di.am.a=teapot info >& $TEST_log || fail "Expected success"
+  bazel shutdown >& $TEST_log || fail "Expected success"
+  expect_log "WARNING.* Running B\\(azel\\|laze\\) server needs to be killed"
+  expect_not_log "Starting local B\\(azel\\|laze\\) server and connecting to it"
 }
 
 function test_server_restart_due_to_startup_options_with_client_debug_information() {
@@ -89,11 +156,11 @@ function test_server_restart_due_to_startup_options_with_client_debug_informatio
   local server_pid1=$(bazel --client_debug --write_command_log info server_pid 2>$TEST_log)
   local server_pid2=$(bazel --client_debug --nowrite_command_log info server_pid 2>$TEST_log)
   assert_not_equals "$server_pid1" "$server_pid2" # pid changed.
-  expect_log "\\[bazel WARNING .*\\] Running B\\(azel\\|laze\\) server needs to be killed"
-  expect_log "\\[bazel INFO .*\\] Args from the running server that are not included in the current request:"
-  expect_log "\\[bazel INFO .*\\]   --write_command_log"
-  expect_log "\\[bazel INFO .*\\] Args from the current request that were not included when creating the server:"
-  expect_log "\\[bazel INFO .*\\]   --nowrite_command_log"
+  expect_log "\\[WARNING .*\\] Running B\\(azel\\|laze\\) server needs to be killed"
+  expect_log "\\[INFO .*\\] Args from the running server that are not included in the current request:"
+  expect_log "\\[INFO .*\\]   --write_command_log"
+  expect_log "\\[INFO .*\\] Args from the current request that were not included when creating the server:"
+  expect_log "\\[INFO .*\\]   --nowrite_command_log"
 }
 
 function test_exit_code() {
@@ -122,17 +189,74 @@ function test_nonwritable_output_base() {
   expect_log "FATAL.* Output base directory '/' must be readable and writable."
 }
 
+function test_install_base_races_dont_leave_temp_files() {
+  declare -a client_pids
+  for i in {1..3}; do
+    bazel --install_base="$TEST_TMPDIR/race/install" \
+        --output_base="$TEST_TMPDIR/out$i" info install_base &
+    client_pids+=($!)
+  done
+  for pid in "${client_pids[@]}"; do
+    wait $pid
+  done
+  # Expect "install" to be the only thing in the "race" directory.
+  assert_equals "install" "$(ls "$TEST_TMPDIR/race/")"
+}
+
 function test_no_arguments() {
   bazel >&$TEST_log || fail "Expected zero exit"
   expect_log "Usage: b\\(laze\\|azel\\)"
 }
 
+function test_local_startup_timeout() {
+  local output_base=$(bazel info output_base 2>"$TEST_log") ||
+    fail "bazel info failed"
+
+  # --host-jvm_debug will cause the server to block, forcing the client
+  # into the timeout condition.
+  bazel --host_jvm_args="-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=localhost:41687" \
+      --local_startup_timeout_secs=1 2>"$TEST_log" &
+  local timeout=20
+  while true; do
+    local jobs_output=$(jobs)
+    [[ $jobs_output =~ Exit ]] && break
+    [[ $jobs_output =~ Done ]] && fail "bazel should have exited non-zero"
+
+    timeout="$(( ${timeout} - 1 ))"
+    [[ "${timeout}" -gt 0 ]] || {
+      kill -9 %1
+      wait %1
+      fail "--local_startup_timeout_secs was not respected"
+    }
+    # Wait for the client to exit.
+    sleep 1
+  done
+
+  expect_log "Starting local.*server and connecting to it"
+  expect_log "FATAL: couldn't connect to server"
+}
 
 function test_max_idle_secs() {
-  local server_pid1=$(bazel --max_idle_secs=1 info server_pid 2>$TEST_log)
-  sleep 5
-  local server_pid2=$(bazel info server_pid 2>$TEST_log)
-  assert_not_equals "$server_pid1" "$server_pid2" # pid changed.
+  # TODO(https://github.com/bazelbuild/bazel/issues/6773): Remove when fixed.
+  bazel shutdown
+
+  local options=( --max_idle_secs=1 )
+
+  local output_base
+  output_base="$(bazel "${options[@]}" info output_base 2>"$TEST_log")" \
+    || fail "bazel info failed"
+  local timeout=60  # Lower than the default --max_idle_secs.
+  while [[ -f "${output_base}/server/server.pid.txt" ]]; do
+    timeout="$(( ${timeout} - 1 ))"
+    [[ "${timeout}" -gt 0 ]] || fail "--max_idle_secs was not respected"
+
+    # Wait for the server to go away.
+    sleep 1
+  done
+
+  bazel "${options[@]}" info >"$TEST_log" 2>&1 || fail "bazel info failed"
+  expect_log "Starting local.*server and connecting to it"
+  # Ensure the restart was not triggered by different startup options.
   expect_not_log "WARNING: Running B\\(azel\\|laze\\) server needs to be killed"
 }
 
@@ -140,7 +264,7 @@ function test_dashdash_before_command() {
   bazel -- info &>$TEST_log && "Expected failure"
   exitcode=$?
   assert_equals 2 $exitcode
-  expect_log "\\[bazel FATAL .*\\] Unknown startup option: '--'."
+  expect_log "\\[FATAL .*\\] Unknown startup option: '--'."
 }
 
 function test_dashdash_after_command() {
@@ -152,7 +276,6 @@ function test_nobatch() {
   local pid2=$(bazel --batch --nobatch info server_pid 2> $TEST_log)
   assert_equals "$pid1" "$pid2"
   expect_not_log "WARNING.* Running B\\(azel\\|laze\\) server needs to be killed"
-  expect_not_log "WARNING.* --batch mode is deprecated."
 }
 
 # Regression test for #1875189, "bazel client should pass through '--help' like
@@ -183,7 +306,6 @@ function test_batch() {
   local pid2=$(bazel --batch info server_pid 2> $TEST_log)
   assert_not_equals "$pid1" "$pid2"
   expect_log "WARNING.* Running B\\(azel\\|laze\\) server needs to be killed"
-  expect_log "WARNING.* --batch mode is deprecated."
 }
 
 function test_cmdline_not_written_in_batch_mode() {
@@ -206,6 +328,77 @@ function test_bad_command_nobatch() {
   exitcode=$?
   assert_equals 2 "$exitcode"
   expect_log "Command 'notacommand' not found."
+}
+
+function get_pid_environment() {
+  local pid="$1"
+  case "$(uname -s)" in
+    Linux)
+      cat "/proc/${pid}/environ" | tr '\0' '\n'
+      ;;
+    Darwin)
+      if ! ps > /dev/null; then
+        echo "Cannot use ps command, probably due to sandboxing." >&2
+        return 1
+      fi
+      ps eww -o command "${pid}" | tr ' ' '\n'
+      ;;
+    *)
+      false
+      ;;
+  esac
+}
+
+function test_proxy_settings() {
+  # We expect that proxy settings are propagated from the client to the server
+  # process, but are _not_ used for client-server communication.
+
+  bazel shutdown  # We are changing the server process's environment variables.
+
+  local example_no_proxy='foo.example.com'
+  # A known-invalid http*_proxy value which, if not ignored, would be expected
+  # to cause the client-server gRPC channel to time out or otherwise fail.
+  local invalid_proxy='http://localhost:0'
+  local server_pid
+  server_pid="$(http_proxy="${invalid_proxy}" HTTP_PROXY="${invalid_proxy}" \
+    https_proxy="${invalid_proxy}" HTTPS_PROXY="${invalid_proxy}" \
+    no_proxy="${example_no_proxy}" NO_PROXY="${example_no_proxy}" \
+    bazel info server_pid 2> $TEST_log)" \
+    || fail "http*_proxy env variables not ignored by client-server channel."
+
+  # Check that the server uses the *_proxy env variables set by the client.
+  if get_pid_environment "${server_pid}" > "${TEST_TMPDIR}/server_env"; then
+    local var
+    for var in http{,s}_proxy HTTP{,S}_PROXY; do
+      assert_contains "^${var}=${invalid_proxy}\$" "${TEST_TMPDIR}/server_env"
+    done
+    for var in no_proxy NO_PROXY; do
+      assert_contains "^${var}=${example_no_proxy}\$" \
+        "${TEST_TMPDIR}/server_env"
+    done
+  else
+    echo "Cannot not test server process environment on this platform"
+  fi
+}
+
+function test_macos_qos_class() {
+  for class in utility background; do
+    bazel --macos_qos_class="${class}" info >"${TEST_log}" 2>&1 \
+      || fail "Unknown QoS class ${class}"
+    # On macOS it'd be nice to verify that the server is indeed running at the
+    # desired class... but this is very hard to do.  Common utilities do not
+    # print the QoS level, and powermetrics (which requires root privileges)
+    # only reports it under load -- so an "info" command is insufficient and the
+    # real thing would be quite expensive.
+  done
+
+  for class in user-interactive user-initiated default ; do
+    bazel --macos_qos_class="${class}" >"${TEST_log}" 2>&1 \
+      && fail "Expected failure with invalid QoS class name"
+    expect_log "Invalid argument.*qos_class.*${class}"
+  done
+
+
 }
 
 run_suite "Tests of the bazel client."

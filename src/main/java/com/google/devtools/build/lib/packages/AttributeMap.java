@@ -16,8 +16,6 @@ package com.google.devtools.build.lib.packages;
 import com.google.auto.value.AutoValue;
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.events.Location;
-import com.google.devtools.build.lib.syntax.Type;
 import java.util.Collection;
 import javax.annotation.Nullable;
 
@@ -70,6 +68,19 @@ public interface AttributeMap {
   <T> T get(String attributeName, Type<T> type);
 
   /**
+   * Returns the value of the named rule attribute if it exists, otherwise the given default value.
+   * This may be null (for example, for an attribute with no default value that isn't explicitly set
+   * in the rule - see {@link Type#getDefaultValue}).
+   */
+  default <T> T getOrDefault(String attributeName, Type<T> type, T defaultValue) {
+    if (has(attributeName)) {
+      T value = get(attributeName, type);
+      return value;
+    }
+    return defaultValue;
+  }
+
+  /**
    * Returns true if the given attribute is configurable for this rule instance, false
    * if it isn't configurable or doesn't exist.
    */
@@ -93,24 +104,31 @@ public interface AttributeMap {
   @Nullable Attribute getAttributeDefinition(String attrName);
 
   /**
-   * Returns true iff the value of the specified attribute is explicitly set in the BUILD file (as
-   * opposed to its default value). This also returns true if the value from the BUILD file is the
-   * same as the default value.
+   * Returns true iff the specified attribute is explicitly set in the target's definition (as
+   * opposed to being omitted and taking on its default value from the rule definition).
    *
-   * <p>It is probably a good idea to avoid this method in default value and implicit outputs
-   * computation, because it is confusing that setting an attribute to an empty list (for example)
-   * is different from not setting it at all.
+   * <p>Note that this returns true in the case where the attribute is explicitly set to the same
+   * value as its default. Therefore, this method breaks encapsulation in the sense that it
+   * describes *how* a target is defined rather than just *what* its attribute values are.
+   *
+   * <p>CAUTION: It is a good idea to avoid relying on this method if possible. It's confusing to
+   * users that setting an attribute to (for example) an empty list is different from not setting it
+   * at all. It also breaks some use cases, such as programmatically copying a target definition via
+   * {@code native.existing_rules}. Specifically, the Starlark code doing the copying will observe
+   * the attribute on the existing target whether or not it was set explicitly, and then set that
+   * value explicitly on the new target. This can cause the two targets to behave differently, and
+   * can be a difficult bug to track down. (See #7071, b/122596733).
    */
   boolean isAttributeValueExplicitlySpecified(String attributeName);
-
-  /** Returns the {@link Location} at which the attribute was defined. */
-  Location getAttributeLocation(String attrName);
 
   /**
    * Returns a {@link Collection} with a {@link DepEdge} for every attribute that contains labels in
    * its value (either by *being* a label or being a collection that includes labels).
    */
   Collection<DepEdge> visitLabels() throws InterruptedException;
+
+  /** Same as {@link #visitLabels()} but for a single attribute. */
+  Collection<DepEdge> visitLabels(Attribute attribute) throws InterruptedException;
 
   /**
    * {@code (Label, Attribute)} pair describing a dependency edge.

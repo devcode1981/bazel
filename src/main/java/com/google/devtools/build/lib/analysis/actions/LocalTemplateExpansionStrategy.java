@@ -14,24 +14,17 @@
 
 package com.google.devtools.build.lib.analysis.actions;
 
-import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.actions.ActionExecutionContext;
 import com.google.devtools.build.lib.actions.ArtifactPathResolver;
 import com.google.devtools.build.lib.actions.EnvironmentalExecException;
-import com.google.devtools.build.lib.actions.ExecException;
-import com.google.devtools.build.lib.actions.ExecutionStrategy;
-import com.google.devtools.build.lib.actions.SpawnResult;
-import com.google.devtools.build.lib.analysis.actions.AbstractFileWriteAction.DeterministicWriter;
+import com.google.devtools.build.lib.actions.SpawnContinuation;
+import com.google.devtools.build.lib.server.FailureDetails;
 import com.google.devtools.build.lib.util.StringUtilities;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
-import java.util.List;
 
-/** Strategy to perform tempate expansion locally */
-@ExecutionStrategy(
-    name = {"local"},
-    contextType = TemplateExpansionContext.class)
+/** Strategy to perform template expansion locally. */
 public class LocalTemplateExpansionStrategy implements TemplateExpansionContext {
   public static final Class<LocalTemplateExpansionStrategy> TYPE =
       LocalTemplateExpansionStrategy.class;
@@ -39,9 +32,8 @@ public class LocalTemplateExpansionStrategy implements TemplateExpansionContext 
   public static LocalTemplateExpansionStrategy INSTANCE = new LocalTemplateExpansionStrategy();
 
   @Override
-  public List<SpawnResult> expandTemplate(
-      TemplateExpansionAction action, ActionExecutionContext ctx)
-      throws ExecException, InterruptedException {
+  public SpawnContinuation expandTemplate(
+      TemplateExpansionAction action, ActionExecutionContext ctx) throws InterruptedException {
     try {
       final String expandedTemplate = getExpandedTemplateUnsafe(action, ctx.getPathResolver());
       DeterministicWriter deterministicWriter =
@@ -51,13 +43,14 @@ public class LocalTemplateExpansionStrategy implements TemplateExpansionContext 
               out.write(expandedTemplate.getBytes(StandardCharsets.UTF_8));
             }
           };
-      ctx.getContext(FileWriteActionContext.class)
-          .writeOutputToFile(
+      return ctx.getContext(FileWriteActionContext.class)
+          .beginWriteOutputToFile(
               action, ctx, deterministicWriter, action.makeExecutable(), /*isRemotable=*/ true);
     } catch (IOException e) {
-      throw new EnvironmentalExecException("IOException during template expansion", e);
+      return SpawnContinuation.failedWithExecException(
+          new EnvironmentalExecException(
+              e, FailureDetails.Execution.Code.LOCAL_TEMPLATE_EXPANSION_FAILURE));
     }
-    return ImmutableList.of();
   }
 
   /**

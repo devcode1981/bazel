@@ -26,6 +26,7 @@ import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
 import com.google.devtools.build.lib.analysis.platform.ToolchainTypeInfo;
 import com.google.devtools.build.lib.packages.RuleClass;
+import com.google.devtools.build.lib.packages.RuleClass.ToolchainResolutionMode;
 
 /**
  * Implementation of {@code toolchain_type}.
@@ -34,7 +35,7 @@ public class ToolchainType implements RuleConfiguredTargetFactory {
 
   @Override
   public ConfiguredTarget create(RuleContext ruleContext)
-      throws ActionConflictException {
+      throws ActionConflictException, InterruptedException {
 
     ToolchainTypeInfo toolchainTypeInfo = ToolchainTypeInfo.create(ruleContext.getLabel());
 
@@ -50,7 +51,8 @@ public class ToolchainType implements RuleConfiguredTargetFactory {
     @Override
     public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment environment) {
       return builder
-          .supportsPlatforms(false)
+          .useToolchainResolution(ToolchainResolutionMode.DISABLED)
+          .advertiseStarlarkProvider(ToolchainTypeInfo.PROVIDER.id())
           .removeAttribute("licenses")
           .removeAttribute("distribs")
           .build();
@@ -61,8 +63,44 @@ public class ToolchainType implements RuleConfiguredTargetFactory {
       return Metadata.builder()
           .name("toolchain_type")
           .factoryClass(ToolchainType.class)
-          .ancestors(BaseRuleClasses.BaseRule.class)
+          .ancestors(BaseRuleClasses.NativeBuildRule.class)
           .build();
     }
   }
 }
+/*<!-- #BLAZE_RULE (NAME = toolchain_type, FAMILY = Platform)[GENERIC_RULE] -->
+
+<p>
+  This rule defines a new type of toolchain -- a simple target that represents a class of tools that
+  serve the same role for different platforms.
+</p>
+
+<p>
+  See the <a href="../toolchains.html">Toolchains</a> page for more details.
+</p>
+
+<h4 id="toolchain_type_examples">Example</h4>
+<p>
+  This defines a toolchain type for a custom rule.
+</p>
+<pre class="code">
+toolchain_type(
+    name = "bar_toolchain_type",
+)
+</pre>
+
+<p>
+  This can be used in a bzl file.
+</p>
+<pre class="code">
+bar_binary = rule(
+    implementation = _bar_binary_impl,
+    attrs = {
+        "srcs": attr.label_list(allow_files = True),
+        ...
+        # No `_compiler` attribute anymore.
+    },
+    toolchains = ["//bar_tools:toolchain_type"]
+)
+</pre>
+<!-- #END_BLAZE_RULE -->*/

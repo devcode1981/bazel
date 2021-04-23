@@ -17,13 +17,15 @@
    installed on the local host.
 """
 
+_EXECUTE_TIMEOUT = 120
+
 def _search_string(fullstring, prefix, suffix):
     """Returns the substring between two given substrings of a larger string.
 
     Args:
       fullstring: The larger string to search.
       prefix: The substring that should occur directly before the returned string.
-      suffix: The substring that should occur direclty after the returned string.
+      suffix: The substring that should occur directly after the returned string.
     Returns:
       A string occurring in fullstring exactly prefixed by prefix, and exactly
       terminated by suffix. For example, ("hello goodbye", "lo ", " bye") will
@@ -50,9 +52,10 @@ def _xcode_version_output(repository_ctx, name, version, aliases, developer_dir)
     error_msg = ""
     for alias in aliases:
         decorated_aliases.append("'%s'" % alias)
+    repository_ctx.report_progress("Fetching SDK information for Xcode %s" % version)
     xcodebuild_result = repository_ctx.execute(
         ["xcrun", "xcodebuild", "-version", "-sdk"],
-        30,
+        _EXECUTE_TIMEOUT,
         {"DEVELOPER_DIR": developer_dir},
     )
     if (xcodebuild_result.return_code != 0):
@@ -72,7 +75,7 @@ def _xcode_version_output(repository_ctx, name, version, aliases, developer_dir)
     build_contents += "xcode_version(\n  name = '%s'," % name
     build_contents += "\n  version = '%s'," % version
     if aliases:
-        build_contents += "\n  aliases = [%s]," % " ,".join(decorated_aliases)
+        build_contents += "\n  aliases = [%s]," % ", ".join(decorated_aliases)
     if ios_sdk_version:
         build_contents += "\n  default_ios_sdk_version = '%s'," % ios_sdk_version
     if tvos_sdk_version:
@@ -112,12 +115,18 @@ def run_xcode_locator(repository_ctx, xcode_locator_src_label):
       err: An error string describing the error that occurred when attempting
           to build and run xcode-locator, or None if the run was successful.
     """
+    repository_ctx.report_progress("Building xcode-locator")
     xcodeloc_src_path = str(repository_ctx.path(xcode_locator_src_label))
+    env = repository_ctx.os.environ
     xcrun_result = repository_ctx.execute([
         "env",
         "-i",
+        "DEVELOPER_DIR={}".format(env.get("DEVELOPER_DIR", default = "")),
         "xcrun",
+        "--sdk",
+        "macosx",
         "clang",
+        "-mmacosx-version-min=10.9",
         "-fobjc-arc",
         "-framework",
         "CoreServices",
@@ -126,7 +135,7 @@ def run_xcode_locator(repository_ctx, xcode_locator_src_label):
         "-o",
         "xcode-locator-bin",
         xcodeloc_src_path,
-    ], 30)
+    ], _EXECUTE_TIMEOUT)
 
     if (xcrun_result.return_code != 0):
         suggestion = ""
@@ -144,7 +153,11 @@ def run_xcode_locator(repository_ctx, xcode_locator_src_label):
         )
         return ([], error_msg.replace("\n", " "))
 
-    xcode_locator_result = repository_ctx.execute(["./xcode-locator-bin", "-v"], 30)
+    repository_ctx.report_progress("Running xcode-locator")
+    xcode_locator_result = repository_ctx.execute(
+        ["./xcode-locator-bin", "-v"],
+        _EXECUTE_TIMEOUT,
+    )
     if (xcode_locator_result.return_code != 0):
         error_msg = (
             "Invoking xcode-locator failed, " +
@@ -173,21 +186,16 @@ def run_xcode_locator(repository_ctx, xcode_locator_src_label):
 
 def _darwin_build_file(repository_ctx):
     """Evaluates local system state to create xcode_config and xcode_version targets."""
-    xcodebuild_result = repository_ctx.execute(["env", "-i", "xcrun", "xcodebuild", "-version"], 30)
-
-    # "xcodebuild -version" failing may be indicative of no versions of xcode
-    # installed, which is an acceptable machine configuration to have for using
-    # bazel. Thus no print warning should be emitted here.
-    if (xcodebuild_result.return_code != 0):
-        error_msg = (
-            "Running xcodebuild -version failed, " +
-            "return code {code}, stderr: {err}, stdout: {out}"
-        ).format(
-            code = xcodebuild_result.return_code,
-            err = xcodebuild_result.stderr,
-            out = xcodebuild_result.stdout,
-        )
-        return VERSION_CONFIG_STUB + "\n# Error: " + error_msg.replace("\n", " ") + "\n"
+    repository_ctx.report_progress("Fetching the default Xcode version")
+    env = repository_ctx.os.environ
+    xcodebuild_result = repository_ctx.execute([
+        "env",
+        "-i",
+        "DEVELOPER_DIR={}".format(env.get("DEVELOPER_DIR", default = "")),
+        "xcrun",
+        "xcodebuild",
+        "-version",
+    ], _EXECUTE_TIMEOUT)
 
     (toolchains, xcodeloc_err) = run_xcode_locator(
         repository_ctx,
@@ -197,7 +205,15 @@ def _darwin_build_file(repository_ctx):
     if xcodeloc_err:
         return VERSION_CONFIG_STUB + "\n# Error: " + xcodeloc_err + "\n"
 
-    default_xcode_version = _search_string(xcodebuild_result.stdout, "Xcode ", "\n")
+    default_xcode_version = ""
+    default_xcode_build_version = ""
+    if xcodebuild_result.return_code == 0:
+        default_xcode_version = _search_string(xcodebuild_result.stdout, "Xcode ", "\n")
+        default_xcode_build_version = _search_string(
+            xcodebuild_result.stdout,
+            "Build version ",
+            "\n",
+        )
     default_xcode_target = ""
     target_names = []
     buildcontents = ""
@@ -207,16 +223,40 @@ def _darwin_build_file(repository_ctx):
         aliases = toolchain.aliases
         developer_dir = toolchain.developer_dir
         target_name = "version%s" % version.replace(".", "_")
-        buildcontents += _xcode_version_output(repository_ctx, target_name, version, aliases, developer_dir)
-        target_names.append("':%s'" % target_name)
-        if (version == default_xcode_version or default_xcode_version in aliases):
-            default_xcode_target = target_name
-    buildcontents += "xcode_config(name = 'host_xcodes',"
+        buildcontents += _xcode_version_output(
+            repository_ctx,
+            target_name,
+            version,
+            aliases,
+            developer_dir,
+        )
+        target_label = "':%s'" % target_name
+        target_names.append(target_label)
+        if (version.startswith(default_xcode_version) and
+            version.endswith(default_xcode_build_version)):
+            default_xcode_target = target_label
+    buildcontents += "xcode_config(\n  name = 'host_xcodes',"
+    if target_names:
+        buildcontents += "\n  versions = [%s]," % ", ".join(target_names)
+    if not default_xcode_target and target_names:
+        default_xcode_target = sorted(target_names, reverse = True)[0]
+        print("No default Xcode version is set with 'xcode-select'; picking %s" %
+              default_xcode_target)
+    if default_xcode_target:
+        buildcontents += "\n  default = %s," % default_xcode_target
+
+    buildcontents += "\n)\n"
+    buildcontents += "available_xcodes(\n  name = 'host_available_xcodes',"
     if target_names:
         buildcontents += "\n  versions = [%s]," % ", ".join(target_names)
     if default_xcode_target:
-        buildcontents += "\n  default = ':%s'," % default_xcode_target
+        buildcontents += "\n  default = %s," % default_xcode_target
     buildcontents += "\n)\n"
+    if repository_ctx.attr.remote_xcode:
+        buildcontents += "xcode_config(name = 'all_xcodes',"
+        buildcontents += "\n  remote_versions = '%s', " % repository_ctx.attr.remote_xcode
+        buildcontents += "\n  local_versions = ':host_available_xcodes', "
+        buildcontents += "\n)\n"
     return buildcontents
 
 def _impl(repository_ctx):
@@ -244,12 +284,14 @@ xcode_autoconf = repository_rule(
     local = True,
     attrs = {
         "xcode_locator": attr.string(),
+        "remote_xcode": attr.string(),
     },
 )
 
-def xcode_configure(xcode_locator_label):
+def xcode_configure(xcode_locator_label, remote_xcode_label = None):
     """Generates a repository containing host xcode version information."""
     xcode_autoconf(
         name = "local_config_xcode",
         xcode_locator = xcode_locator_label,
+        remote_xcode = remote_xcode_label,
     )

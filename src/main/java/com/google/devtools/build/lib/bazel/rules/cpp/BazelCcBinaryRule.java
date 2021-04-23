@@ -15,7 +15,7 @@
 package com.google.devtools.build.lib.bazel.rules.cpp;
 
 import static com.google.devtools.build.lib.packages.Attribute.attr;
-import static com.google.devtools.build.lib.syntax.Type.BOOLEAN;
+import static com.google.devtools.build.lib.packages.Type.BOOLEAN;
 
 import com.google.devtools.build.lib.analysis.BaseRuleClasses;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
@@ -26,6 +26,7 @@ import com.google.devtools.build.lib.rules.cpp.CppConfiguration;
 
 /** Rule definition for cc_binary rules. */
 public final class BazelCcBinaryRule implements RuleDefinition {
+
   @Override
   public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
     return builder
@@ -46,9 +47,7 @@ public final class BazelCcBinaryRule implements RuleDefinition {
         /*<!-- #BLAZE_RULE(cc_binary).ATTRIBUTE(linkshared) -->
         Create a shared library.
         To enable this attribute, include <code>linkshared=True</code> in your rule. By default
-        this option is off. If you enable it, you must name your binary
-        <code>lib<i>foo</i>.so</code> (or whatever is the naming convention of libraries on the
-        target platform) for some sensible value of <i>foo</i>.
+        this option is off.
         <p>
           The presence of this flag means that linking occurs with the <code>-shared</code> flag
           to <code>gcc</code>, and the resulting shared library is suitable for loading into for

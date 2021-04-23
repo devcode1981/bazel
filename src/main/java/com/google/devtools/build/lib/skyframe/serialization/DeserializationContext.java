@@ -14,14 +14,17 @@
 
 package com.google.devtools.build.lib.skyframe.serialization;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableClassToInstanceMap;
 import com.google.devtools.build.lib.skyframe.serialization.Memoizer.Deserializer;
+import com.google.devtools.build.lib.skyframe.serialization.ObjectCodec.MemoizationStrategy;
 import com.google.devtools.build.lib.skyframe.serialization.ObjectCodecRegistry.CodecDescriptor;
 import com.google.protobuf.CodedInputStream;
 import java.io.IOException;
 import javax.annotation.CheckReturnValue;
+import javax.annotation.Nullable;
 
 /**
  * Stateful class for providing additional context to a single deserialization "session". This class
@@ -31,12 +34,12 @@ import javax.annotation.CheckReturnValue;
  */
 public class DeserializationContext {
   private final ObjectCodecRegistry registry;
-  private final ImmutableMap<Class<?>, Object> dependencies;
+  private final ImmutableClassToInstanceMap<Object> dependencies;
   private final Memoizer.Deserializer deserializer;
 
   private DeserializationContext(
       ObjectCodecRegistry registry,
-      ImmutableMap<Class<?>, Object> dependencies,
+      ImmutableClassToInstanceMap<Object> dependencies,
       Deserializer deserializer) {
     this.registry = registry;
     this.dependencies = dependencies;
@@ -45,25 +48,39 @@ public class DeserializationContext {
 
   @VisibleForTesting
   public DeserializationContext(
-      ObjectCodecRegistry registry, ImmutableMap<Class<?>, Object> dependencies) {
+      ObjectCodecRegistry registry, ImmutableClassToInstanceMap<Object> dependencies) {
     this(registry, dependencies, /*deserializer=*/ null);
   }
 
   @VisibleForTesting
-  public DeserializationContext(ImmutableMap<Class<?>, Object> dependencies) {
+  public DeserializationContext(ImmutableClassToInstanceMap<Object> dependencies) {
     this(AutoRegistry.get(), dependencies);
   }
 
   // TODO(shahan): consider making codedIn a member of this class.
-  @SuppressWarnings({"TypeParameterUnusedInFormals", "unchecked"})
+  @SuppressWarnings({"TypeParameterUnusedInFormals"})
   public <T> T deserialize(CodedInputStream codedIn) throws IOException, SerializationException {
+    return deserializeInternal(codedIn, /*customMemoizationStrategy=*/ null);
+  }
+
+  @SuppressWarnings({"TypeParameterUnusedInFormals"})
+  public <T> T deserializeWithAdHocMemoizationStrategy(
+      CodedInputStream codedIn, MemoizationStrategy memoizationStrategy)
+      throws IOException, SerializationException {
+    return deserializeInternal(codedIn, memoizationStrategy);
+  }
+
+  @SuppressWarnings({"TypeParameterUnusedInFormals", "unchecked"})
+  private <T> T deserializeInternal(
+      CodedInputStream codedIn, @Nullable MemoizationStrategy customMemoizationStrategy)
+      throws IOException, SerializationException {
     int tag = codedIn.readSInt32();
     if (tag == 0) {
       return null;
     }
     if (tag < 0) {
       // Subtract 1 to undo transformation from SerializationContext to avoid null.
-      return (T) deserializer.getMemoized(-tag - 1);
+      return (T) deserializer.getMemoized(-tag - 1); // unchecked cast
     }
     T constant = (T) registry.maybeGetConstantByTag(tag);
     if (constant != null) {
@@ -71,11 +88,16 @@ public class DeserializationContext {
     }
     CodecDescriptor codecDescriptor = registry.getCodecDescriptorByTag(tag);
     if (deserializer == null) {
-      return (T) codecDescriptor.deserialize(this, codedIn);
+      return (T) codecDescriptor.deserialize(this, codedIn); // unchecked cast
     } else {
-      return deserializer.deserialize(this, (ObjectCodec<T>) codecDescriptor.getCodec(), codedIn);
+      @SuppressWarnings("unchecked")
+      ObjectCodec<T> castCodec = (ObjectCodec<T>) codecDescriptor.getCodec();
+      MemoizationStrategy memoizationStrategy =
+          customMemoizationStrategy != null ? customMemoizationStrategy : castCodec.getStrategy();
+      return deserializer.deserialize(this, castCodec, memoizationStrategy, codedIn);
     }
   }
+
 
   /**
    * Register an initial value for the currently deserializing value, for use by child objects that
@@ -90,10 +112,8 @@ public class DeserializationContext {
     deserializer.registerInitialValue(initialValue);
   }
 
-  @SuppressWarnings("unchecked")
   public <T> T getDependency(Class<T> type) {
-    Preconditions.checkNotNull(type);
-    return (T) dependencies.get(type);
+    return checkNotNull(dependencies.getInstance(type), "Missing dependency of type %s", type);
   }
 
   /**

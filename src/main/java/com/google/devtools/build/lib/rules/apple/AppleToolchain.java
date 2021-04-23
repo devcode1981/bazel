@@ -19,7 +19,6 @@ import static com.google.devtools.build.lib.packages.BuildType.LABEL;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
-import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
 import com.google.devtools.build.lib.cmdline.Label;
@@ -28,7 +27,7 @@ import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.Attribute.LabelLateBoundDefault;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
-import com.google.devtools.build.lib.skylarkbuildapi.apple.AppleToolchainApi;
+import com.google.devtools.build.lib.starlarkbuildapi.apple.AppleToolchainApi;
 import java.io.Serializable;
 
 /**
@@ -91,13 +90,6 @@ public class AppleToolchain implements AppleToolchainApi<AppleConfiguration> {
   }
 
   /**
-   * Returns the platform frameworks directory inside of Xcode for a given configuration.
-   */
-  public static String platformDeveloperFrameworkDir(AppleConfiguration configuration) {
-    return platformDeveloperFrameworkDir(configuration.getSingleArchPlatform());
-  }
-
-  /**
    * Returns the platform frameworks directory inside of Xcode for a given {@link ApplePlatform}.
    */
   public static String platformDeveloperFrameworkDir(ApplePlatform platform) {
@@ -106,14 +98,15 @@ public class AppleToolchain implements AppleToolchainApi<AppleConfiguration> {
   }
 
   /** Returns the SDK frameworks directory inside of Xcode for a given configuration. */
-  public static String sdkFrameworkDir(
-      ApplePlatform targetPlatform, RuleContext ruleContext) {
+  public static String sdkFrameworkDir(ApplePlatform targetPlatform, XcodeConfigInfo xcodeConfig) {
     String relativePath;
     switch (targetPlatform) {
       case IOS_DEVICE:
       case IOS_SIMULATOR:
-        if (XcodeConfig.getSdkVersionForPlatform(ruleContext, targetPlatform)
-            .compareTo(DottedVersion.fromString("9.0")) >= 0) {
+        if (xcodeConfig
+                .getSdkVersionForPlatform(targetPlatform)
+                .compareTo(DottedVersion.fromStringUnchecked("9.0"))
+            >= 0) {
           relativePath = SYSTEM_FRAMEWORK_PATH;
         } else {
           relativePath = DEVELOPER_FRAMEWORK_PATH;
@@ -124,6 +117,7 @@ public class AppleToolchain implements AppleToolchainApi<AppleConfiguration> {
       case WATCHOS_SIMULATOR:
       case TVOS_DEVICE:
       case TVOS_SIMULATOR:
+      case CATALYST:
         relativePath = SYSTEM_FRAMEWORK_PATH;
         break;
       default:
@@ -141,6 +135,11 @@ public class AppleToolchain implements AppleToolchainApi<AppleConfiguration> {
             toolsRepository + AppleCommandLineOptions.DEFAULT_XCODE_VERSION_CONFIG_LABEL),
         (Attribute.LateBoundDefault.Resolver<AppleConfiguration, Label> & Serializable)
             (rule, attributes, appleConfig) -> appleConfig.getXcodeConfigLabel());
+  }
+
+  @Override
+  public boolean isImmutable() {
+    return true; // immutable and Starlark-hashable
   }
 
   /**
@@ -164,7 +163,7 @@ public class AppleToolchain implements AppleToolchainApi<AppleConfiguration> {
    */
   @Override
   public String platformFrameworkDirFromConfig(AppleConfiguration configuration) {
-    return platformDeveloperFrameworkDir(configuration);
+    return platformDeveloperFrameworkDir(configuration.getSingleArchPlatform());
   }
 
   /**

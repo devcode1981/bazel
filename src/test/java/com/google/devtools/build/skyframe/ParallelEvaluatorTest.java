@@ -19,6 +19,7 @@ import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.devtools.build.lib.testutil.EventIterableSubjectFactory.assertThatEvents;
 import static com.google.devtools.build.skyframe.EvaluationResultSubjectFactory.assertThatEvaluationResult;
 import static com.google.devtools.build.skyframe.GraphTester.CONCATENATE;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.fail;
 
 import com.google.common.base.Preconditions;
@@ -30,6 +31,10 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.google.common.eventbus.EventBus;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.ListeningExecutorService;
+import com.google.common.util.concurrent.MoreExecutors;
+import com.google.common.util.concurrent.SettableFuture;
 import com.google.common.util.concurrent.Uninterruptibles;
 import com.google.devtools.build.lib.concurrent.AbstractQueueVisitor;
 import com.google.devtools.build.lib.concurrent.BlazeInterners;
@@ -52,6 +57,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -94,7 +101,7 @@ public class ParallelEvaluatorTest {
 
   private ParallelEvaluator makeEvaluator(
       ProcessableGraph graph,
-      ImmutableMap<SkyFunctionName, ? extends SkyFunction> builders,
+      ImmutableMap<SkyFunctionName, SkyFunction> builders,
       boolean keepGoing,
       EventFilter storedEventFilter) {
     Version oldGraphVersion = graphVersion;
@@ -115,8 +122,10 @@ public class ParallelEvaluatorTest {
         EvaluationVersionBehavior.MAX_CHILD_VERSIONS);
   }
 
-  private ParallelEvaluator makeEvaluator(ProcessableGraph graph,
-      ImmutableMap<SkyFunctionName, ? extends SkyFunction> builders, boolean keepGoing) {
+  private ParallelEvaluator makeEvaluator(
+      ProcessableGraph graph,
+      ImmutableMap<SkyFunctionName, SkyFunction> builders,
+      boolean keepGoing) {
     return makeEvaluator(graph, builders, keepGoing,
         InMemoryMemoizingEvaluator.DEFAULT_STORED_EVENT_FILTER);
   }
@@ -124,10 +133,6 @@ public class ParallelEvaluatorTest {
   /** Convenience method for eval-ing a single value. */
   protected SkyValue eval(boolean keepGoing, SkyKey key) throws InterruptedException {
     return eval(keepGoing, ImmutableList.of(key)).get(key);
-  }
-
-  protected ErrorInfo evalValueInError(SkyKey key) throws InterruptedException {
-    return eval(true, ImmutableList.of(key)).getError(key);
   }
 
   protected <T extends SkyValue> EvaluationResult<T> eval(boolean keepGoing, SkyKey... keys)
@@ -139,6 +144,10 @@ public class ParallelEvaluatorTest {
       throws InterruptedException {
     ParallelEvaluator evaluator = makeEvaluator(graph, tester.getSkyFunctionMap(), keepGoing);
     return evaluator.eval(keys);
+  }
+
+  protected ErrorInfo evalValueInError(SkyKey key) throws InterruptedException {
+    return eval(true, ImmutableList.of(key)).getError(key);
   }
 
   protected GraphTester.TestFunction set(String name, String value) {
@@ -155,6 +164,155 @@ public class ParallelEvaluatorTest {
     assertThat(value.getValue()).isEqualTo("ab");
     assertThat(storedEventHandler.getEvents()).isEmpty();
     assertThat(storedEventHandler.getPosts()).isEmpty();
+  }
+
+  @Test
+  public void enqueueDoneFuture() throws Exception {
+    final SkyKey parentKey = GraphTester.toSkyKey("parentKey");
+    tester
+        .getOrCreate(parentKey)
+        .setBuilder(
+            new SkyFunction() {
+              @Override
+              public SkyValue compute(SkyKey skyKey, Environment env) throws InterruptedException {
+                SettableFuture<SkyValue> future = SettableFuture.create();
+                future.set(new StringValue("good"));
+                env.dependOnFuture(future);
+                assertThat(env.valuesMissing()).isFalse();
+                try {
+                  return future.get();
+                } catch (ExecutionException e) {
+                  throw new RuntimeException(e);
+                }
+              }
+
+              @Override
+              public String extractTag(SkyKey skyKey) {
+                return null;
+              }
+            });
+    graph = new InMemoryGraphImpl();
+    EvaluationResult<StringValue> result = eval(/*keepGoing=*/ false, ImmutableList.of(parentKey));
+    assertThat(result.hasError()).isFalse();
+    assertThat(result.get(parentKey)).isEqualTo(new StringValue("good"));
+  }
+
+  @Test
+  public void enqueueBadFuture() throws Exception {
+    final SkyKey parentKey = GraphTester.toSkyKey("parentKey");
+    final CountDownLatch doneLatch = new CountDownLatch(1);
+    final ListeningExecutorService executor =
+        MoreExecutors.listeningDecorator(Executors.newFixedThreadPool(1));
+    tester
+        .getOrCreate(parentKey)
+        .setBuilder(
+            new SkyFunction() {
+              private ListenableFuture<SkyValue> future;
+
+              @Override
+              public SkyValue compute(SkyKey skyKey, Environment env) throws InterruptedException {
+                if (future == null) {
+                  future =
+                      executor.submit(
+                          () -> {
+                            doneLatch.await();
+                            throw new UnsupportedOperationException();
+                          });
+                  env.dependOnFuture(future);
+                  assertThat(env.valuesMissing()).isTrue();
+                  return null;
+                }
+                assertThat(future.isDone()).isTrue();
+                ExecutionException expected =
+                    assertThrows(ExecutionException.class, () -> future.get());
+                assertThat(expected.getCause()).isInstanceOf(UnsupportedOperationException.class);
+                return new StringValue("Caught!");
+              }
+
+              @Override
+              public String extractTag(SkyKey skyKey) {
+                return null;
+              }
+            });
+    graph =
+        NotifyingHelper.makeNotifyingTransformer(
+                new Listener() {
+                  @Override
+                  public void accept(SkyKey key, EventType type, Order order, Object context) {
+                    // NodeEntry.addExternalDep is called as part of bookkeeping at the end of
+                    // AbstractParallelEvaluator.Evaluate#run.
+                    if (key == parentKey && type == EventType.ADD_EXTERNAL_DEP) {
+                      doneLatch.countDown();
+                    }
+                  }
+                })
+            .transform(new InMemoryGraphImpl());
+    EvaluationResult<StringValue> result = eval(/*keepGoing=*/ false, ImmutableList.of(parentKey));
+    assertThat(result.hasError()).isFalse();
+    assertThat(result.get(parentKey)).isEqualTo(new StringValue("Caught!"));
+  }
+
+  @Test
+  public void dependsOnKeyAndFuture() throws Exception {
+    final SkyKey parentKey = GraphTester.toSkyKey("parentKey");
+    final SkyKey childKey = GraphTester.toSkyKey("childKey");
+    final CountDownLatch doneLatch = new CountDownLatch(1);
+    tester.getOrCreate(childKey).setConstantValue(new StringValue("child"));
+    tester
+        .getOrCreate(parentKey)
+        .setBuilder(
+            new SkyFunction() {
+              private SettableFuture<SkyValue> future;
+
+              @Override
+              public SkyValue compute(SkyKey skyKey, Environment env) throws InterruptedException {
+                SkyValue child = env.getValue(childKey);
+                if (future == null) {
+                  assertThat(child).isNull();
+                  future = SettableFuture.create();
+                  env.dependOnFuture(future);
+                  assertThat(env.valuesMissing()).isTrue();
+                  new Thread(
+                          () -> {
+                            try {
+                              doneLatch.await();
+                            } catch (InterruptedException e) {
+                              throw new RuntimeException(e);
+                            }
+                            future.set(new StringValue("future"));
+                          })
+                      .start();
+                  return null;
+                }
+                assertThat(child).isEqualTo(new StringValue("child"));
+                assertThat(future.isDone()).isTrue();
+                try {
+                  assertThat(future.get()).isEqualTo(new StringValue("future"));
+                } catch (ExecutionException e) {
+                  throw new RuntimeException(e);
+                }
+                return new StringValue("All done!");
+              }
+
+              @Override
+              public String extractTag(SkyKey skyKey) {
+                return null;
+              }
+            });
+    graph =
+        NotifyingHelper.makeNotifyingTransformer(
+                new Listener() {
+                  @Override
+                  public void accept(SkyKey key, EventType type, Order order, Object context) {
+                    if (key == childKey && type == EventType.SET_VALUE) {
+                      doneLatch.countDown();
+                    }
+                  }
+                })
+            .transform(new InMemoryGraphImpl());
+    EvaluationResult<StringValue> result = eval(/*keepGoing=*/ false, ImmutableList.of(parentKey));
+    assertThat(result.hasError()).isFalse();
+    assertThat(result.get(parentKey)).isEqualTo(new StringValue("All done!"));
   }
 
   /**
@@ -239,7 +397,7 @@ public class ParallelEvaluatorTest {
       throws InterruptedException {
     // This is a regression test for a crash bug in
     // AbstractExceptionalParallelEvaluator#doMutatingEvaluation in a very specific window of time
-    // inbetween enqueueing one top-level node for evaluation and checking if another top-level node
+    // between enqueueing one top-level node for evaluation and checking if another top-level node
     // is done.
 
     // When we have two top-level nodes, A and B,
@@ -296,17 +454,11 @@ public class ParallelEvaluatorTest {
 
     // And we have a dedicated thread that kicks off the evaluation of A and B together (in that
     // order).
-    TestThread evalThread = new TestThread() {
-      @Override
-      public void runTest() throws Exception {
-        try {
-          eval(/*keepGoing=*/true, keyA, keyB);
-          fail();
-        } catch (InterruptedException e) {
-          // Expected.
-        }
-      }
-    };
+    TestThread evalThread =
+        new TestThread(
+            () ->
+                assertThrows(
+                    InterruptedException.class, () -> eval(/*keepGoing=*/ true, keyA, keyB)));
 
     // Then when we start that thread,
     evalThread.start();
@@ -355,27 +507,22 @@ public class ParallelEvaluatorTest {
     final Set<SkyKey> receivedValues = Sets.newConcurrentHashSet();
     revalidationReceiver =
         new DirtyTrackingProgressReceiver(
-            new EvaluationProgressReceiver.NullEvaluationProgressReceiver() {
+            new EvaluationProgressReceiver() {
               @Override
               public void evaluated(
                   SkyKey skyKey,
-                  @Nullable SkyValue value,
+                  @Nullable SkyValue newValue,
+                  @Nullable ErrorInfo newError,
                   Supplier<EvaluationSuccessState> evaluationSuccessState,
                   EvaluationState state) {
                 receivedValues.add(skyKey);
               }
             });
-    TestThread evalThread = new TestThread() {
-      @Override
-      public void runTest() throws Exception {
-        try {
-          eval(/*keepGoing=*/true, waitKey, fastKey);
-          fail();
-        } catch (InterruptedException e) {
-          // Expected.
-        }
-      }
-    };
+    TestThread evalThread =
+        new TestThread(
+            () ->
+                assertThrows(
+                    InterruptedException.class, () -> eval(/*keepGoing=*/ true, waitKey, fastKey)));
     evalThread.start();
     assertThat(allValuesReady.await(TestUtils.WAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue();
     evalThread.interrupt();
@@ -502,15 +649,12 @@ public class ParallelEvaluatorTest {
             new InMemoryGraphImpl(), ImmutableMap.of(GraphTester.NODE_TYPE, builder), false);
 
     SkyKey valueToEval = GraphTester.toSkyKey("a");
-    try {
-      evaluator.eval(ImmutableList.of(valueToEval));
-      fail("Expected RuntimeException");
-    } catch (RuntimeException re) {
-      assertThat(re)
-          .hasMessageThat()
-          .contains("Unrecoverable error while evaluating node '" + valueToEval.toString() + "'");
-      assertThat(re).hasCauseThat().isInstanceOf(CustomRuntimeException.class);
-    }
+    RuntimeException re =
+        assertThrows(RuntimeException.class, () -> evaluator.eval(ImmutableList.of(valueToEval)));
+    assertThat(re)
+        .hasMessageThat()
+        .contains("Unrecoverable error while evaluating node '" + valueToEval.toString() + "'");
+    assertThat(re).hasCauseThat().isInstanceOf(CustomRuntimeException.class);
   }
 
   @Test
@@ -684,8 +828,7 @@ public class ParallelEvaluatorTest {
     tester.getOrCreate(parentErrorKey).addDependency("a").addDependency(errorKey)
     .setComputedValue(CONCATENATE);
     tester.getOrCreate(errorKey).setHasError(true);
-    ErrorInfo error = evalValueInError(parentErrorKey);
-    assertThat(error.getRootCauses()).containsExactly(errorKey);
+    evalValueInError(parentErrorKey);
   }
 
   @Test
@@ -702,10 +845,8 @@ public class ParallelEvaluatorTest {
     tester.getOrCreate(errorFreeKey).addDependency("a").addDependency("b")
     .setComputedValue(CONCATENATE);
     EvaluationResult<StringValue> result = eval(true, parentErrorKey, errorFreeKey);
-    ErrorInfo error = result.getError(parentErrorKey);
-    assertThat(error.getRootCauses()).containsExactly(errorKey);
-    StringValue abValue = result.get(errorFreeKey);
-    assertThat(abValue.getValue()).isEqualTo("ab");
+    assertThatEvaluationResult(result).hasErrorEntryForKeyThat(parentErrorKey);
+    assertThatEvaluationResult(result).hasEntryThat(errorFreeKey).isEqualTo(new StringValue("ab"));
   }
 
   @Test
@@ -770,11 +911,42 @@ public class ParallelEvaluatorTest {
     SkyKey topKey = GraphTester.toSkyKey("top");
     tester.getOrCreate(topKey).addDependency(catastropheKey).setComputedValue(CONCATENATE);
     EvaluationResult<StringValue> result = eval(keepGoing, topKey, otherKey);
-    ErrorInfo error = result.getError(topKey);
-    assertThat(error.getRootCauses()).containsExactly(catastropheKey);
+    assertThatEvaluationResult(result).hasErrorEntryForKeyThat(topKey);
     if (keepGoing) {
-      assertThat(result.getCatastrophe()).isSameAs(catastrophe);
+      assertThat(result.getCatastrophe()).isSameInstanceAs(catastrophe);
     }
+  }
+
+  @Test
+  public void topCatastrophe() throws Exception {
+    graph = new InMemoryGraphImpl();
+    SkyKey catastropheKey = GraphTester.toSkyKey("catastrophe");
+    Exception catastrophe = new SomeErrorException("bad");
+    tester
+        .getOrCreate(catastropheKey)
+        .setBuilder(
+            new SkyFunction() {
+              @Nullable
+              @Override
+              public SkyValue compute(SkyKey skyKey, Environment env) throws SkyFunctionException {
+                throw new SkyFunctionException(catastrophe, Transience.PERSISTENT) {
+                  @Override
+                  public boolean isCatastrophic() {
+                    return true;
+                  }
+                };
+              }
+
+              @Nullable
+              @Override
+              public String extractTag(SkyKey skyKey) {
+                return null;
+              }
+            });
+
+    EvaluationResult<StringValue> result =
+        eval(/*keepGoing=*/ true, ImmutableList.of(catastropheKey));
+    assertThat(result.getCatastrophe()).isEqualTo(catastrophe);
   }
 
   @Test
@@ -861,12 +1033,8 @@ public class ParallelEvaluatorTest {
     EvaluationResult<StringValue> result = eval(/*keepGoing=*/true, parentKey, childKey);
     // Child is guaranteed to complete successfully before parent can run (and fail),
     // since parent depends on it.
-    StringValue childValue = result.get(childKey);
-    assertThat(childValue).isNotNull();
-    assertThat(childValue.getValue()).isEqualTo("onions");
-    ErrorInfo error = result.getError(parentKey);
-    assertThat(error).isNotNull();
-    assertThat(error.getRootCauses()).containsExactly(parentKey);
+    assertThatEvaluationResult(result).hasEntryThat(childKey).isEqualTo(new StringValue("onions"));
+    assertThatEvaluationResult(result).hasErrorEntryForKeyThat(parentKey);
   }
 
   @Test
@@ -874,12 +1042,10 @@ public class ParallelEvaluatorTest {
     graph = new InMemoryGraphImpl();
     SkyKey errorKey = GraphTester.toSkyKey("error");
     tester.getOrCreate(errorKey).setHasError(true);
-    ErrorInfo error = evalValueInError(errorKey);
-    assertThat(error.getRootCauses()).containsExactly(errorKey);
+    evalValueInError(errorKey);
     SkyKey parentKey = GraphTester.toSkyKey("parent");
     tester.getOrCreate(parentKey).addDependency("error").setComputedValue(CONCATENATE);
-    error = evalValueInError(parentKey);
-    assertThat(error.getRootCauses()).containsExactly(errorKey);
+    evalValueInError(parentKey);
   }
 
   @Test
@@ -890,8 +1056,7 @@ public class ParallelEvaluatorTest {
     tester.getOrCreate(errorKey).setHasError(true);
     tester.getOrCreate("mid").addDependency(errorKey).setComputedValue(CONCATENATE);
     tester.getOrCreate(parentKey).addDependency("mid").setComputedValue(CONCATENATE);
-    ErrorInfo error = evalValueInError(parentKey);
-    assertThat(error.getRootCauses()).containsExactly(errorKey);
+    evalValueInError(parentKey);
   }
 
   @Test
@@ -933,8 +1098,7 @@ public class ParallelEvaluatorTest {
     tester.getOrCreate(parentKey)
       .addDependency("mid").addDependency(errorKey2).addDependency(errorKey3)
       .setComputedValue(CONCATENATE);
-    ErrorInfo error = evalValueInError(parentKey);
-    assertThat(error.getRootCauses()).containsExactly(errorKey, errorKey2, errorKey3);
+    evalValueInError(parentKey);
   }
 
   @Test
@@ -946,9 +1110,7 @@ public class ParallelEvaluatorTest {
     tester.getOrCreate("mid").addDependency(errorKey).setComputedValue(CONCATENATE);
     tester.getOrCreate(parentKey).addDependency("mid").setComputedValue(CONCATENATE);
     EvaluationResult<StringValue> result = eval(false, ImmutableList.of(parentKey));
-    Map.Entry<SkyKey, ErrorInfo> error = Iterables.getOnlyElement(result.errorMap().entrySet());
-    assertThat(error.getKey()).isEqualTo(parentKey);
-    assertThat(error.getValue().getRootCauses()).containsExactly(errorKey);
+    assertThatEvaluationResult(result).hasSingletonErrorThat(parentKey);
   }
 
   @Test
@@ -982,13 +1144,14 @@ public class ParallelEvaluatorTest {
     tester.getOrCreate(errorKey).setHasError(true);
     SkyKey parentKey = GraphTester.toSkyKey("parent");
     tester.getOrCreate(parentKey).addDependency(errorKey);
-    ErrorInfo error = evalValueInError(parentKey);
-    assertThat(error.getRootCauses()).containsExactly(errorKey);
+    evalValueInError(parentKey);
     SkyKey[] list = { parentKey };
     EvaluationResult<StringValue> result = eval(false, list);
-    ErrorInfo errorInfo = result.getError();
-    assertThat(errorInfo.getRootCauses()).containsExactly(errorKey);
-    assertThat(errorInfo.getException()).hasMessageThat().isEqualTo(errorKey.toString());
+    assertThatEvaluationResult(result)
+        .hasSingletonErrorThat(parentKey)
+        .hasExceptionThat()
+        .hasMessageThat()
+        .isEqualTo(errorKey.toString());
   }
 
   @Test
@@ -1262,18 +1425,12 @@ public class ParallelEvaluatorTest {
     SkyKey errorKey = GraphTester.toSkyKey("my_error_value");
     tester.getOrCreate(errorKey).setHasError(true);
     EvaluationResult<StringValue> result = eval(false, ImmutableList.of(errorKey));
-    assertThat(result.keyNames()).isEmpty();
-    assertThat(result.errorMap().keySet()).containsExactly(errorKey);
-    ErrorInfo errorInfo = result.getError();
-    assertThat(errorInfo.getRootCauses()).containsExactly(errorKey);
+    assertThatEvaluationResult(result).hasSingletonErrorThat(errorKey);
     // Update value. But builder won't rebuild it.
     tester.getOrCreate(errorKey).setHasError(false);
     tester.set(errorKey, new StringValue("no error?"));
     result = eval(false, ImmutableList.of(errorKey));
-    assertThat(result.keyNames()).isEmpty();
-    assertThat(result.errorMap().keySet()).containsExactly(errorKey);
-    errorInfo = result.getError();
-    assertThat(errorInfo.getRootCauses()).containsExactly(errorKey);
+    assertThatEvaluationResult(result).hasSingletonErrorThat(errorKey);
   }
 
   /**
@@ -1393,18 +1550,12 @@ public class ParallelEvaluatorTest {
     SkyKey errorKey = GraphTester.toSkyKey("my_error_value");
     tester.getOrCreate(errorKey).setHasError(true);
     EvaluationResult<StringValue> result = eval(true, ImmutableList.of(errorKey));
-    assertThat(result.keyNames()).isEmpty();
-    assertThat(result.errorMap().keySet()).containsExactly(errorKey);
-    ErrorInfo errorInfo = result.getError();
-    assertThat(errorInfo.getRootCauses()).containsExactly(errorKey);
+    assertThatEvaluationResult(result).hasSingletonErrorThat(errorKey);
     // Update value. But builder won't rebuild it.
     tester.getOrCreate(errorKey).setHasError(false);
     tester.set(errorKey, new StringValue("no error?"));
     result = eval(true, ImmutableList.of(errorKey));
-    assertThat(result.keyNames()).isEmpty();
-    assertThat(result.errorMap().keySet()).containsExactly(errorKey);
-    errorInfo = result.getError();
-    assertThat(errorInfo.getRootCauses()).containsExactly(errorKey);
+    assertThatEvaluationResult(result).hasSingletonErrorThat(errorKey);
   }
 
   @Test
@@ -1420,10 +1571,7 @@ public class ParallelEvaluatorTest {
     assertThat(result.errorMap()).isEmpty();
     assertThat(result.get(parentKey).getValue()).isEqualTo("recoveredafter");
     result = eval(/*keepGoing=*/false, ImmutableList.of(parentKey));
-    assertThat(result.keyNames()).isEmpty();
-    Map.Entry<SkyKey, ErrorInfo> error = Iterables.getOnlyElement(result.errorMap().entrySet());
-    assertThat(error.getKey()).isEqualTo(parentKey);
-    assertThat(error.getValue().getRootCauses()).containsExactly(errorKey);
+    assertThatEvaluationResult(result).hasSingletonErrorThat(parentKey);
   }
 
   @Test
@@ -1436,10 +1584,7 @@ public class ParallelEvaluatorTest {
         .setHasError(true);
     EvaluationResult<StringValue> result = eval(
         /*keepGoing=*/false, ImmutableList.of(parentErrorKey));
-    assertThat(result.keyNames()).isEmpty();
-    Map.Entry<SkyKey, ErrorInfo> error = Iterables.getOnlyElement(result.errorMap().entrySet());
-    assertThat(error.getKey()).isEqualTo(parentErrorKey);
-    assertThat(error.getValue().getRootCauses()).containsExactly(parentErrorKey);
+    assertThatEvaluationResult(result).hasSingletonErrorThat(parentErrorKey);
   }
 
   @Test
@@ -1452,10 +1597,7 @@ public class ParallelEvaluatorTest {
         .setHasError(true);
     EvaluationResult<StringValue> result = eval(
         /*keepGoing=*/true, ImmutableList.of(parentErrorKey));
-    assertThat(result.keyNames()).isEmpty();
-    Map.Entry<SkyKey, ErrorInfo> error = Iterables.getOnlyElement(result.errorMap().entrySet());
-    assertThat(error.getKey()).isEqualTo(parentErrorKey);
-    assertThat(error.getValue().getRootCauses()).containsExactly(parentErrorKey);
+    assertThatEvaluationResult(result).hasSingletonErrorThat(parentErrorKey);
   }
 
   @Test
@@ -1489,10 +1631,7 @@ public class ParallelEvaluatorTest {
     tester.getOrCreate(topKey).addDependency(parentErrorKey).addDependency("after")
         .setComputedValue(CONCATENATE);
     EvaluationResult<StringValue> result = eval(/*keepGoing=*/false, ImmutableList.of(topKey));
-    assertThat(result.keyNames()).isEmpty();
-    Map.Entry<SkyKey, ErrorInfo> error = Iterables.getOnlyElement(result.errorMap().entrySet());
-    assertThat(error.getKey()).isEqualTo(topKey);
-    assertThat(error.getValue().getRootCauses()).containsExactly(errorKey);
+    assertThatEvaluationResult(result).hasSingletonErrorThat(topKey);
   }
 
   @Test
@@ -1547,7 +1686,7 @@ public class ParallelEvaluatorTest {
     assertThatEvaluationResult(result2)
         .hasErrorEntryForKeyThat(topKey)
         .hasExceptionThat()
-        .isSameAs(topException);
+        .isSameInstanceAs(topException);
     assertThat(numComputes.get()).isEqualTo(2);
   }
 
@@ -1603,16 +1742,11 @@ public class ParallelEvaluatorTest {
         null, /*waitForException=*/false, null, ImmutableSet.<SkyKey>of()));
 
     EvaluationResult<StringValue> result = eval(keepGoing, ImmutableSet.of(topKey));
-    assertThat(result.errorMap().keySet()).containsExactly(topKey);
-    Iterable<CycleInfo> cycleInfos = result.getError(topKey).getCycleInfo();
-    if (keepGoing) {
-      // The error thrown will only be recorded in keep_going mode.
-      assertThat(result.getError().getRootCauses()).containsExactly(errorKey);
-    }
-    assertThat(cycleInfos).isNotEmpty();
-    CycleInfo cycleInfo = Iterables.getOnlyElement(cycleInfos);
-    assertThat(cycleInfo.getPathToCycle()).containsExactly(topKey);
-    assertThat(cycleInfo.getCycle()).containsExactly(midKey, cycleKey);
+    assertThatEvaluationResult(result)
+        .hasSingletonErrorThat(topKey)
+        .hasCycleInfoThat()
+        .containsExactly(
+            new CycleInfo(ImmutableList.of(topKey), ImmutableList.of(midKey, cycleKey)));
   }
 
   @Test
@@ -1704,16 +1838,13 @@ public class ParallelEvaluatorTest {
     EvaluationResult<StringValue> result =
         eval(keepGoing, ImmutableSet.of(topKey, otherTop));
     if (keepGoing) {
-      assertThat(result.errorMap().keySet()).containsExactly(otherTop, topKey);
-      assertThat(result.getError(otherTop).getRootCauses()).containsExactly(otherTop);
-      // The error thrown will only be recorded in keep_going mode.
-      assertThat(result.getError(topKey).getRootCauses()).containsExactly(errorKey);
+      assertThatEvaluationResult(result).hasErrorMapThat().hasSize(2);
     }
-    Iterable<CycleInfo> cycleInfos = result.getError(topKey).getCycleInfo();
-    assertThat(cycleInfos).isNotEmpty();
-    CycleInfo cycleInfo = Iterables.getOnlyElement(cycleInfos);
-    assertThat(cycleInfo.getPathToCycle()).containsExactly(topKey);
-    assertThat(cycleInfo.getCycle()).containsExactly(midKey, cycleKey);
+    assertThatEvaluationResult(result)
+        .hasErrorEntryForKeyThat(topKey)
+        .hasCycleInfoThat()
+        .containsExactly(
+            new CycleInfo(ImmutableList.of(topKey), ImmutableList.of(midKey, cycleKey)));
   }
 
   @Test
@@ -1757,17 +1888,16 @@ public class ParallelEvaluatorTest {
             PARENT_TYPE, new ParentFunction());
     ParallelEvaluator evaluator = makeEvaluator(new InMemoryGraphImpl(), skyFunctions, false);
 
-    try {
-      evaluator.eval(ImmutableList.of(ParentKey.create("octodad")));
-      fail();
-    } catch (RuntimeException e) {
-      assertThat(e).hasCauseThat().hasMessageThat().isEqualTo("I WANT A PONY!!!");
-      assertThat(e)
-          .hasMessageThat()
-          .isEqualTo(
-              "Unrecoverable error while evaluating node 'child:billy the kid' "
-                  + "(requested by nodes 'parent:octodad')");
-    }
+    RuntimeException e =
+        assertThrows(
+            RuntimeException.class,
+            () -> evaluator.eval(ImmutableList.of(ParentKey.create("octodad"))));
+    assertThat(e).hasCauseThat().hasMessageThat().isEqualTo("I WANT A PONY!!!");
+    assertThat(e)
+        .hasMessageThat()
+        .isEqualTo(
+            "Unrecoverable error while evaluating node 'child:billy the kid' "
+                + "(requested by nodes 'parent:octodad')");
   }
 
   private static class SomeOtherErrorException extends Exception {
@@ -1795,9 +1925,7 @@ public class ParallelEvaluatorTest {
     tester.getOrCreate(topKey).addErrorDependency(errorKey, new StringValue("recovered"))
         .setComputedValue(CONCATENATE);
     EvaluationResult<StringValue> result = eval(keepGoing, ImmutableList.of(topKey));
-    assertThat(result.keyNames()).isEmpty();
-    assertThat(result.getError(topKey).getException()).isSameAs(exception);
-    assertThat(result.getError(topKey).getRootCauses()).containsExactly(errorKey);
+    assertThatEvaluationResult(result).hasSingletonErrorThat(topKey);
   }
 
   /**
@@ -1865,13 +1993,10 @@ public class ParallelEvaluatorTest {
         .setComputedValue(CONCATENATE);
     EvaluationResult<StringValue> result = eval(keepGoing, ImmutableList.of(topKey));
     if (!keepGoing) {
-      assertThat(result.keyNames()).isEmpty();
-      assertThat(result.getError(topKey).getException()).isEqualTo(topException);
-      assertThat(result.getError(topKey).getRootCauses()).containsExactly(topKey);
-      assertThatEvaluationResult(result).hasError();
+      assertThatEvaluationResult(result).hasSingletonErrorThat(topKey);
     } else {
       assertThatEvaluationResult(result).hasNoError();
-      assertThat(result.get(topKey)).isSameAs(topValue);
+      assertThatEvaluationResult(result).hasEntryThat(topKey).isSameInstanceAs(topValue);
     }
   }
 
@@ -2071,7 +2196,7 @@ public class ParallelEvaluatorTest {
     int numUniqueCycles = 0;
     CycleDeduper<SkyKey> cycleDeduper = new CycleDeduper<SkyKey>();
     for (ImmutableList<SkyKey> cycle : cycles) {
-      if (cycleDeduper.seen(cycle)) {
+      if (!cycleDeduper.alreadySeen(cycle)) {
         numUniqueCycles++;
       }
     }
@@ -2083,7 +2208,7 @@ public class ParallelEvaluatorTest {
     final Set<SkyKey> enqueuedValues = Sets.newConcurrentHashSet();
     final Set<SkyKey> evaluatedValues = Sets.newConcurrentHashSet();
     EvaluationProgressReceiver progressReceiver =
-        new EvaluationProgressReceiver.NullEvaluationProgressReceiver() {
+        new EvaluationProgressReceiver() {
           @Override
           public void enqueueing(SkyKey skyKey) {
             enqueuedValues.add(skyKey);
@@ -2092,7 +2217,8 @@ public class ParallelEvaluatorTest {
           @Override
           public void evaluated(
               SkyKey skyKey,
-              @Nullable SkyValue value,
+              @Nullable SkyValue newValue,
+              @Nullable ErrorInfo newError,
               Supplier<EvaluationSuccessState> evaluationSuccessState,
               EvaluationState state) {
             evaluatedValues.add(skyKey);
@@ -2131,7 +2257,7 @@ public class ParallelEvaluatorTest {
         EvaluationContext.newBuilder()
             .setKeepGoing(false)
             .setNumThreads(200)
-            .setEventHander(reporter)
+            .setEventHandler(reporter)
             .build();
     driver.evaluate(ImmutableList.of(GraphTester.toSkyKey("top1")), evaluationContext);
     assertThat(enqueuedValues).containsExactlyElementsIn(
@@ -2218,8 +2344,7 @@ public class ParallelEvaluatorTest {
     }
     EvaluationResult<StringValue> result = eval(/*keepGoing=*/false, ImmutableList.of(parentKey));
     assertThat(numParentInvocations.get()).isEqualTo(2);
-    assertThat(result.hasError()).isTrue();
-    assertThat(result.getError().getRootCauseOfException()).isEqualTo(childKey);
+    assertThatEvaluationResult(result).hasErrorEntryForKeyThat(parentKey);
   }
 
   @Test
@@ -2265,8 +2390,7 @@ public class ParallelEvaluatorTest {
         .setBuilder(
             new SkyFunction() {
               @Override
-              public SkyValue compute(SkyKey skyKey, Environment env)
-                  throws SkyFunctionException, InterruptedException {
+              public SkyValue compute(SkyKey skyKey, Environment env) throws InterruptedException {
                 int invocations = numOtherParentInvocations.incrementAndGet();
                 assertWithMessage("otherParentKey should not be restarted")
                     .that(invocations)
@@ -2318,8 +2442,7 @@ public class ParallelEvaluatorTest {
         .setBuilder(
             new SkyFunction() {
               @Override
-              public SkyValue compute(SkyKey skyKey, Environment env)
-                  throws SkyFunctionException, InterruptedException {
+              public SkyValue compute(SkyKey skyKey, Environment env) throws InterruptedException {
                 int invocations = numErrorParentInvocations.incrementAndGet();
                 try {
                   SkyValue value = env.getValueOrThrow(errorKey, SomeErrorException.class);
@@ -2348,33 +2471,28 @@ public class ParallelEvaluatorTest {
     graph =
         new NotifyingHelper.NotifyingProcessableGraph(
             new InMemoryGraphImpl(),
-            new Listener() {
-              @Override
-              public void accept(SkyKey key, EventType type, Order order, Object context) {
-                if (key.equals(errorKey) && type == EventType.SET_VALUE && order == Order.AFTER) {
-                  errorCommitted.countDown();
-                  TrackingAwaiter.INSTANCE.awaitLatchAndTrackExceptions(
-                      otherParentSignaled, "otherParent didn't get signaled in time");
-                  // We try to give some time for ParallelEvaluator to incorrectly re-evaluate
-                  // 'otherParentKey'. This test case is testing for a real race condition and the
-                  // 10ms time was chosen experimentally to give a true positive rate of 99.8%
-                  // (without a sleep it has a 1% true positive rate). There's no good way to do
-                  // this without sleeping. We *could* introspect ParallelEvaulator's
-                  // AbstractQueueVisitor to see if the re-evaluation has been enqueued, but that's
-                  // relying on pretty low-level implementation details.
-                  Uninterruptibles.sleepUninterruptibly(10, TimeUnit.MILLISECONDS);
-                }
-                if (key.equals(otherParentKey)
-                    && type == EventType.SIGNAL
-                    && order == Order.AFTER) {
-                  otherParentSignaled.countDown();
-                }
+            (key, type, order, context) -> {
+              if (key.equals(errorKey) && type == EventType.SET_VALUE && order == Order.AFTER) {
+                errorCommitted.countDown();
+                TrackingAwaiter.INSTANCE.awaitLatchAndTrackExceptions(
+                    otherParentSignaled, "otherParent didn't get signaled in time");
+                // We try to give some time for ParallelEvaluator to incorrectly re-evaluate
+                // 'otherParentKey'. This test case is testing for a real race condition and the
+                // 10ms time was chosen experimentally to give a true positive rate of 99.8%
+                // (without a sleep it has a 1% true positive rate). There's no good way to do
+                // this without sleeping. We *could* introspect ParallelEvaulator's
+                // AbstractQueueVisitor to see if the re-evaluation has been enqueued, but that's
+                // relying on pretty low-level implementation details.
+                Uninterruptibles.sleepUninterruptibly(10, TimeUnit.MILLISECONDS);
+              }
+              if (key.equals(otherParentKey) && type == EventType.SIGNAL && order == Order.AFTER) {
+                otherParentSignaled.countDown();
               }
             });
     EvaluationResult<StringValue> result = eval(/*keepGoing=*/false,
         ImmutableList.of(otherParentKey, errorParentKey));
     assertThat(result.hasError()).isTrue();
-    assertThat(result.getError().getRootCauseOfException()).isEqualTo(errorKey);
+    assertThatEvaluationResult(result).hasErrorEntryForKeyThat(errorParentKey);
   }
 
   @Test
@@ -2390,11 +2508,9 @@ public class ParallelEvaluatorTest {
         new StringValue("parent2"));
     tester.getOrCreate(errorKey).setHasError(true);
     EvaluationResult<StringValue> result = eval(/*keepGoing=*/true, ImmutableList.of(parent1Key));
-    assertThat(result.hasError()).isTrue();
-    assertThat(result.getError().getRootCauseOfException()).isEqualTo(errorKey);
+    assertThatEvaluationResult(result).hasSingletonErrorThat(parent1Key);
     result = eval(/*keepGoing=*/false, ImmutableList.of(parent2Key));
-    assertThat(result.hasError()).isTrue();
-    assertThat(result.getError(parent2Key).getRootCauseOfException()).isEqualTo(errorKey);
+    assertThatEvaluationResult(result).hasSingletonErrorThat(parent2Key);
   }
 
   @Test
@@ -2404,8 +2520,7 @@ public class ParallelEvaluatorTest {
     SkyKey errorKey = GraphTester.toSkyKey("error");
     tester.getOrCreate(errorKey).setHasError(true);
     EvaluationResult<StringValue> result = eval(/*keepGoing=*/true, ImmutableList.of(errorKey));
-    assertThat(result.hasError()).isTrue();
-    assertThat(result.getError().getRootCauseOfException()).isEqualTo(errorKey);
+    assertThatEvaluationResult(result).hasSingletonErrorThat(errorKey);
     SkyKey rogueKey = GraphTester.toSkyKey("rogue");
     tester.getOrCreate(rogueKey).setBuilder(new SkyFunction() {
       @Override
@@ -2422,9 +2537,63 @@ public class ParallelEvaluatorTest {
       }
     });
     result = eval(/*keepGoing=*/false, ImmutableList.of(errorKey, rogueKey));
-    assertThat(result.hasError()).isTrue();
-    assertThat(result.getError(errorKey).getRootCauseOfException()).isEqualTo(errorKey);
+    assertThatEvaluationResult(result).hasErrorMapThat().hasSize(1);
+    assertThatEvaluationResult(result).hasErrorEntryForKeyThat(errorKey);
     assertThat(result.errorMap()).doesNotContainKey(rogueKey);
+  }
+
+  // Explicit test that we tolerate a SkyFunction that declares different [sequences of] deps each
+  // restart. Such behavior from a SkyFunction isn't desired, but Bazel-on-Skyframe does indeed do
+  // this.
+  @Test
+  public void declaresDifferentDepsAfterRestart() throws Exception {
+    graph = new DeterministicHelper.DeterministicProcessableGraph(new InMemoryGraphImpl());
+    tester = new GraphTester();
+    SkyKey grandChild1Key = GraphTester.toSkyKey("grandChild1");
+    tester.getOrCreate(grandChild1Key).setConstantValue(new StringValue("grandChild1"));
+    SkyKey child1Key = GraphTester.toSkyKey("child1");
+    tester
+        .getOrCreate(child1Key)
+        .addDependency(grandChild1Key)
+        .setConstantValue(new StringValue("child1"));
+    SkyKey grandChild2Key = GraphTester.toSkyKey("grandChild2");
+    tester.getOrCreate(grandChild2Key).setConstantValue(new StringValue("grandChild2"));
+    SkyKey child2Key = GraphTester.toSkyKey("child2");
+    tester.getOrCreate(child2Key).setConstantValue(new StringValue("child2"));
+    SkyKey parentKey = GraphTester.toSkyKey("parent");
+    AtomicInteger numComputes = new AtomicInteger(0);
+    tester
+        .getOrCreate(parentKey)
+        .setBuilder(
+            new SkyFunction() {
+              @Override
+              public SkyValue compute(SkyKey skyKey, Environment env) throws InterruptedException {
+                switch (numComputes.incrementAndGet()) {
+                  case 1:
+                    env.getValue(child1Key);
+                    Preconditions.checkState(env.valuesMissing());
+                    return null;
+                  case 2:
+                    env.getValue(child2Key);
+                    Preconditions.checkState(env.valuesMissing());
+                    return null;
+                  case 3:
+                    return new StringValue("the third time's the charm!");
+                  default:
+                    throw new IllegalStateException();
+                }
+              }
+
+              @Override
+              public String extractTag(SkyKey skyKey) {
+                return null;
+              }
+            });
+    EvaluationResult<StringValue> result = eval(/*keepGoing=*/ false, ImmutableList.of(parentKey));
+    assertThatEvaluationResult(result).hasNoError();
+    assertThatEvaluationResult(result)
+        .hasEntryThat(parentKey)
+        .isEqualTo(new StringValue("the third time's the charm!"));
   }
 
   private void runUnhandledTransitiveErrors(boolean keepGoing,
@@ -2466,7 +2635,7 @@ public class ParallelEvaluatorTest {
                   try {
                     return env.getValueOrThrow(childKey, SomeErrorException.class);
                   } catch (SomeErrorException e) {
-                    throw new GenericFunctionException(e, childKey);
+                    throw new GenericFunctionException(e);
                   }
                 } else {
                   return env.getValue(childKey);
@@ -2480,9 +2649,8 @@ public class ParallelEvaluatorTest {
             });
     tester.getOrCreate(childKey).setHasError(/*hasError=*/true);
     EvaluationResult<StringValue> result = eval(keepGoing, ImmutableList.of(grandparentKey));
-    assertThat(result.hasError()).isTrue();
     assertThat(errorPropagated.get()).isTrue();
-    assertThat(result.getError().getRootCauseOfException()).isEqualTo(grandparentKey);
+    assertThatEvaluationResult(result).hasSingletonErrorThat(grandparentKey);
   }
 
   @Test

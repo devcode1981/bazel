@@ -16,53 +16,57 @@ package com.google.devtools.build.lib.rules.java;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Streams;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.ProviderCollection;
-import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.analysis.TransitiveInfoProvider;
 import com.google.devtools.build.lib.analysis.TransitiveInfoProviderMap;
 import com.google.devtools.build.lib.analysis.TransitiveInfoProviderMapBuilder;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.collect.nestedset.Depset;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
-import com.google.devtools.build.lib.events.Location;
 import com.google.devtools.build.lib.packages.BuiltinProvider;
 import com.google.devtools.build.lib.packages.NativeInfo;
+import com.google.devtools.build.lib.rules.cpp.CcInfo;
+import com.google.devtools.build.lib.rules.cpp.LibraryToLink;
+import com.google.devtools.build.lib.rules.java.JavaPluginInfoProvider.JavaPluginInfo;
+import com.google.devtools.build.lib.rules.java.JavaRuleOutputJarsProvider.JavaOutput;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec.VisibleForSerialization;
-import com.google.devtools.build.lib.skylarkbuildapi.FileApi;
-import com.google.devtools.build.lib.skylarkbuildapi.java.JavaInfoApi;
-import com.google.devtools.build.lib.skylarkinterface.SkylarkValue;
-import com.google.devtools.build.lib.syntax.Environment;
-import com.google.devtools.build.lib.syntax.EvalException;
-import com.google.devtools.build.lib.syntax.Runtime;
-import com.google.devtools.build.lib.syntax.SkylarkList;
-import com.google.devtools.build.lib.syntax.SkylarkList.MutableList;
-import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
+import com.google.devtools.build.lib.starlarkbuildapi.FileApi;
+import com.google.devtools.build.lib.starlarkbuildapi.cpp.CcInfoApi;
+import com.google.devtools.build.lib.starlarkbuildapi.java.JavaInfoApi;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.function.Function;
+import java.util.stream.Stream;
 import javax.annotation.Nullable;
+import net.starlark.java.eval.EvalException;
+import net.starlark.java.eval.Sequence;
+import net.starlark.java.eval.Starlark;
+import net.starlark.java.eval.StarlarkList;
+import net.starlark.java.eval.StarlarkThread;
+import net.starlark.java.eval.StarlarkValue;
+import net.starlark.java.syntax.Location;
 
-/** A Skylark declared provider that encapsulates all providers that are needed by Java rules. */
+/** A Starlark declared provider that encapsulates all providers that are needed by Java rules. */
 @Immutable
 @AutoCodec
-public final class JavaInfo extends NativeInfo implements JavaInfoApi<Artifact> {
+public final class JavaInfo extends NativeInfo
+    implements JavaInfoApi<Artifact, JavaOutput, CcInfo> {
 
-  public static final String SKYLARK_NAME = "JavaInfo";
+  public static final String STARLARK_NAME = "JavaInfo";
 
   public static final JavaInfoProvider PROVIDER = new JavaInfoProvider();
 
   @Nullable
   private static <T> T nullIfNone(Object object, Class<T> type) {
-    return object != Runtime.NONE ? type.cast(object) : null;
-  }
-
-  @Nullable
-  private static Object nullIfNone(Object object) {
-    return nullIfNone(object, Object.class);
+    return object != Starlark.NONE ? type.cast(object) : null;
   }
 
   public static final JavaInfo EMPTY = JavaInfo.Builder.create().build();
@@ -72,13 +76,11 @@ public final class JavaInfo extends NativeInfo implements JavaInfoApi<Artifact> 
           JavaCompilationArgsProvider.class,
           JavaSourceJarsProvider.class,
           JavaRuleOutputJarsProvider.class,
-          JavaRunfilesProvider.class,
           JavaPluginInfoProvider.class,
           JavaGenJarsProvider.class,
           JavaExportsProvider.class,
           JavaCompilationInfoProvider.class,
-          JavaStrictCompilationArgsProvider.class,
-          JavaSourceInfoProvider.class);
+          JavaCcInfoProvider.class);
 
   private final TransitiveInfoProviderMap providers;
 
@@ -93,17 +95,21 @@ public final class JavaInfo extends NativeInfo implements JavaInfoApi<Artifact> 
    */
   private final ImmutableList<Artifact> directRuntimeJars;
 
+  /**
+   * A set of runtime jars corresponding to the transitive dependencies of a certain target,
+   * excluding the runtime jars for the target itself and its direct dependencies.
+   *
+   * <p>This set is required only when the persistent test runner is enabled. It is used to create a
+   * custom classloader for loading the jars in the transitive dependencies. The persistent test
+   * runner creates a separate classloader for the target itself and its direct dependencies.
+   */
+  private final NestedSet<Artifact> transitiveOnlyRuntimeJars;
+
   /** Java constraints (e.g. "android") that are present on the target. */
   private final ImmutableList<String> javaConstraints;
 
   // Whether or not this library should be used only for compilation and not at runtime.
   private final boolean neverlink;
-
-  /** Returns the instance for the provided providerClass, or <tt>null</tt> if not present. */
-  @Nullable
-  public <P extends TransitiveInfoProvider> P getProvider(Class<P> providerClass) {
-    return providers.getProvider(providerClass);
-  }
 
   public TransitiveInfoProviderMap getProviders() {
     return providers;
@@ -116,23 +122,22 @@ public final class JavaInfo extends NativeInfo implements JavaInfoApi<Artifact> 
   public static JavaInfo merge(List<JavaInfo> providers) {
     List<JavaCompilationArgsProvider> javaCompilationArgsProviders =
         JavaInfo.fetchProvidersFromList(providers, JavaCompilationArgsProvider.class);
-    List<JavaStrictCompilationArgsProvider> javaStrictCompilationArgsProviders =
-        JavaInfo.fetchProvidersFromList(providers, JavaStrictCompilationArgsProvider.class);
     List<JavaSourceJarsProvider> javaSourceJarsProviders =
         JavaInfo.fetchProvidersFromList(providers, JavaSourceJarsProvider.class);
-    List<JavaRunfilesProvider> javaRunfilesProviders =
-        JavaInfo.fetchProvidersFromList(providers, JavaRunfilesProvider.class);
     List<JavaPluginInfoProvider> javaPluginInfoProviders =
         JavaInfo.fetchProvidersFromList(providers, JavaPluginInfoProvider.class);
     List<JavaExportsProvider> javaExportsProviders =
         JavaInfo.fetchProvidersFromList(providers, JavaExportsProvider.class);
     List<JavaRuleOutputJarsProvider> javaRuleOutputJarsProviders =
         JavaInfo.fetchProvidersFromList(providers, JavaRuleOutputJarsProvider.class);
+    List<JavaCcInfoProvider> javaCcInfoProviders =
+        JavaInfo.fetchProvidersFromList(providers, JavaCcInfoProvider.class);
 
-    Runfiles mergedRunfiles = Runfiles.EMPTY;
-    for (JavaRunfilesProvider javaRunfilesProvider : javaRunfilesProviders) {
-      Runfiles runfiles = javaRunfilesProvider.getRunfiles();
-      mergedRunfiles = mergedRunfiles == Runfiles.EMPTY ? runfiles : mergedRunfiles.merge(runfiles);
+    ImmutableList.Builder<Artifact> runtimeJars = ImmutableList.builder();
+    ImmutableList.Builder<String> javaConstraints = ImmutableList.builder();
+    for (JavaInfo javaInfo : providers) {
+      runtimeJars.addAll(javaInfo.getDirectRuntimeJars());
+      javaConstraints.addAll(javaInfo.getJavaConstraints());
     }
 
     return JavaInfo.Builder.create()
@@ -140,18 +145,18 @@ public final class JavaInfo extends NativeInfo implements JavaInfoApi<Artifact> 
             JavaCompilationArgsProvider.class,
             JavaCompilationArgsProvider.merge(javaCompilationArgsProviders))
         .addProvider(
-            JavaStrictCompilationArgsProvider.class,
-            JavaStrictCompilationArgsProvider.merge(javaStrictCompilationArgsProviders))
-        .addProvider(
             JavaSourceJarsProvider.class, JavaSourceJarsProvider.merge(javaSourceJarsProviders))
         .addProvider(
             JavaRuleOutputJarsProvider.class,
             JavaRuleOutputJarsProvider.merge(javaRuleOutputJarsProviders))
-        .addProvider(JavaRunfilesProvider.class, new JavaRunfilesProvider(mergedRunfiles))
         .addProvider(
             JavaPluginInfoProvider.class, JavaPluginInfoProvider.merge(javaPluginInfoProviders))
         .addProvider(JavaExportsProvider.class, JavaExportsProvider.merge(javaExportsProviders))
+        .addProvider(JavaCcInfoProvider.class, JavaCcInfoProvider.merge(javaCcInfoProviders))
         // TODO(b/65618333): add merge function to JavaGenJarsProvider. See #3769
+        // TODO(iirina): merge or remove JavaCompilationInfoProvider
+        .setRuntimeJars(runtimeJars.build())
+        .setJavaConstraints(javaConstraints.build())
         .build();
   }
 
@@ -160,22 +165,34 @@ public final class JavaInfo extends NativeInfo implements JavaInfoApi<Artifact> 
    * JavaInfo}s. Returns an empty list if no providers can be fetched. Returns a list of the same
    * size as the given list if the requested providers are of type JavaCompilationArgsProvider.
    */
-  public static <C extends TransitiveInfoProvider> List<C> fetchProvidersFromList(
-      Iterable<JavaInfo> javaProviders, Class<C> providersClass) {
-    List<C> fetchedProviders = new ArrayList<>();
-    for (JavaInfo javaInfo : javaProviders) {
-      C provider = javaInfo.getProvider(providersClass);
-      if (provider != null) {
-        fetchedProviders.add(provider);
-      }
-    }
-    return fetchedProviders;
+  public static <T extends TransitiveInfoProvider> ImmutableList<T> fetchProvidersFromList(
+      Iterable<JavaInfo> javaProviders, Class<T> providerClass) {
+    return streamProviders(javaProviders, providerClass).collect(ImmutableList.toImmutableList());
+  }
+
+  /**
+   * Returns a stream of providers of the specified class, fetched from the given list of {@link
+   * JavaInfo}.
+   */
+  public static <C extends TransitiveInfoProvider> Stream<C> streamProviders(
+      Iterable<JavaInfo> javaProviders, Class<C> providerClass) {
+    return Streams.stream(javaProviders)
+        .map(javaInfo -> javaInfo.getProvider(providerClass))
+        .filter(Objects::nonNull);
+  }
+
+  /** Returns the instance for the provided providerClass, or <tt>null</tt> if not present. */
+  // TODO(adonovan): rename these three overloads of getProvider to avoid
+  // confusion with the unrelated no-arg Info.getProvider method.
+  @Nullable
+  public <P extends TransitiveInfoProvider> P getProvider(Class<P> providerClass) {
+    return providers.getProvider(providerClass);
   }
 
   /**
    * Returns a provider of the specified class, fetched from the specified target or, if not found,
    * from the JavaInfo of the given target. JavaInfo can be found as a declared provider in
-   * SkylarkProviders. Returns null if no such provider exists.
+   * StarlarkProviders. Returns null if no such provider exists.
    *
    * <p>A target can either have both the specified provider and JavaInfo that encapsulates the same
    * information, or just one of them.
@@ -194,10 +211,6 @@ public final class JavaInfo extends NativeInfo implements JavaInfoApi<Artifact> 
     return javaInfo.getProvider(providerClass);
   }
 
-  public static JavaInfo getJavaInfo(TransitiveInfoCollection target) {
-    return (JavaInfo) target.get(JavaInfo.PROVIDER.getKey());
-  }
-
   public static <T extends TransitiveInfoProvider> T getProvider(
       Class<T> providerClass, TransitiveInfoProviderMap providerMap) {
     T provider = providerMap.getProvider(providerClass);
@@ -209,6 +222,10 @@ public final class JavaInfo extends NativeInfo implements JavaInfoApi<Artifact> 
       return null;
     }
     return javaInfo.getProvider(providerClass);
+  }
+
+  public static JavaInfo getJavaInfo(TransitiveInfoCollection target) {
+    return (JavaInfo) target.get(JavaInfo.PROVIDER.getKey());
   }
 
   public static <T extends TransitiveInfoProvider> List<T> getProvidersFromListOfTargets(
@@ -223,36 +240,26 @@ public final class JavaInfo extends NativeInfo implements JavaInfoApi<Artifact> 
     return providersList;
   }
 
-  /**
-   * Returns a list of the given provider class with all the said providers retrieved from the given
-   * {@link JavaInfo}s.
-   */
-  public static <T extends TransitiveInfoProvider>
-      ImmutableList<T> getProvidersFromListOfJavaProviders(
-          Class<T> providerClass, Iterable<JavaInfo> javaProviders) {
-    ImmutableList.Builder<T> providersList = new ImmutableList.Builder<>();
-    for (JavaInfo javaInfo : javaProviders) {
-      T provider = javaInfo.getProvider(providerClass);
-      if (provider != null) {
-        providersList.add(provider);
-      }
-    }
-    return providersList.build();
-  }
-
   @VisibleForSerialization
   @AutoCodec.Instantiator
   JavaInfo(
       TransitiveInfoProviderMap providers,
       ImmutableList<Artifact> directRuntimeJars,
+      NestedSet<Artifact> transitiveOnlyRuntimeJars,
       boolean neverlink,
       ImmutableList<String> javaConstraints,
-      Location location) {
-    super(PROVIDER, location);
+      Location creationLocation) {
+    super(creationLocation);
     this.directRuntimeJars = directRuntimeJars;
+    this.transitiveOnlyRuntimeJars = transitiveOnlyRuntimeJars;
     this.providers = providers;
     this.neverlink = neverlink;
     this.javaConstraints = javaConstraints;
+  }
+
+  @Override
+  public JavaInfoProvider getProvider() {
+    return PROVIDER;
   }
 
   public Boolean isNeverlink() {
@@ -260,45 +267,52 @@ public final class JavaInfo extends NativeInfo implements JavaInfoApi<Artifact> 
   }
 
   @Override
-  public SkylarkNestedSet getTransitiveRuntimeJars() {
-    return SkylarkNestedSet.of(Artifact.class, getTransitiveRuntimeDeps());
+  public Depset /*<Artifact>*/ getTransitiveRuntimeJars() {
+    return getTransitiveRuntimeDeps();
   }
 
   @Override
-  public SkylarkNestedSet getTransitiveCompileTimeJars() {
-    return SkylarkNestedSet.of(Artifact.class, getTransitiveDeps());
+  public Depset /*<Artifact>*/ getTransitiveCompileTimeJars() {
+    return getTransitiveDeps();
   }
 
   @Override
-  public SkylarkNestedSet getCompileTimeJars() {
+  public Depset /*<Artifact>*/ getCompileTimeJars() {
     NestedSet<Artifact> compileTimeJars =
         getProviderAsNestedSet(
             JavaCompilationArgsProvider.class,
             JavaCompilationArgsProvider::getDirectCompileTimeJars);
-    return SkylarkNestedSet.of(Artifact.class, compileTimeJars);
+    return Depset.of(Artifact.TYPE, compileTimeJars);
   }
 
   @Override
-  public SkylarkNestedSet getFullCompileTimeJars() {
+  public Depset getFullCompileTimeJars() {
     NestedSet<Artifact> fullCompileTimeJars =
         getProviderAsNestedSet(
             JavaCompilationArgsProvider.class,
             JavaCompilationArgsProvider::getDirectFullCompileTimeJars);
-    return SkylarkNestedSet.of(Artifact.class, fullCompileTimeJars);
+    return Depset.of(Artifact.TYPE, fullCompileTimeJars);
   }
 
   @Override
-  public SkylarkList<Artifact> getSourceJars() {
+  public Sequence<Artifact> getSourceJars() {
     // TODO(#4221) change return type to NestedSet<Artifact>
     JavaSourceJarsProvider provider = providers.getProvider(JavaSourceJarsProvider.class);
     ImmutableList<Artifact> sourceJars =
         provider == null ? ImmutableList.of() : provider.getSourceJars();
-    return SkylarkList.createImmutable(sourceJars);
+    return StarlarkList.immutableCopyOf(sourceJars);
   }
 
   @Override
+  @Deprecated
   public JavaRuleOutputJarsProvider getOutputJars() {
     return getProvider(JavaRuleOutputJarsProvider.class);
+  }
+
+  @Override
+  public ImmutableList<JavaOutput> getJavaOutputs() {
+    JavaRuleOutputJarsProvider outputs = getProvider(JavaRuleOutputJarsProvider.class);
+    return outputs == null ? ImmutableList.of() : outputs.getJavaOutputs();
   }
 
   @Override
@@ -312,37 +326,68 @@ public final class JavaInfo extends NativeInfo implements JavaInfoApi<Artifact> 
   }
 
   @Override
-  public SkylarkList<Artifact> getRuntimeOutputJars() {
-    return SkylarkList.createImmutable(getDirectRuntimeJars());
+  public Sequence<Artifact> getRuntimeOutputJars() {
+    return StarlarkList.immutableCopyOf(getDirectRuntimeJars());
   }
 
   public ImmutableList<Artifact> getDirectRuntimeJars() {
     return directRuntimeJars;
   }
 
-  @Override
-  public NestedSet<Artifact> getTransitiveDeps() {
-    return getProviderAsNestedSet(
-        JavaCompilationArgsProvider.class,
-        JavaCompilationArgsProvider::getTransitiveCompileTimeJars);
+  // Do not expose to Starlark.
+  public NestedSet<Artifact> getTransitiveOnlyRuntimeJars() {
+    return transitiveOnlyRuntimeJars;
   }
 
   @Override
-  public NestedSet<Artifact> getTransitiveRuntimeDeps() {
-    return getProviderAsNestedSet(
-        JavaCompilationArgsProvider.class, JavaCompilationArgsProvider::getRuntimeJars);
+  public Depset /*<Artifact>*/ getTransitiveDeps() {
+    return Depset.of(
+        Artifact.TYPE,
+        getProviderAsNestedSet(
+            JavaCompilationArgsProvider.class,
+            JavaCompilationArgsProvider::getTransitiveCompileTimeJars));
   }
 
   @Override
-  public NestedSet<Artifact> getTransitiveSourceJars() {
-    return getProviderAsNestedSet(
-        JavaSourceJarsProvider.class, JavaSourceJarsProvider::getTransitiveSourceJars);
+  public Depset /*<Artifact>*/ getTransitiveRuntimeDeps() {
+    return Depset.of(
+        Artifact.TYPE,
+        getProviderAsNestedSet(
+            JavaCompilationArgsProvider.class, JavaCompilationArgsProvider::getRuntimeJars));
   }
 
   @Override
-  public NestedSet<Label> getTransitiveExports() {
+  public Depset /*<Artifact>*/ getTransitiveSourceJars() {
+    return Depset.of(
+        Artifact.TYPE,
+        getProviderAsNestedSet(
+            JavaSourceJarsProvider.class, JavaSourceJarsProvider::getTransitiveSourceJars));
+  }
+
+  @Override
+  public Depset /*<Label>*/ getTransitiveExports() {
+    return Depset.of(
+        Depset.ElementType.of(Label.class),
+        getProviderAsNestedSet(
+            JavaExportsProvider.class, JavaExportsProvider::getTransitiveExports));
+  }
+
+  /** Returns the transitive set of CC native libraries required by the target. */
+  public NestedSet<LibraryToLink> getTransitiveNativeLibraries() {
     return getProviderAsNestedSet(
-        JavaExportsProvider.class, JavaExportsProvider::getTransitiveExports);
+        JavaCcInfoProvider.class,
+        x -> x.getCcInfo().getCcNativeLibraryInfo().getTransitiveCcNativeLibraries());
+  }
+
+  @Override
+  public Depset /*<LibraryToLink>*/ getTransitiveNativeLibrariesForStarlark() {
+    return Depset.of(LibraryToLink.TYPE, getTransitiveNativeLibraries());
+  }
+
+  @Override
+  public CcInfoApi<Artifact> getCcLinkParamInfo() {
+    JavaCcInfoProvider javaCcInfoProvider = getProvider(JavaCcInfoProvider.class);
+    return javaCcInfoProvider != null ? javaCcInfoProvider.getCcInfo() : CcInfo.EMPTY;
   }
 
   /** Returns all constraints set on the associated target. */
@@ -363,7 +408,7 @@ public final class JavaInfo extends NativeInfo implements JavaInfoApi<Artifact> 
    * @param <P> type of Provider
    * @param <S> type of returned NestedSet items
    */
-  private <P extends TransitiveInfoProvider, S extends SkylarkValue>
+  private <P extends TransitiveInfoProvider, S extends StarlarkValue>
       NestedSet<S> getProviderAsNestedSet(
           Class<P> providerClass, Function<P, NestedSet<S>> mapper) {
 
@@ -396,101 +441,56 @@ public final class JavaInfo extends NativeInfo implements JavaInfoApi<Artifact> 
   public static class JavaInfoProvider extends BuiltinProvider<JavaInfo>
       implements JavaInfoProviderApi {
     private JavaInfoProvider() {
-      super(SKYLARK_NAME, JavaInfo.class);
+      super(STARLARK_NAME, JavaInfo.class);
     }
 
     @Override
-    @SuppressWarnings({"unchecked"})
     public JavaInfo javaInfo(
         FileApi outputJarApi,
         Object compileJarApi,
         Object sourceJarApi,
+        Object compileJdepsApi,
+        Object generatedClassJarApi,
+        Object generatedSourceJarApi,
+        Object nativeHeadersJarApi,
+        Object manifestProtoApi,
         Boolean neverlink,
-        SkylarkList<?> deps,
-        SkylarkList<?> runtimeDeps,
-        SkylarkList<?> exports,
-        Object actionsApi,
-        Object sourcesApi,
-        Object sourceJarsApi,
-        Object useIjarApi,
-        Object javaToolchainApi,
-        Object hostJavabaseApi,
+        Sequence<?> deps,
+        Sequence<?> runtimeDeps,
+        Sequence<?> exports,
         Object jdepsApi,
-        Location loc,
-        Environment env)
+        Sequence<?> nativeLibraries,
+        StarlarkThread thread)
         throws EvalException {
       Artifact outputJar = (Artifact) outputJarApi;
       @Nullable Artifact compileJar = nullIfNone(compileJarApi, Artifact.class);
       @Nullable Artifact sourceJar = nullIfNone(sourceJarApi, Artifact.class);
-
-      @Nullable Object actions = nullIfNone(actionsApi);
-      @Nullable
-      SkylarkList<Artifact> sources =
-          (SkylarkList<Artifact>) nullIfNone(sourcesApi, SkylarkList.class);
-      @Nullable
-      SkylarkList<Artifact> sourceJars =
-          (SkylarkList<Artifact>) nullIfNone(sourceJarsApi, SkylarkList.class);
-
-      @Nullable Boolean useIjar = nullIfNone(useIjarApi, Boolean.class);
-      @Nullable Object javaToolchain = nullIfNone(javaToolchainApi);
-      @Nullable Object hostJavabase = nullIfNone(hostJavabaseApi);
+      @Nullable Artifact compileJdeps = nullIfNone(compileJdepsApi, Artifact.class);
+      @Nullable Artifact generatedClassJar = nullIfNone(generatedClassJarApi, Artifact.class);
+      @Nullable Artifact generatedSourceJar = nullIfNone(generatedSourceJarApi, Artifact.class);
+      @Nullable Artifact nativeHeadersJar = nullIfNone(nativeHeadersJarApi, Artifact.class);
+      @Nullable Artifact manifestProto = nullIfNone(manifestProtoApi, Artifact.class);
       @Nullable Artifact jdeps = nullIfNone(jdepsApi, Artifact.class);
 
-      boolean hasLegacyArg =
-          actions != null
-              || sources != null
-              || sourceJars != null
-              || useIjar != null
-              || javaToolchain != null
-              || hostJavabase != null;
-      if (hasLegacyArg) {
-        if (env.getSemantics().incompatibleDisallowLegacyJavaInfo()) {
-          throw new EvalException(
-              loc,
-              "Cannot use deprecated argument when "
-                  + "--incompatible_disallow_legacy_javainfo is set. "
-                  + "Deprecated arguments are 'actions', 'sources', 'source_jars', "
-                  + "'use_ijar', 'java_toolchain', 'host_javabase'.");
-        }
-        boolean hasNewArg = compileJar != null || sourceJar != null;
-        if (hasNewArg) {
-          throw new EvalException(
-              loc,
-              "Cannot use deprecated arguments at the same time as "
-                  + "'compile_jar' or 'source_jar'. "
-                  + "Deprecated arguments are 'actions', 'sources', 'source_jars', "
-                  + "'use_ijar', 'java_toolchain', 'host_javabase'.");
-        }
-        return JavaInfoBuildHelper.getInstance()
-            .createJavaInfoLegacy(
-                outputJar,
-                sources != null ? sources : MutableList.empty(),
-                sourceJars != null ? sourceJars : MutableList.empty(),
-                useIjar != null ? useIjar : true,
-                neverlink,
-                (SkylarkList<JavaInfo>) deps,
-                (SkylarkList<JavaInfo>) runtimeDeps,
-                (SkylarkList<JavaInfo>) exports,
-                actions,
-                javaToolchain,
-                hostJavabase,
-                jdeps,
-                loc);
-      }
-      if (compileJar == null) {
-        throw new EvalException(loc, "Expected 'File' for 'compile_jar', found 'None'");
-      }
       return JavaInfoBuildHelper.getInstance()
           .createJavaInfo(
-              outputJar,
-              compileJar,
-              sourceJar,
+              JavaOutput.builder()
+                  .setClassJar(outputJar)
+                  .setCompileJar(compileJar)
+                  .setCompileJdeps(compileJdeps)
+                  .setGeneratedClassJar(generatedClassJar)
+                  .setGeneratedSourceJar(generatedSourceJar)
+                  .setNativeHeadersJar(nativeHeadersJar)
+                  .setManifestProto(manifestProto)
+                  .setJdeps(jdeps)
+                  .addSourceJar(sourceJar)
+                  .build(),
               neverlink,
-              (SkylarkList<JavaInfo>) deps,
-              (SkylarkList<JavaInfo>) runtimeDeps,
-              (SkylarkList<JavaInfo>) exports,
-              jdeps,
-              loc);
+              Sequence.cast(deps, JavaInfo.class, "deps"),
+              Sequence.cast(runtimeDeps, JavaInfo.class, "runtime_deps"),
+              Sequence.cast(exports, JavaInfo.class, "exports"),
+              Sequence.cast(nativeLibraries, CcInfo.class, "native_libraries"),
+              thread.getCallerLocation());
     }
   }
 
@@ -499,8 +499,10 @@ public final class JavaInfo extends NativeInfo implements JavaInfoApi<Artifact> 
     TransitiveInfoProviderMapBuilder providerMap;
     private ImmutableList<Artifact> runtimeJars;
     private ImmutableList<String> javaConstraints;
+    private final NestedSetBuilder<Artifact> transitiveOnlyRuntimeJars =
+        new NestedSetBuilder<>(Order.STABLE_ORDER);
     private boolean neverlink;
-    private Location location = Location.BUILTIN;
+    private Location creationLocation = Location.BUILTIN;
 
     private Builder(TransitiveInfoProviderMapBuilder providerMap) {
       this.providerMap = providerMap;
@@ -515,9 +517,10 @@ public final class JavaInfo extends NativeInfo implements JavaInfoApi<Artifact> 
     public static Builder copyOf(JavaInfo javaInfo) {
       return new Builder(new TransitiveInfoProviderMapBuilder().addAll(javaInfo.getProviders()))
           .setRuntimeJars(javaInfo.getDirectRuntimeJars())
+          .addTransitiveOnlyRuntimeJars(javaInfo.getTransitiveOnlyRuntimeJars())
           .setNeverlink(javaInfo.isNeverlink())
           .setJavaConstraints(javaInfo.getJavaConstraints())
-          .setLocation(javaInfo.getCreationLoc());
+          .setLocation(javaInfo.getCreationLocation());
     }
 
     public Builder setRuntimeJars(ImmutableList<Artifact> runtimeJars) {
@@ -530,13 +533,54 @@ public final class JavaInfo extends NativeInfo implements JavaInfoApi<Artifact> 
       return this;
     }
 
+    public Builder addTransitiveOnlyRuntimeJars(List<? extends TransitiveInfoCollection> deps) {
+      addTransitiveOnlyRuntimeJarsToJavaInfo(
+          deps.stream()
+              .map(JavaInfo::getJavaInfo)
+              .filter(Objects::nonNull)
+              .collect(ImmutableList.toImmutableList()));
+      return this;
+    }
+
+    public Builder addTransitiveOnlyRuntimeJarsToJavaInfo(List<JavaInfo> deps) {
+      deps.stream()
+          .map(j -> j.getProvider(JavaCompilationArgsProvider.class))
+          .filter(Objects::nonNull)
+          .map(JavaCompilationArgsProvider::getRuntimeJars)
+          .forEach(this::addTransitiveOnlyRuntimeJars);
+      return this;
+    }
+
+    private Builder addTransitiveOnlyRuntimeJars(NestedSet<Artifact> runtimeJars) {
+      this.transitiveOnlyRuntimeJars.addTransitive(runtimeJars);
+      return this;
+    }
+
     public Builder setJavaConstraints(ImmutableList<String> javaConstraints) {
       this.javaConstraints = javaConstraints;
       return this;
     }
 
+    public Builder experimentalDisableAnnotationProcessing() {
+      JavaPluginInfoProvider provider = providerMap.getProvider(JavaPluginInfoProvider.class);
+      if (provider != null) {
+        JavaPluginInfo plugins = provider.plugins();
+        providerMap.put(
+            JavaPluginInfoProvider.class,
+            JavaPluginInfoProvider.create(
+                JavaPluginInfo.create(
+                    /* processorClasses= */ NestedSetBuilder.emptySet(Order.NAIVE_LINK_ORDER),
+                    // Preserve the processor path, since it may contain Error Prone plugins which
+                    // will be service-loaded by JavaBuilder.
+                    plugins.processorClasspath(),
+                    /* data= */ NestedSetBuilder.emptySet(Order.NAIVE_LINK_ORDER)),
+                /* generatesApi= */ false));
+      }
+      return this;
+    }
+
     public Builder setLocation(Location location) {
-      this.location = location;
+      this.creationLocation = location;
       return this;
     }
 
@@ -548,17 +592,13 @@ public final class JavaInfo extends NativeInfo implements JavaInfoApi<Artifact> 
     }
 
     public JavaInfo build() {
-      // TODO(twerth): Clean up after we remove java_proto_library.strict_deps.
-      // Instead of teaching every (potential Skylark) caller to also create the provider for strict
-      // deps we wrap the non strict provider instead.
-      if (!providerMap.contains(JavaStrictCompilationArgsProvider.class)
-          && providerMap.contains(JavaCompilationArgsProvider.class)) {
-        JavaStrictCompilationArgsProvider javaStrictCompilationArgsProvider =
-            new JavaStrictCompilationArgsProvider(
-                providerMap.getProvider(JavaCompilationArgsProvider.class));
-        addProvider(JavaStrictCompilationArgsProvider.class, javaStrictCompilationArgsProvider);
-      }
-      return new JavaInfo(providerMap.build(), runtimeJars, neverlink, javaConstraints, location);
+      return new JavaInfo(
+          providerMap.build(),
+          runtimeJars,
+          transitiveOnlyRuntimeJars.build(),
+          neverlink,
+          javaConstraints,
+          creationLocation);
     }
   }
 }

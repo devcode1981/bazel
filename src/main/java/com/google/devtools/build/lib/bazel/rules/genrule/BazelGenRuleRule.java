@@ -15,18 +15,13 @@ package com.google.devtools.build.lib.bazel.rules.genrule;
 
 import static com.google.devtools.build.lib.packages.Attribute.attr;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL;
-import static com.google.devtools.build.lib.packages.BuildType.NODEP_LABEL;
-import static com.google.devtools.build.lib.syntax.Type.BOOLEAN;
+import static com.google.devtools.build.lib.packages.Type.BOOLEAN;
 
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
 import com.google.devtools.build.lib.analysis.config.HostTransition;
 import com.google.devtools.build.lib.packages.RuleClass;
-import com.google.devtools.build.lib.rules.cpp.CcToolchain;
-import com.google.devtools.build.lib.rules.cpp.CppConfiguration;
 import com.google.devtools.build.lib.rules.genrule.GenRuleBaseRule;
-import com.google.devtools.build.lib.rules.java.JavaConfiguration;
-import com.google.devtools.build.lib.rules.java.JavaRuntimeInfo;
 
 /**
  * Rule definition for genrule for Bazel.
@@ -46,23 +41,11 @@ public final class BazelGenRuleRule implements RuleDefinition {
         .setOutputToGenfiles()
         .add(
             attr("$genrule_setup", LABEL)
-                .cfg(HostTransition.INSTANCE)
+                .cfg(HostTransition.createFactory())
                 .value(env.getToolsLabel(GENRULE_SETUP_LABEL)))
-        .requiresConfigurationFragments(CppConfiguration.class, JavaConfiguration.class)
 
         // TODO(bazel-team): stamping doesn't seem to work. Fix it or remove attribute.
         .add(attr("stamp", BOOLEAN).value(false))
-        .add(
-            attr(CcToolchain.CC_TOOLCHAIN_DEFAULT_ATTRIBUTE_NAME, LABEL)
-                .value(GenRuleBaseRule.ccToolchainAttribute(env)))
-        .add(
-            attr(CcToolchain.CC_TOOLCHAIN_TYPE_ATTRIBUTE_NAME, NODEP_LABEL)
-                .value(GenRuleBaseRule.ccToolchainTypeAttribute(env)))
-        .add(
-            attr(":host_jdk", LABEL)
-                .cfg(HostTransition.INSTANCE)
-                .value(GenRuleBaseRule.maybeHostJdk(env))
-                .mandatoryProviders(JavaRuntimeInfo.PROVIDER.id()))
         .build();
   }
 
@@ -77,7 +60,7 @@ public final class BazelGenRuleRule implements RuleDefinition {
 
 }
 
-/*<!-- #BLAZE_RULE (NAME = genrule, TYPE = OTHER, FAMILY = General)[GENERIC_RULE] -->
+/*<!-- #BLAZE_RULE (NAME = genrule, FAMILY = General)[GENERIC_RULE] -->
 
 <p>A <code>genrule</code> generates one or more files using a user-defined Bash command.</p>
 
@@ -149,10 +132,25 @@ public final class BazelGenRuleRule implements RuleDefinition {
 <h4>Genrule Environment</h4>
 
 <p>
-  The genrule command is executed in a Bash shell, configured to fail when a command or a pipeline
-  fails (<code>set -e -o pipefail</code>). Genrules should not access the network (except to create
-  connections between processes running within the same genrule on the same machine), though this is
-  not currently enforced.
+  The genrule command is executed by a Bash shell that is configured to fail when a command
+  or a pipeline fails, using <code>set -e -o pipefail</code>.
+</p>
+<p>
+  The build tool executes the Bash command in a sanitized process environment that
+  defines only core variables such as <code>PATH</code>, <code>PWD</code>,
+  <code>TMPDIR</code>, and a few others.
+
+  To ensure that builds are reproducible, most variables defined in the user's shell
+  environment are not passed though to the genrule's command. However, Bazel (but not
+  Blaze) passes through the value of the user's <code>PATH</code> environment variable.
+
+  Any change to the value of <code>PATH</code> will cause Bazel to re-execute the command
+  on the next build.
+  <!-- See https://github.com/bazelbuild/bazel/issues/1142 -->
+</p>
+<p>
+  A genrule command should not access the network except to connect processes that are
+  children of the command itself, though this is not currently enforced.
 </p>
 <p>
   The build system automatically deletes any existing output files, but creates any necessary parent
@@ -170,9 +168,9 @@ public final class BazelGenRuleRule implements RuleDefinition {
   <li>Do use <code>$(location)</code> extensively, for outputs, tools and sources. Due to the
     segregation of output files for different configurations, genrules cannot rely on hard-coded
     and/or absolute paths.</li>
-  <li>Do write a common Skylark macro in case the same or very similar genrules are used in multiple
-    places. If the genrule is complex, consider implementing it in a script or as a Skylark rule.
-    This improves readability as well as testability.</li>
+  <li>Do write a common Starlark macro in case the same or very similar genrules are used in
+    multiple places. If the genrule is complex, consider implementing it in a script or as a
+    Starlark rule. This improves readability as well as testability.</li>
   <li>Do make sure that the exit code correctly indicates success or failure of the genrule.</li>
   <li>Do not write informational messages to stdout or stderr. While useful for debugging, this can
     easily become noise; a successful genrule should be silent. On the other hand, a failing genrule

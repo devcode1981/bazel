@@ -16,6 +16,7 @@ package com.google.devtools.build.importdeps;
 import static com.google.common.truth.Truth.assertThat;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.importdeps.ResultCollector.MissingMember;
 import java.io.IOException;
 import java.io.InputStream;
@@ -120,6 +121,26 @@ public class DepsCheckerClassVisitorTest extends AbstractClassCacheTest {
     assertThat(collector.isEmpty()).isTrue();
   }
 
+  @Test
+  public void testSafelyHandleModuleInfo() throws IOException {
+    // We don't need to assert anything-- we just need to make sure the tool
+    // can safely handle odd classes like module-info without throwing any
+    // exceptions.
+    // module-info's peculiarity is that it's like java.lang.Object
+    // and doesn't have a superclass.
+    try (ZipFile zipFile = new ZipFile(libraryModuleInfoJar.toFile())) {
+      ZipEntry entry = zipFile.getEntry("module-info.class");
+      ClassCache cache =
+          new ClassCache(
+              ImmutableSet.of(), ImmutableSet.of(), ImmutableSet.of(), ImmutableSet.of(), false);
+      try (InputStream classStream = zipFile.getInputStream(entry)) {
+        ClassReader reader = new ClassReader(classStream);
+        DepsCheckerClassVisitor checker = new DepsCheckerClassVisitor(cache, null);
+        reader.accept(checker, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+      }
+    }
+  }
+
   private static String constructFullQualifiedMemberName(MissingMember member) {
     return constructFullyQualifiedMemberName(
         member.owner().internalName(), member.memberName(), member.descriptor());
@@ -145,10 +166,11 @@ public class DepsCheckerClassVisitorTest extends AbstractClassCacheTest {
     ResultCollector resultCollector = new ResultCollector(checkMissingMembers);
     try (ClassCache cache =
             new ClassCache(
-                ImmutableList.copyOf(classpath),
-                ImmutableList.of(),
-                ImmutableList.of(),
-                ImmutableList.of());
+                ImmutableSet.copyOf(classpath),
+                ImmutableSet.of(),
+                ImmutableSet.of(),
+                ImmutableSet.of(),
+                checkMissingMembers);
         ZipFile zipFile = new ZipFile(clientJar.toFile())) {
       assertThat(cache.getClassState("java/lang/invoke/LambdaMetafactory").isExistingState())
           .isTrue();

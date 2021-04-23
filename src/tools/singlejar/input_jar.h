@@ -45,12 +45,15 @@ class InputJar {
 
   ~InputJar() { Close(); }
 
+#ifndef _WIN32
+  // Not used on Windows, only in Google's own code. Don't add more usage of it.
   int fd() const { return mapped_file_.fd(); }
+#endif
 
   // Opens the file, memory maps it and locates Central Directory.
   bool Open(const std::string& path);
 
-  // Returns the next Central Directory Header or NULL.
+  // Returns the next Central Directory Header or nullptr.
   const CDH *NextEntry(const LH **local_header_ptr) {
     if (path_.empty()) {
       diag_errx(1, "%s:%d: call Open() first!", __FILE__, __LINE__);

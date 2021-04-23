@@ -14,10 +14,10 @@
 package com.google.devtools.build.lib.remote;
 
 import com.google.devtools.build.lib.buildeventstream.BuildEventArtifactUploader;
+import com.google.devtools.build.lib.remote.common.MissingDigestsFinder;
+import com.google.devtools.build.lib.remote.options.RemoteOptions;
 import com.google.devtools.build.lib.runtime.BuildEventArtifactUploaderFactory;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
-import io.grpc.Context;
-import javax.annotation.Nullable;
 
 /**
  * A factory for {@link ByteStreamBuildEventArtifactUploader}.
@@ -26,22 +26,32 @@ class ByteStreamBuildEventArtifactUploaderFactory implements
     BuildEventArtifactUploaderFactory {
 
   private final ByteStreamUploader uploader;
-  private final String remoteServerName;
-  private final Context ctx;
-  private final @Nullable String remoteInstanceName;
+  private final String remoteServerInstanceName;
+  private final String buildRequestId;
+  private final String commandId;
+  private final MissingDigestsFinder missingDigestsFinder;
 
   ByteStreamBuildEventArtifactUploaderFactory(
-      ByteStreamUploader uploader, String remoteServerName, Context ctx,
-      @Nullable String remoteInstanceName) {
+      ByteStreamUploader uploader,
+      MissingDigestsFinder missingDigestsFinder,
+      String remoteServerInstanceName,
+      String buildRequestId,
+      String commandId) {
     this.uploader = uploader;
-    this.remoteServerName = remoteServerName;
-    this.ctx = ctx;
-    this.remoteInstanceName = remoteInstanceName;
+    this.missingDigestsFinder = missingDigestsFinder;
+    this.remoteServerInstanceName = remoteServerInstanceName;
+    this.buildRequestId = buildRequestId;
+    this.commandId = commandId;
   }
 
   @Override
   public BuildEventArtifactUploader create(CommandEnvironment env) {
-    return new ByteStreamBuildEventArtifactUploader(uploader.retain(), remoteServerName, ctx,
-        remoteInstanceName);
+    return new ByteStreamBuildEventArtifactUploader(
+        uploader.retain(),
+        missingDigestsFinder,
+        remoteServerInstanceName,
+        buildRequestId,
+        commandId,
+        env.getOptions().getOptions(RemoteOptions.class).buildEventUploadMaxThreads);
   }
 }

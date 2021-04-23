@@ -1,18 +1,25 @@
 ---
 layout: documentation
 title: Depsets
+category: extending
 ---
 
 # Depsets
+
+This page covers the benefits and examples of using depsets.
 
 [Depsets](lib/depset.html) are a specialized data structure for efficiently
 collecting data across a target’s transitive dependencies. Since this use case
 concerns the [analysis phase](concepts.md#evaluation-model), depsets are useful
 for authors of rules and aspects, but probably not macros.
 
-The main feature of depsets is that they support a time- and space-efficient
-merge operation, whose cost is independent of the size of the existing contents.
-Depsets also have well-defined ordering semantics.
+The defining feature of depset is its time- and space-efficient union operation.
+The depset constructor accepts a list of elements ("direct") and a list of other
+depsets ("transitive"), and returns a depset representing a set containing all the
+direct elements and the union of all the transitive sets. Conceptually, the
+constructor creates a new graph node that has the direct and transitive nodes
+as its successors. Depsets have a well-defined ordering semantics, based on
+traversal of this graph.
 
 Example uses of depsets include:
 
@@ -22,20 +29,18 @@ Example uses of depsets include:
 *   for an interpreted language, storing the transitive source files that will
     be included in an executable's runfiles
 
-If you don't need the merge operation, consider using another type, such as
+If you don't need the union operation, consider using another type, such as
 [list](lib/list.html) or [dict](lib/dict.html).
-
-<!-- [TOC] -->
 
 ## Full example
 
 
-This example is avalable at
+This example is available at
 [https://github.com/bazelbuild/examples/tree/master/rules/depsets](https://github.com/bazelbuild/examples/tree/master/rules/depsets).
 
-Suppose we have a hypothetical interpreted language Foo. In order to build each
-`foo_binary` we need to know all the `*.foo` files that it directly or indirectly
-depends on.
+Suppose there is a hypothetical interpreted language Foo. In order to build
+each `foo_binary` you need to know all the `*.foo` files that it directly or
+indirectly depends on.
 
 ```python
 # //depsets:BUILD
@@ -165,7 +170,7 @@ Each node in the DAG holds a list of direct elements and a list of child nodes.
 The contents of the depset are the transitive elements, i.e. the direct elements
 of all the nodes. A new depset can be created using the
 [depset](lib/globals.html#depset) constructor: it accepts a list of direct
-elemens and another list of child nodes.
+elements and another list of child nodes.
 
 ```python
 s = depset(["a", "b", "c"])
@@ -228,7 +233,7 @@ t = depset(["b", "c"])
 # in a loop, and convert it to a dictionary for fast membership tests.
 t_items = {e: None for e in t.to_list()}
 diff_items = [x for x in s.to_list() if x not in t_items]
-# Convert back to depset if it's still going to be used for merge operations.
+# Convert back to depset if it's still going to be used for union operations.
 s = depset(diff_items)
 print(s)  # depset(["a"])
 ```
@@ -260,7 +265,7 @@ duplicate elements in different nodes of the DAG.
 def create(order):
   cd = depset(["c", "d"], order = order)
   gh = depset(["g", "h"], order = order)
-  return depset(["a", "b", "e", "f"], transitive = [cd, gh])
+  return depset(["a", "b", "e", "f"], transitive = [cd, gh], order = order)
 
 print(create("postorder").to_list())  # ["c", "d", "g", "h", "a", "b", "e", "f"]
 print(create("preorder").to_list())   # ["a", "b", "e", "f", "c", "d", "g", "h"]
@@ -273,7 +278,7 @@ def create(order):
   a = depset(["a"], order=order)
   b = depset(["b"], transitive = [a], order = order)
   c = depset(["c"], transitive = [a], order = order)
-  d = depset(["d"], transtive = [b, c], order = order)
+  d = depset(["d"], transitive = [b, c], order = order)
   return d
 
 print(create("postorder").to_list())    # ["a", "b", "c", "d"]
@@ -287,18 +292,11 @@ argument is omitted, the depset has the special `default` order, in which case
 there are no guarantees about the order of any of its elements (except that it
 is deterministic).
 
-For safety, depsets with different orders cannot be merged with the `+` operator
-unless one of them uses the default order; the resulting depset’s order is the
-same as the left operand. Note that when two depsets of different order are
-merged in this way, the child may appear to have had its elements rearranged
-when it is traversed via the parent. **The `+` operator is deprecated, anyway;
-use the `transitive` argument instead.**
-
 ## Performance
 
-To see the motivation for using depsets, consider what would have happened if we
-had implemented `get_transitive_srcs()` without them. A naive way of writing
-this function would be to collect the sources in a list.
+To see the motivation for using depsets, consider what happens if
+`get_transitive_srcs()` doesn't have depsets. A naive way to write this
+function would be to collect the sources in a list.
 
 ```python
 def get_transitive_srcs(srcs, deps):
@@ -351,25 +349,9 @@ target are added.
 To actually get the performance advantage, it’s important to not retrieve the
 contents of the depset unnecessarily in library rules. One call to `to_list()`
 at the end in a binary rule is fine, since the overall cost is just O(n). It’s
-when many non-terminal targets try to call `to_list()` that we start to get into
-quadratic behavior.
+when many non-terminal targets try to call `to_list()` that quadratic behavior
+occurs.
 
-## Upcoming changes
 
-The API for depsets is being updated to be more consistent. Here are some recent
-and/or upcoming changes.
-
-*   When it's necessary to retrieve a depset's contents, this should be done by
-    explicitly converting the depset to a list via its `to_list()` method. Do
-    not iterate directly over the depset itself; direct iteration is deprecated
-    and will be removed. For example, don't use `list(...)`, `sorted(...)`, or
-    other functions expecting an iterable, on depsets. The rationale of this
-    change is that iterating over depsets is generally expensive, and expensive
-    operations should be made obvious in code.
-
-*   Depset elements currently must have the same type, e.g. all ints or all
-    strings. This restriction will be lifted.
-
-*   A merge operation should be done by using the `transitive` argument in the
-    depset constructor. All other methods (`|` and `+` operators, and the
-    `union` method) are deprecated and will be going away.
+The [performance](performance.md) page also contains information about using
+depsets efficiently.

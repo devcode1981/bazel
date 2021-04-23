@@ -14,15 +14,27 @@
 
 package com.google.devtools.build.lib.skyframe;
 
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
+
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
+import com.google.devtools.build.lib.analysis.ConfiguredTargetValue;
 import com.google.devtools.build.lib.analysis.platform.PlatformInfo;
 import com.google.devtools.build.lib.analysis.platform.PlatformProviderUtils;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.cmdline.PackageIdentifier;
+import com.google.devtools.build.lib.packages.NoSuchPackageException;
+import com.google.devtools.build.lib.packages.NoSuchTargetException;
 import com.google.devtools.build.lib.packages.NoSuchThingException;
-import com.google.devtools.build.lib.skyframe.ConfiguredTargetFunction.ConfiguredValueCreationException;
+import com.google.devtools.build.lib.packages.Package;
+import com.google.devtools.build.lib.packages.RuleClass;
+import com.google.devtools.build.lib.packages.Target;
+import com.google.devtools.build.lib.server.FailureDetails.Toolchain.Code;
 import com.google.devtools.build.skyframe.SkyFunction.Environment;
 import com.google.devtools.build.skyframe.SkyKey;
+import com.google.devtools.build.skyframe.ValueOrException;
 import com.google.devtools.build.skyframe.ValueOrException3;
 import java.util.HashMap;
 import java.util.Map;
@@ -33,8 +45,12 @@ public class PlatformLookupUtil {
 
   @Nullable
   public static Map<ConfiguredTargetKey, PlatformInfo> getPlatformInfo(
-      Iterable<ConfiguredTargetKey> platformKeys, Environment env)
+      ImmutableList<ConfiguredTargetKey> platformKeys, Environment env)
       throws InterruptedException, InvalidPlatformException {
+    validatePlatformKeys(platformKeys, env);
+    if (env.valuesMissing()) {
+      return null;
+    }
 
     Map<
             SkyKey,
@@ -59,6 +75,53 @@ public class PlatformLookupUtil {
     }
 
     return platforms;
+  }
+
+  /** Validate that all keys are for actual platform targets. */
+  private static void validatePlatformKeys(
+      ImmutableList<ConfiguredTargetKey> platformKeys, Environment env)
+      throws InterruptedException, InvalidPlatformException {
+    // Load the packages. This should already be in Skyframe and thus not require a restart.
+    ImmutableSet<PackageValue.Key> packageKeys =
+        platformKeys.stream()
+            .map(ConfiguredTargetKey::getLabel)
+            .map(Label::getPackageIdentifier)
+            .distinct()
+            .map(PackageValue::key)
+            .collect(toImmutableSet());
+
+    Map<SkyKey, ValueOrException<NoSuchPackageException>> values =
+        env.getValuesOrThrow(packageKeys, NoSuchPackageException.class);
+    boolean valuesMissing = env.valuesMissing();
+    Map<PackageIdentifier, Package> packages = valuesMissing ? null : new HashMap<>();
+    for (Map.Entry<SkyKey, ValueOrException<NoSuchPackageException>> value : values.entrySet()) {
+      try {
+        PackageValue packageValue = (PackageValue) value.getValue().get();
+        if (!valuesMissing && packageValue != null) {
+          packages.put(packageValue.getPackage().getPackageIdentifier(), packageValue.getPackage());
+        }
+      } catch (NoSuchPackageException e) {
+        throw new InvalidPlatformException(e);
+      }
+    }
+    if (valuesMissing) {
+      return;
+    }
+
+    // Now check each platform.
+    for (ConfiguredTargetKey platformKey : platformKeys) {
+      try {
+        Label platformLabel = platformKey.getLabel();
+        Target target =
+            packages.get(platformLabel.getPackageIdentifier()).getTarget(platformLabel.getName());
+        if (!hasPlatformInfo(target)) {
+          // validation failure
+          throw new InvalidPlatformException(platformLabel);
+        }
+      } catch (NoSuchTargetException e) {
+        throw new InvalidPlatformException(e);
+      }
+    }
   }
 
   /**
@@ -91,34 +154,57 @@ public class PlatformLookupUtil {
     } catch (ConfiguredValueCreationException e) {
       throw new InvalidPlatformException(key.getLabel(), e);
     } catch (NoSuchThingException e) {
-      throw new InvalidPlatformException(key.getLabel(), e);
+      throw new InvalidPlatformException(e);
     } catch (ActionConflictException e) {
       throw new InvalidPlatformException(key.getLabel(), e);
     }
   }
 
+  static boolean hasPlatformInfo(Target target) {
+    // If the rule uses toolchain resolution, it can't be used as a target or exec platform.
+    if (target.getAssociatedRule() == null) {
+      return false;
+    }
+    RuleClass ruleClass = target.getAssociatedRule().getRuleClassObject();
+    if (ruleClass == null || ruleClass.useToolchainResolution()) {
+      return false;
+    }
+
+    return ruleClass.getAdvertisedProviders().advertises(PlatformInfo.PROVIDER.id());
+  }
+
   /** Exception used when a platform label is not a valid platform. */
   public static final class InvalidPlatformException extends ToolchainException {
+    private static final String DEFAULT_ERROR = "does not provide PlatformInfo";
+
     InvalidPlatformException(Label label) {
-      super(formatError(label));
+      super(formatError(label, DEFAULT_ERROR));
     }
 
     InvalidPlatformException(Label label, ConfiguredValueCreationException e) {
-      super(formatError(label), e);
+      super(formatError(label, DEFAULT_ERROR), e);
     }
 
-    public InvalidPlatformException(Label label, NoSuchThingException e) {
+    public InvalidPlatformException(NoSuchThingException e) {
       // Just propagate the inner exception, because it's directly actionable.
       super(e);
     }
 
     public InvalidPlatformException(Label label, ActionConflictException e) {
-      super(formatError(label), e);
+      super(formatError(label, DEFAULT_ERROR), e);
     }
 
-    private static String formatError(Label label) {
-      return String.format(
-          "Target %s was referenced as a platform, but does not provide PlatformInfo", label);
+    InvalidPlatformException(Label label, String error) {
+      super(formatError(label, error));
+    }
+
+    @Override
+    protected Code getDetailedCode() {
+      return Code.INVALID_PLATFORM_VALUE;
+    }
+
+    private static String formatError(Label label, String error) {
+      return String.format("Target %s was referenced as a platform, but %s", label, error);
     }
   }
 }

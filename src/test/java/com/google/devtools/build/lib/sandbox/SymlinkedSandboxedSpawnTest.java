@@ -18,11 +18,16 @@ import static com.google.common.truth.Truth.assertThat;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.devtools.build.lib.sandbox.SandboxHelpers.SandboxInputs;
 import com.google.devtools.build.lib.sandbox.SandboxHelpers.SandboxOutputs;
+import com.google.devtools.build.lib.testutil.TestUtils;
+import com.google.devtools.build.lib.vfs.DigestHashFunction;
+import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Symlinks;
+import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
 import java.io.IOException;
 import org.junit.Before;
 import org.junit.Test;
@@ -31,7 +36,7 @@ import org.junit.runners.JUnit4;
 
 /** Tests for {@link SymlinkedSandboxedSpawn}. */
 @RunWith(JUnit4.class)
-public class SymlinkedSandboxedSpawnTest extends SandboxTestCase {
+public class SymlinkedSandboxedSpawnTest {
   private Path workspaceDir;
   private Path sandboxDir;
   private Path execRoot;
@@ -39,6 +44,10 @@ public class SymlinkedSandboxedSpawnTest extends SandboxTestCase {
 
   @Before
   public final void setupTestDirs() throws IOException {
+    FileSystem fileSystem = new InMemoryFileSystem(DigestHashFunction.SHA256);
+    Path testRoot = fileSystem.getPath(TestUtils.tmpDir());
+    testRoot.createDirectoryAndParents();
+
     workspaceDir = testRoot.getRelative("workspace");
     workspaceDir.createDirectory();
     sandboxDir = testRoot.getRelative("sandbox");
@@ -60,10 +69,15 @@ public class SymlinkedSandboxedSpawnTest extends SandboxTestCase {
             execRoot,
             ImmutableList.of("/bin/true"),
             ImmutableMap.of(),
-            ImmutableMap.of(PathFragment.create("such/input.txt"), helloTxt),
+            new SandboxInputs(
+                ImmutableMap.of(PathFragment.create("such/input.txt"), helloTxt),
+                ImmutableSet.of(),
+                ImmutableMap.of()),
             SandboxOutputs.create(
                 ImmutableSet.of(PathFragment.create("very/output.txt")), ImmutableSet.of()),
-            ImmutableSet.of(execRoot.getRelative("wow/writable")));
+            ImmutableSet.of(execRoot.getRelative("wow/writable")),
+            new SynchronousTreeDeleter(),
+            /* statisticsPath= */ null);
 
     symlinkedExecRoot.createFileSystem();
 
@@ -75,8 +89,8 @@ public class SymlinkedSandboxedSpawnTest extends SandboxTestCase {
 
   @Test
   public void copyOutputs() throws Exception {
-    // These tests are very simple because we just rely on SandboxedSpawnTest.testMoveOutputs to
-    // properly verify all corner cases.
+    // These tests are very simple because we just rely on
+    // AbstractContainerizingSandboxedSpawnTest.testMoveOutputs to properly verify all corner cases.
     Path outputFile = execRoot.getRelative("very/output.txt");
 
     SymlinkedSandboxedSpawn symlinkedExecRoot =
@@ -85,10 +99,12 @@ public class SymlinkedSandboxedSpawnTest extends SandboxTestCase {
             execRoot,
             ImmutableList.of("/bin/true"),
             ImmutableMap.of(),
-            ImmutableMap.of(),
+            new SandboxInputs(ImmutableMap.of(), ImmutableSet.of(), ImmutableMap.of()),
             SandboxOutputs.create(
                 ImmutableSet.of(outputFile.relativeTo(execRoot)), ImmutableSet.of()),
-            ImmutableSet.of());
+            ImmutableSet.of(),
+            new SynchronousTreeDeleter(),
+            /* statisticsPath= */ null);
     symlinkedExecRoot.createFileSystem();
 
     FileSystemUtils.createEmptyFile(outputFile);

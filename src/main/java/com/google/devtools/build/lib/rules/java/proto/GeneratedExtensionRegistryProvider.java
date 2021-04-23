@@ -16,27 +16,26 @@ package com.google.devtools.build.lib.rules.java.proto;
 
 import com.google.common.base.Verify;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.analysis.TransitiveInfoProvider;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.collect.nestedset.Depset;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.packages.BuiltinProvider;
 import com.google.devtools.build.lib.packages.NativeInfo;
-import com.google.devtools.build.lib.skylarkbuildapi.java.GeneratedExtensionRegistryProviderApi;
-import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
+import com.google.devtools.build.lib.starlarkbuildapi.java.GeneratedExtensionRegistryProviderApi;
+import net.starlark.java.eval.EvalException;
 
 /**
- * A {@link TransitiveInfoProvider} for {@link Artifact}s created and used to generate the proto
- * extension registry. This provider is used to ensure that if multiple registries are generated
- * from a target, that the top most target produces a registry that is a superset of any child
- * registries.
+ * A {@link com.google.devtools.build.lib.analysis.TransitiveInfoProvider} for {@link Artifact}s
+ * created and used to generate the proto extension registry. This provider is used to ensure that
+ * if multiple registries are generated from a target, that the top most target produces a registry
+ * that is a superset of any child registries.
  */
 @Immutable
 public final class GeneratedExtensionRegistryProvider extends NativeInfo
     implements GeneratedExtensionRegistryProviderApi<Artifact> {
 
-  public static final String PROVIDER_NAME = "GeneratedExtensionRegistryProvider";
   public static final Provider PROVIDER = new Provider();
 
   private final Label generatingRuleLabel;
@@ -71,6 +70,10 @@ public final class GeneratedExtensionRegistryProvider extends NativeInfo
 
   /** @return the proto jars used to generate the registry. */
   @Override
+  public Depset /*<Artifact>*/ getInputsForStarlark() {
+    return Depset.of(Artifact.TYPE, inputs);
+  }
+
   public NestedSet<Artifact> getInputs() {
     return inputs;
   }
@@ -85,12 +88,16 @@ public final class GeneratedExtensionRegistryProvider extends NativeInfo
       Artifact classJar,
       Artifact srcJar,
       NestedSet<Artifact> inputs) {
-    super(PROVIDER);
     this.generatingRuleLabel = generatingRuleLabel;
     this.isLite = isLite;
     this.classJar = classJar;
     this.srcJar = srcJar;
     this.inputs = inputs;
+  }
+
+  @Override
+  public Provider getProvider() {
+    return PROVIDER;
   }
 
   /** A builder for {@link GeneratedExtensionRegistryProvider}. */
@@ -142,11 +149,11 @@ public final class GeneratedExtensionRegistryProvider extends NativeInfo
   public static class Provider extends BuiltinProvider<GeneratedExtensionRegistryProvider>
       implements GeneratedExtensionRegistryProviderApi.Provider<Artifact> {
     private Provider() {
-      super(PROVIDER_NAME, GeneratedExtensionRegistryProvider.class);
+      super(NAME, GeneratedExtensionRegistryProvider.class);
     }
 
     public String getName() {
-      return PROVIDER_NAME;
+      return NAME;
     }
 
     @Override
@@ -155,14 +162,15 @@ public final class GeneratedExtensionRegistryProvider extends NativeInfo
         boolean isLite,
         Artifact classJar,
         Artifact srcJar,
-        SkylarkNestedSet inputs) {
+        Depset inputs)
+        throws EvalException {
       return new GeneratedExtensionRegistryProvider(
           generatingRuleLabel,
           isLite,
           classJar,
           srcJar,
           NestedSetBuilder.<Artifact>stableOrder()
-              .addTransitive(inputs.getSet(Artifact.class))
+              .addTransitive(Depset.cast(inputs, Artifact.class, "inputs"))
               .build());
     }
   }

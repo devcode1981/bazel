@@ -1,61 +1,64 @@
 ---
 layout: documentation
-title: Output Directory Layout
+title: Output directory layout
 ---
 
 # Output Directory Layout
+
+This page covers requirements and layout for output directories.
 
 ## Requirements
 
 Requirements for an output directory layout:
 
-* Don't collide if multiple users are building on the same box.
-* Support building in multiple workspaces at the same time.
-* Support building for multiple target configurations in the same workspace.
-* Don't collide with any other tools.
-* Be easy to access.
-* Be easy to clean, even selectively.
+* Doesn't collide if multiple users are building on the same box.
+* Supports building in multiple workspaces at the same time.
+* Supports building for multiple target configurations in the same workspace.
+* Doesn't collide with any other tools.
+* Is easy to access.
+* Is easy to clean, even selectively.
 * Is unambiguous, even if the user relies on symbolic links when changing into
   their client directory.
 * All the build state per user should be underneath one directory ("I'd like to
   clean all the .o files from all my clients.")
 
-## Documentation of the current Bazel output directory layout
+## Current layout
 
 The solution that's currently implemented:
 
-* Bazel must be invoked from a directory containing a WORKSPACE file. It reports
-  an error if it is not. We call this the _workspace directory_.
-* The _outputRoot_ directory is ~/.cache/bazel. (Unless `$TEST_TMPDIR` is
-  set, as in a test of bazel itself, in which case this directory is used
-  instead.)
-* We stick the Bazel user's build state beneath `outputRoot/_bazel_$USER`. This
-  is called the _outputUserRoot_ directory.
-* Beneath the `outputUserRoot` directory, we create an `installBase` directory
+* Bazel must be invoked from a directory containing a WORKSPACE file (the
+  "_workspace directory_"), or a subdirectory thereof. It reports an error if it
+  is not.
+* The _outputRoot_ directory defaults to `~/.cache/bazel` on Linux,
+  `/private/var/tmp` on macOS, and on Windows it defaults to `%HOME%` if set,
+  else `%USERPROFILE%` if set, else the result of calling
+  `SHGetKnownFolderPath()` with the `FOLDERID_Profile` flag set. If the
+  environment variable `$TEST_TMPDIR` is set, as in a test of bazel itself,
+  then that value overrides the default.
+* The Bazel user's build state is located beneath `outputRoot/_bazel_$USER`.
+  This is called the _outputUserRoot_ directory.
+* Beneath the `outputUserRoot` directory, an `installBase` directory is created
   whose name is "install" plus the MD5 hash of the Bazel installation manifest.
-* Beneath the `outputUserRoot` directory, we also create an `outputBase`
-  directory whose name is the MD5 hash of the path name of the workspace
+* Beneath the `outputUserRoot` directory, an `outputBase` directory
+  is also created whose name is the MD5 hash of the path name of the workspace
   directory. So, for example, if Bazel is running in the workspace directory
-  `/home/user/src/my-project` (or in a directory symlinked to that one), then we
-  create an output base directory called:
+  `/home/user/src/my-project` (or in a directory symlinked to that one), then
+  an output base directory is created called:
   `/home/user/.cache/bazel/_bazel_user/7ffd56a6e4cb724ea575aba15733d113`.
-* Users can use Bazel's `--output_base` startup option to override the default
+* You can use Bazel's `--output_base` startup option to override the default
   output base directory. For example,
   `bazel --output_base=/tmp/bazel/output build x/y:z`.
-* Users can also use Bazel's `--output_user_root` startup option to override the
+* You can also use Bazel's `--output_user_root` startup option to override the
   default install base and output base directories. For example:
   `bazel --output_user_root=/tmp/bazel build x/y:z`.
 
-We put symlinks "bazel-&lt;workspace-name&gt;" and "bazel-out", as well as
-"bazel-bin", "bazel-genfiles", and "bazel-includes" in the workspace directory;
-these symlinks points to some directories inside a target-specific directory
-inside the output directory. These symlinks are only for the user's convenience,
-as Bazel itself does not use them. Also, we only do this if the workspace
-directory is writable. The names of the "bazel-bin", "bazel-genfiles", and
-"bazel-include" symlinks are affected by the `--symlink_prefix` option to bazel,
-but "bazel-&lt;workspace-name&gt;" and "bazel-out" are not.
+The symlinks for "bazel-&lt;workspace-name&gt;", "bazel-out", "bazel-testlogs",
+and "bazel-bin" are put in the workspace directory; these symlinks point to some
+directories inside a target-specific directory inside the output directory.
+These symlinks are only for the user's convenience, as Bazel itself does not
+use them. Also, this is done only if the workspace directory is writable.
 
-## Bazel internals: Directory layout
+## Layout diagram
 
 The directories are laid out as follows:
 
@@ -64,7 +67,7 @@ The directories are laid out as follows:
   bazel-my-project => <...my-project>     <== Symlink to execRoot
   bazel-out => <...bin>                   <== Convenience symlink to outputPath
   bazel-bin => <...bin>                   <== Convenience symlink to most recent written bin dir $(BINDIR)
-  bazel-genfiles => <...genfiles>         <== Convenience symlink to most recent written genfiles dir $(GENDIR)
+  bazel-testlogs => <...testlogs>         <== Convenience symlink to the test logs directory
 
 /home/user/.cache/bazel/                  <== Root for all Bazel output on a machine: outputRoot
   _bazel_$USER/                           <== Top level directory for a given user depends on the user name:
@@ -120,7 +123,7 @@ The directories are laid out as follows:
                 foo/bartest.log               e.g. foo/bar.log might be an output of the //foo:bartest test with
                 foo/bartest.status            foo/bartest.status containing exit status of the test (e.g.
                                               PASSED or FAILED (Exit 1), etc)
-              include/                    <== a tree with include symlinks, generated as needed.  The
+              include/                    <== a tree with include symlinks, generated as needed. The
                                               bazel-include symlinks point to here. This is used for
                                               linkstamp stuff, etc.
             host/                         <== BuildConfiguration for build host (user's workstation), for

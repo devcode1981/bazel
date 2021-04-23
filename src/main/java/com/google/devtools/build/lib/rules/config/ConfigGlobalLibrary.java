@@ -14,19 +14,30 @@
 
 package com.google.devtools.build.lib.rules.config;
 
+import static com.google.devtools.build.lib.analysis.config.StarlarkDefinedConfigTransition.COMMAND_LINE_OPTION_PREFIX;
+
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.analysis.config.StarlarkDefinedConfigTransition;
-import com.google.devtools.build.lib.events.Location;
-import com.google.devtools.build.lib.skylarkbuildapi.config.ConfigGlobalLibraryApi;
-import com.google.devtools.build.lib.skylarkbuildapi.config.ConfigurationTransitionApi;
-import com.google.devtools.build.lib.syntax.BaseFunction;
-import com.google.devtools.build.lib.syntax.Environment;
-import com.google.devtools.build.lib.syntax.EvalException;
-import com.google.devtools.build.lib.syntax.SkylarkDict;
-import com.google.devtools.build.lib.syntax.SkylarkSemantics;
+import com.google.devtools.build.lib.analysis.config.StarlarkDefinedConfigTransition.Settings;
+import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.cmdline.RepositoryName;
+import com.google.devtools.build.lib.packages.BazelModuleContext;
+import com.google.devtools.build.lib.packages.BazelStarlarkContext;
+import com.google.devtools.build.lib.starlarkbuildapi.config.ConfigGlobalLibraryApi;
+import com.google.devtools.build.lib.starlarkbuildapi.config.ConfigurationTransitionApi;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import net.starlark.java.eval.Dict;
+import net.starlark.java.eval.EvalException;
+import net.starlark.java.eval.Module;
+import net.starlark.java.eval.Sequence;
+import net.starlark.java.eval.Starlark;
+import net.starlark.java.eval.StarlarkCallable;
+import net.starlark.java.eval.StarlarkSemantics;
+import net.starlark.java.eval.StarlarkThread;
+import net.starlark.java.syntax.Location;
 
 /**
  * Implementation of {@link ConfigGlobalLibraryApi}.
@@ -35,64 +46,74 @@ import java.util.Map;
  */
 public class ConfigGlobalLibrary implements ConfigGlobalLibraryApi {
 
-  private static final String COMMAND_LINE_OPTION_PREFIX = "//command_line_option:";
-
   @Override
   public ConfigurationTransitionApi transition(
-      BaseFunction implementation,
-      List<String> inputs,
-      List<String> outputs,
-      Location location,
-      Environment env)
+      StarlarkCallable implementation,
+      Sequence<?> inputs, // <String> expected
+      Sequence<?> outputs, // <String> expected
+      StarlarkThread thread)
       throws EvalException {
-    SkylarkSemantics semantics = env.getSemantics();
-    if (!semantics.experimentalStarlarkConfigTransitions()) {
-      throw new EvalException(
-          location,
-          "transition() is experimental and disabled by default. "
-              + "This API is in development and subject to change at any time. Use "
-              + "--experimental_starlark_config_transitions to use this experimental API.");
-    }
-    validateBuildSettingKeys(inputs, "input", location);
-    validateBuildSettingKeys(outputs, "output", location);
+    StarlarkSemantics semantics = thread.getSemantics();
+    List<String> inputsList = Sequence.cast(inputs, String.class, "inputs");
+    List<String> outputsList = Sequence.cast(outputs, String.class, "outputs");
+    validateBuildSettingKeys(inputsList, Settings.INPUTS);
+    validateBuildSettingKeys(outputsList, Settings.OUTPUTS);
+    Label parentLabel =
+        BazelModuleContext.of(Module.ofInnermostEnclosingStarlarkFunction(thread)).label();
+    Location location = thread.getCallerLocation();
+    BazelStarlarkContext context = BazelStarlarkContext.from(thread);
     return StarlarkDefinedConfigTransition.newRegularTransition(
-        implementation, inputs, outputs, semantics, env.getEventHandler());
+        implementation, inputsList, outputsList, semantics, parentLabel, location, context);
   }
 
   @Override
   public ConfigurationTransitionApi analysisTestTransition(
-      SkylarkDict<String, String> changedSettings, Location location, SkylarkSemantics semantics)
+      Dict<?, ?> changedSettings, // <String, String> expected
+      StarlarkThread thread)
       throws EvalException {
-    if (!semantics.experimentalAnalysisTestingImprovements()) {
-      throw new EvalException(
-          location,
-          "analysis_test_transition() is experimental "
-              + "and disabled by default. This API is in development and subject to change at "
-              + "any time. Use --experimental_analysis_testing_improvements to use this "
-              + "experimental API.");
-    }
     Map<String, Object> changedSettingsMap =
-        changedSettings.getContents(String.class, Object.class, "changed_settings dict");
-    validateBuildSettingKeys(changedSettingsMap.keySet(), "output", location);
-    return StarlarkDefinedConfigTransition.newAnalysisTestTransition(changedSettingsMap, location);
+        Dict.cast(changedSettings, String.class, Object.class, "changed_settings dict");
+    validateBuildSettingKeys(changedSettingsMap.keySet(), Settings.OUTPUTS);
+    ImmutableMap<RepositoryName, RepositoryName> repoMapping =
+        BazelStarlarkContext.from(thread).getRepoMapping();
+    Label parentLabel =
+        BazelModuleContext.of(Module.ofInnermostEnclosingStarlarkFunction(thread)).label();
+    Location location = thread.getCallerLocation();
+    return StarlarkDefinedConfigTransition.newAnalysisTestTransition(
+        changedSettingsMap, repoMapping, parentLabel, location);
   }
 
-  private void validateBuildSettingKeys(
-      Iterable<String> optionKeys, String keyErrorDescriptor, Location location)
+  private void validateBuildSettingKeys(Iterable<String> optionKeys, Settings keyErrorDescriptor)
       throws EvalException {
-    // TODO(juliexxia): Allow real labels, not just command line option placeholders.
 
     HashSet<String> processedOptions = Sets.newHashSet();
+    String singularErrorDescriptor = keyErrorDescriptor == Settings.INPUTS ? "input" : "output";
 
     for (String optionKey : optionKeys) {
       if (!optionKey.startsWith(COMMAND_LINE_OPTION_PREFIX)) {
-        throw new EvalException(location,
-            String.format("invalid transition %s '%s'. If this is intended as a native option, "
-                + "it must begin with //command_line_option:", keyErrorDescriptor, optionKey));
+        try {
+          Label.parseAbsoluteUnchecked(optionKey);
+        } catch (IllegalArgumentException e) {
+          throw Starlark.errorf(
+              "invalid transition %s '%s'. If this is intended as a native option, "
+                  + "it must begin with //command_line_option: %s",
+              singularErrorDescriptor, optionKey, e.getMessage());
+        }
+      } else {
+        String optionName = optionKey.substring(COMMAND_LINE_OPTION_PREFIX.length());
+        // If any other flags need to be excepted, then this fix should be amended to instead be
+        // a commandline-specified set of allowed exceptions.
+        if (optionName.startsWith("experimental_")
+            || (optionName.startsWith("incompatible_")
+                && !optionName.equals("incompatible_enable_cc_toolchain_resolution"))) {
+          throw Starlark.errorf(
+              "Invalid transition %s '%s'. Cannot transition on --experimental_* or "
+                  + "--incompatible_* options",
+              singularErrorDescriptor, optionKey);
+        }
       }
       if (!processedOptions.add(optionKey)) {
-        throw new EvalException(location,
-            String.format("duplicate transition %s '%s'", keyErrorDescriptor, optionKey));
+        throw Starlark.errorf("duplicate transition %s '%s'", singularErrorDescriptor, optionKey);
       }
     }
   }

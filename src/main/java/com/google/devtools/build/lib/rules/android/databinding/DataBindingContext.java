@@ -17,6 +17,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
 import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.rules.android.AndroidDataContext;
 import com.google.devtools.build.lib.rules.android.AndroidResources;
 import com.google.devtools.build.lib.rules.java.JavaPluginInfoProvider;
 import java.util.function.BiConsumer;
@@ -55,25 +56,32 @@ public interface DataBindingContext {
 
   /** The javac flags that are needed to configure data binding's annotation processor. */
   void supplyJavaCoptsUsing(
-      RuleContext ruleContext, boolean isBinary, Consumer<Iterable<String>> consumer);
+      RuleContext ruleContext,
+      boolean isBinary,
+      Consumer<Iterable<String>> consumer);
 
   /**
    * Adds data binding's annotation processor as a plugin to the given Java compilation context.
    *
    * <p>This extends the Java compilation to translate data binding .xml into corresponding
    * classes.
+   *
+   * The BiConsumer accepts as its first argument the JavaPluginInfoProvider, and the list of
+   * outputs of the processor as the second argument.
    */
   void supplyAnnotationProcessor(
-      RuleContext ruleContext, BiConsumer<JavaPluginInfoProvider, Iterable<Artifact>> consumer);
+      RuleContext ruleContext,
+      BiConsumer<JavaPluginInfoProvider, Iterable<Artifact>> consumer);
 
   /**
    * Processes deps that also apply data binding.
    *
    * @param ruleContext the current rule
+   * @param isBinary whether this rule is a "binary" rule (i.e., top-level android rule)
    * @return the deps' metadata outputs. These need to be staged as compilation inputs to the
    *     current rule.
    */
-  ImmutableList<Artifact> processDeps(RuleContext ruleContext);
+  ImmutableList<Artifact> processDeps(RuleContext ruleContext, boolean isBinary);
 
   /**
    * Creates and adds the generated Java source for data binding annotation processor to read and
@@ -83,8 +91,7 @@ public interface DataBindingContext {
    * <p>This triggers the annotation processor. Annotation processor settings are configured
    * separately in {@link #supplyJavaCoptsUsing(RuleContext, boolean, Consumer)}.
    */
-  ImmutableList<Artifact> addAnnotationFileToSrcs(
-      ImmutableList<Artifact> srcs, RuleContext ruleContext);
+  ImmutableList<Artifact> getAnnotationSourceFiles(RuleContext ruleContext);
 
   /**
    * Adds the appropriate {@link UsesDataBindingProvider} for a rule if it should expose one.
@@ -94,5 +101,15 @@ public interface DataBindingContext {
    */
   void addProvider(RuleConfiguredTargetBuilder builder, RuleContext ruleContext);
 
-  AndroidResources processResources(AndroidResources resources);
+  /**
+   * Process the given Android Resources for databinding. In databinding v2, this strips out the
+   * databinding and generates the layout info file.
+   */
+  AndroidResources processResources(
+      AndroidDataContext dataContext,
+      AndroidResources resources,
+      String appId);
+
+  /** Returns whether this context supports generating AndroidX dependencies. */
+  boolean usesAndroidX();
 }

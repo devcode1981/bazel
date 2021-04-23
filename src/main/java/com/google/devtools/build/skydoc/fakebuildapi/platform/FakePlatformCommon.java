@@ -14,8 +14,8 @@
 
 package com.google.devtools.build.skydoc.fakebuildapi.platform;
 
-import com.google.devtools.build.lib.skylarkbuildapi.ProviderApi;
-import com.google.devtools.build.lib.skylarkbuildapi.platform.PlatformCommonApi;
+import com.google.devtools.build.lib.starlarkbuildapi.core.ProviderApi;
+import com.google.devtools.build.lib.starlarkbuildapi.platform.PlatformCommonApi;
 import com.google.devtools.build.skydoc.fakebuildapi.FakeProviderApi;
 
 /**
@@ -25,26 +25,26 @@ public class FakePlatformCommon implements PlatformCommonApi {
 
   @Override
   public ProviderApi getMakeVariableProvider() {
-    return new FakeProviderApi();
+    return new FakeProviderApi("TemplateVariableInfo");
   }
 
   @Override
   public ProviderApi getToolchainInfoConstructor() {
-    return new FakeProviderApi();
+    return new FakeProviderApi("ToolchainInfo");
   }
 
   @Override
   public ProviderApi getPlatformInfoConstructor() {
-    return new FakeProviderApi();
+    return new FakeProviderApi("PlatformInfo");
   }
 
   @Override
   public ProviderApi getConstraintSettingInfoConstructor() {
-    return new FakeProviderApi();
+    return new FakeProviderApi("ConstraintSettingInfo");
   }
 
   @Override
   public ProviderApi getConstraintValueInfoConstructor() {
-    return new FakeProviderApi();
+    return new FakeProviderApi("ConstraintValueInfo");
   }
 }

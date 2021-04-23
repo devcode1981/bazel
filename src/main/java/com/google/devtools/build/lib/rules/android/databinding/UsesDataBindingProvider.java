@@ -17,10 +17,10 @@ import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.packages.BuiltinProvider;
 import com.google.devtools.build.lib.packages.NativeInfo;
-import com.google.devtools.build.lib.skylarkbuildapi.android.UsesDataBindingProviderApi;
-import com.google.devtools.build.lib.syntax.EvalException;
-import com.google.devtools.build.lib.syntax.SkylarkList;
+import com.google.devtools.build.lib.starlarkbuildapi.android.UsesDataBindingProviderApi;
 import java.util.Collection;
+import net.starlark.java.eval.EvalException;
+import net.starlark.java.eval.Sequence;
 
 /**
  * A provider that exposes this enables <a
@@ -30,14 +30,17 @@ import java.util.Collection;
 public final class UsesDataBindingProvider extends NativeInfo
     implements UsesDataBindingProviderApi<Artifact> {
 
-  public static final String PROVIDER_NAME = "UsesDataBindingInfo";
   public static final Provider PROVIDER = new Provider();
 
   private final ImmutableList<Artifact> metadataOutputs;
 
   public UsesDataBindingProvider(Collection<Artifact> metadataOutputs) {
-    super(PROVIDER);
     this.metadataOutputs = ImmutableList.copyOf(metadataOutputs);
+  }
+
+  @Override
+  public Provider getProvider() {
+    return PROVIDER;
   }
 
   @Override
@@ -50,13 +53,14 @@ public final class UsesDataBindingProvider extends NativeInfo
       implements UsesDataBindingProviderApi.Provider<Artifact> {
 
     private Provider() {
-      super(PROVIDER_NAME, UsesDataBindingProvider.class);
+      super(NAME, UsesDataBindingProvider.class);
     }
 
     @Override
-    public UsesDataBindingProvider createInfo(SkylarkList<Artifact> metadataOutputs)
+    public UsesDataBindingProvider createInfo(Sequence<?> metadataOutputs) // <Artifact>
         throws EvalException {
-      return new UsesDataBindingProvider(metadataOutputs.getImmutableList());
+      return new UsesDataBindingProvider(
+          Sequence.cast(metadataOutputs, Artifact.class, "metadata_outputs"));
     }
   }
 }

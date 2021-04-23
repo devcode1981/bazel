@@ -1,3 +1,5 @@
+load("@rules_java//java:defs.bzl", "java_binary", "java_import")
+
 package(default_visibility = ["//visibility:public"])
 
 licenses(["notice"])  # Apache 2.0
@@ -7,15 +9,7 @@ filegroup(
     srcs = glob(["**"]),
 )
 
-filegroup(
-    name = "embedded_tools_srcs",
-    srcs = [
-        "BUILD.tools",
-        "LICENSE",
-        ":jarjar_command_deploy.jar",
-    ],
-)
-
+# jarjar_bin
 java_binary(
     name = "jarjar_command",
     srcs = glob(

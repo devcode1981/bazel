@@ -14,13 +14,13 @@
 
 package com.google.devtools.build.skydoc.fakebuildapi;
 
-import com.google.devtools.build.lib.skylarkbuildapi.SkylarkConfigApi;
-import com.google.devtools.build.lib.skylarkinterface.SkylarkPrinter;
+import com.google.devtools.build.lib.starlarkbuildapi.StarlarkConfigApi;
+import com.google.devtools.build.skydoc.fakebuildapi.ConfigApiFakes.FakeBuildSettingDescriptor;
+import com.google.devtools.build.skydoc.fakebuildapi.ConfigApiFakes.FakeExecTransitionFactory;
+import net.starlark.java.eval.Printer;
 
-/**
- * Fake implementation of {@link SkylarkConfigApi}.
- */
-public class FakeConfigApi implements SkylarkConfigApi {
+/** Fake implementation of {@link StarlarkConfigApi}. */
+public class FakeConfigApi implements StarlarkConfigApi {
 
   @Override
   public BuildSettingApi intSetting(Boolean flag) {
@@ -33,7 +33,7 @@ public class FakeConfigApi implements SkylarkConfigApi {
   }
 
   @Override
-  public BuildSettingApi stringSetting(Boolean flag) {
+  public BuildSettingApi stringSetting(Boolean flag, Boolean allowMultiple) {
     return new FakeBuildSettingDescriptor();
   }
 
@@ -43,15 +43,10 @@ public class FakeConfigApi implements SkylarkConfigApi {
   }
 
   @Override
-  public BuildSettingApi labelSetting(Boolean flag) {
-    return new FakeBuildSettingDescriptor();
+  public ExecTransitionFactoryApi exec(Object execGroup) {
+    return new FakeExecTransitionFactory();
   }
 
   @Override
-  public BuildSettingApi labelListSetting(Boolean flag) {
-    return new FakeBuildSettingDescriptor();
-  }
-
-  @Override
-  public void repr(SkylarkPrinter printer) {}
+  public void repr(Printer printer) {}
 }

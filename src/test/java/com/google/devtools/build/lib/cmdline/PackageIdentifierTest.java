@@ -17,10 +17,6 @@ package com.google.devtools.build.lib.cmdline;
 import static com.google.common.truth.Truth.assertThat;
 
 import com.google.devtools.build.lib.vfs.PathFragment;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.ObjectInputStream;
-import java.io.ObjectOutputStream;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -35,21 +31,26 @@ public class PackageIdentifierTest {
     PackageIdentifier fooA = PackageIdentifier.parse("@foo//a");
     assertThat(fooA.getRepository().strippedName()).isEqualTo("foo");
     assertThat(fooA.getPackageFragment().getPathString()).isEqualTo("a");
-    assertThat(fooA.getRepository().getSourceRoot()).isEqualTo(
-        PathFragment.create("external/foo"));
+    assertThat(fooA.getPackagePath(false)).isEqualTo(PathFragment.create("external/foo/a"));
+    assertThat(fooA.getPackagePath(true)).isEqualTo(PathFragment.create("a"));
 
     PackageIdentifier absoluteA = PackageIdentifier.parse("//a");
     assertThat(absoluteA.getRepository().strippedName()).isEmpty();
     assertThat(absoluteA.getPackageFragment().getPathString()).isEqualTo("a");
+    assertThat(absoluteA.getPackagePath(false)).isEqualTo(PathFragment.create("a"));
+    assertThat(absoluteA.getPackagePath(true)).isEqualTo(PathFragment.create("a"));
 
     PackageIdentifier plainA = PackageIdentifier.parse("a");
     assertThat(plainA.getRepository().strippedName()).isEmpty();
     assertThat(plainA.getPackageFragment().getPathString()).isEqualTo("a");
+    assertThat(plainA.getPackagePath(false)).isEqualTo(PathFragment.create("a"));
+    assertThat(plainA.getPackagePath(true)).isEqualTo(PathFragment.create("a"));
 
     PackageIdentifier mainA = PackageIdentifier.parse("@//a");
     assertThat(mainA.getRepository()).isEqualTo(RepositoryName.MAIN);
     assertThat(mainA.getPackageFragment().getPathString()).isEqualTo("a");
-    assertThat(mainA.getRepository().getSourceRoot()).isEqualTo(PathFragment.EMPTY_FRAGMENT);
+    assertThat(mainA.getPackagePath(false)).isEqualTo(PathFragment.create("a"));
+    assertThat(mainA.getPackagePath(true)).isEqualTo(PathFragment.create("a"));
   }
 
   @Test
@@ -78,22 +79,11 @@ public class PackageIdentifierTest {
   }
 
   @Test
-  public void testSerialization() throws Exception {
-    PackageIdentifier inId = PackageIdentifier.create("@foo", PathFragment.create("bar/baz"));
-    ByteArrayOutputStream data = new ByteArrayOutputStream();
-    ObjectOutputStream out = new ObjectOutputStream(data);
-    out.writeObject(inId);
-    ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(data.toByteArray()));
-    PackageIdentifier outId = (PackageIdentifier) in.readObject();
-    assertThat(outId).isEqualTo(inId);
-  }
-
-  @Test
   public void testPackageFragmentEquality() throws Exception {
     // Make sure package fragments are canonicalized.
     PackageIdentifier p1 = PackageIdentifier.create("@whatever", PathFragment.create("foo/bar"));
     PackageIdentifier p2 = PackageIdentifier.create("@whatever", PathFragment.create("foo/bar"));
-    assertThat(p1.getPackageFragment()).isSameAs(p2.getPackageFragment());
+    assertThat(p1.getPackageFragment()).isSameInstanceAs(p2.getPackageFragment());
   }
 
   @Test

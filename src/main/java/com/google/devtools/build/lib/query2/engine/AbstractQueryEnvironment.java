@@ -139,7 +139,7 @@ public abstract class AbstractQueryEnvironment<T> implements QueryEnvironment<T>
   }
 
   @Override
-  public <R> QueryTaskFuture<R> executeAsync(QueryTaskCallable<R> callable) {
+  public <R> QueryTaskFuture<R> execute(QueryTaskCallable<R> callable) {
     try {
       return immediateSuccessfulFuture(callable.call());
     } catch (QueryException e) {
@@ -147,6 +147,11 @@ public abstract class AbstractQueryEnvironment<T> implements QueryEnvironment<T>
     } catch (InterruptedException e) {
       return immediateCancelledFuture();
     }
+  }
+
+  @Override
+  public <R> QueryTaskFuture<R> executeAsync(QueryTaskAsyncCallable<R> callable) {
+    return callable.call();
   }
 
   @Override
@@ -180,8 +185,7 @@ public abstract class AbstractQueryEnvironment<T> implements QueryEnvironment<T>
 
   @Override
   public <T1, T2> QueryTaskFuture<T2> transformAsync(
-      QueryTaskFuture<T1> future,
-      final Function<T1, QueryTaskFuture<T2>> function) {
+      QueryTaskFuture<T1> future, Function<T1, QueryTaskFuture<T2>> function) {
     return QueryTaskFutureImpl.ofDelegate(
         Futures.transformAsync(
             (QueryTaskFutureImpl<T1>) future,
@@ -191,6 +195,6 @@ public abstract class AbstractQueryEnvironment<T> implements QueryEnvironment<T>
 
   protected static Iterable<QueryTaskFutureImpl<?>> cast(
       Iterable<? extends QueryTaskFuture<?>> futures) {
-    return Iterables.transform(futures, future -> (QueryTaskFutureImpl<?>) future);
+    return Iterables.transform(futures, QueryTaskFutureImpl.class::cast);
   }
 }

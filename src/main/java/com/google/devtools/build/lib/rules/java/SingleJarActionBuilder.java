@@ -16,7 +16,6 @@ package com.google.devtools.build.lib.rules.java;
 import static java.util.Objects.requireNonNull;
 
 import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableCollection;
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.actions.ActionRegistry;
 import com.google.devtools.build.lib.actions.Artifact;
@@ -31,6 +30,8 @@ import com.google.devtools.build.lib.analysis.actions.CustomCommandLine;
 import com.google.devtools.build.lib.analysis.actions.CustomCommandLine.VectorArg;
 import com.google.devtools.build.lib.analysis.actions.SpawnAction;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import java.util.function.Consumer;
@@ -48,8 +49,7 @@ public final class SingleJarActionBuilder {
           "--compression", "--normalize", "--exclude_build_data", "--warn_duplicate_resources");
 
   /** Constructs the base spawn for a singlejar action. */
-  private static SpawnAction.Builder singleJarActionBuilder(
-      JavaToolchainProvider provider, JavaRuntimeInfo hostJavabase) {
+  private static SpawnAction.Builder singleJarActionBuilder(JavaToolchainProvider provider) {
     Artifact singleJar = provider.getSingleJar();
     SpawnAction.Builder builder = new SpawnAction.Builder();
     // If singlejar's name ends with .jar, it is Java application, otherwise it is native.
@@ -57,8 +57,11 @@ public final class SingleJarActionBuilder {
     // the native singlejar is used on windows) remove support for the Java implementation
     if (singleJar.getFilename().endsWith(".jar")) {
       builder
-          .addTransitiveInputs(hostJavabase.javaBaseInputsMiddleman())
-          .setJarExecutable(hostJavabase.javaBinaryExecPath(), singleJar, provider.getJvmOptions())
+          .addTransitiveInputs(provider.getJavaRuntime().javaBaseInputsMiddleman())
+          .setJarExecutable(
+              provider.getJavaRuntime().javaBinaryExecPathFragment(),
+              singleJar,
+              provider.getJvmOptions())
           .setExecutionInfo(ExecutionRequirements.WORKER_MODE_ENABLED);
     } else {
       builder.setExecutable(singleJar);
@@ -76,7 +79,7 @@ public final class SingleJarActionBuilder {
   public static void createSourceJarAction(
       RuleContext ruleContext,
       JavaSemantics semantics,
-      ImmutableCollection<Artifact> resources,
+      NestedSet<Artifact> resources,
       NestedSet<Artifact> resourceJars,
       Artifact outputJar) {
     createSourceJarAction(
@@ -86,8 +89,7 @@ public final class SingleJarActionBuilder {
         resources,
         resourceJars,
         outputJar,
-        JavaToolchainProvider.from(ruleContext),
-        JavaRuntimeInfo.forHost(ruleContext));
+        JavaToolchainProvider.from(ruleContext));
   }
 
   /**
@@ -99,26 +101,24 @@ public final class SingleJarActionBuilder {
    * @param resourceJars the resource jars to merge into the jar
    * @param outputJar the Jar to create
    * @param toolchainProvider is used to retrieve jvm options
-   * @param hostJavabase the Java runtime to run the tools under
    */
   public static void createSourceJarAction(
       ActionRegistry actionRegistry,
       ActionConstructionContext actionConstructionContext,
       JavaSemantics semantics,
-      ImmutableCollection<Artifact> resources,
+      NestedSet<Artifact> resources,
       NestedSet<Artifact> resourceJars,
       Artifact outputJar,
-      JavaToolchainProvider toolchainProvider,
-      JavaRuntimeInfo hostJavabase) {
+      JavaToolchainProvider toolchainProvider) {
     requireNonNull(resourceJars);
     requireNonNull(outputJar);
     if (!resources.isEmpty()) {
       requireNonNull(semantics);
     }
     SpawnAction.Builder builder =
-        singleJarActionBuilder(toolchainProvider, hostJavabase)
+        singleJarActionBuilder(toolchainProvider)
             .addOutput(outputJar)
-            .addInputs(resources)
+            .addTransitiveInputs(resources)
             .addTransitiveInputs(resourceJars)
             .addCommandLine(
                 sourceJarCommandLine(outputJar, semantics, resources, resourceJars),
@@ -141,13 +141,15 @@ public final class SingleJarActionBuilder {
     requireNonNull(jars);
     requireNonNull(output);
     SpawnAction.Builder builder =
-        singleJarActionBuilder(
-                JavaToolchainProvider.from(ruleContext), JavaRuntimeInfo.forHost(ruleContext))
+        singleJarActionBuilder(JavaToolchainProvider.from(ruleContext))
             .addOutput(output)
-            .addInputs(jars)
+            .addTransitiveInputs(jars)
             .addCommandLine(
                 sourceJarCommandLine(
-                    output, /* semantics= */ null, /* resources= */ ImmutableList.of(), jars),
+                    output,
+                    /* semantics= */ null,
+                    /* resources= */ NestedSetBuilder.<Artifact>emptySet(Order.STABLE_ORDER),
+                    jars),
                 ParamFileInfo.builder(ParameterFileType.SHELL_QUOTED).setUseAlways(true).build())
             .setProgressMessage("Building singlejar jar %s", output.prettyPrint())
             .setMnemonic("JavaSingleJar");
@@ -157,7 +159,7 @@ public final class SingleJarActionBuilder {
   private static CommandLine sourceJarCommandLine(
       Artifact outputJar,
       JavaSemantics semantics,
-      ImmutableCollection<Artifact> resources,
+      NestedSet<Artifact> resources,
       NestedSet<Artifact> resourceJars) {
     CustomCommandLine.Builder args = CustomCommandLine.builder();
     args.addExecPath("--output", outputJar);
@@ -200,7 +202,7 @@ public final class SingleJarActionBuilder {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof ResourceArgMapFn)) {
         return false;
       }
       ResourceArgMapFn that = (ResourceArgMapFn) o;

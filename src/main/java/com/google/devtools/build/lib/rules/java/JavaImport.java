@@ -28,10 +28,11 @@ import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
-import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
-import com.google.devtools.build.lib.rules.cpp.LinkerInput;
+import com.google.devtools.build.lib.collect.nestedset.Order;
+import com.google.devtools.build.lib.rules.cpp.LibraryToLink;
+import com.google.devtools.build.lib.rules.java.JavaRuleOutputJarsProvider.JavaOutput;
 import java.util.LinkedHashSet;
 import java.util.Set;
 
@@ -48,7 +49,7 @@ public class JavaImport implements RuleConfiguredTargetFactory {
       throws InterruptedException, RuleErrorException, ActionConflictException {
     ImmutableList<Artifact> srcJars = ImmutableList.of();
     ImmutableList<Artifact> jars = collectJars(ruleContext);
-    Artifact srcJar = ruleContext.getPrerequisiteArtifact("srcjar", Mode.TARGET);
+    Artifact srcJar = ruleContext.getPrerequisiteArtifact("srcjar");
 
     if (ruleContext.hasErrors()) {
       return null;
@@ -56,8 +57,8 @@ public class JavaImport implements RuleConfiguredTargetFactory {
 
     ImmutableList<TransitiveInfoCollection> targets =
         ImmutableList.<TransitiveInfoCollection>builder()
-            .addAll(ruleContext.getPrerequisites("deps", Mode.TARGET))
-            .addAll(ruleContext.getPrerequisites("exports", Mode.TARGET))
+            .addAll(ruleContext.getPrerequisites("deps"))
+            .addAll(ruleContext.getPrerequisites("exports"))
             .build();
     final JavaCommon common =
         new JavaCommon(
@@ -78,7 +79,7 @@ public class JavaImport implements RuleConfiguredTargetFactory {
     JavaCompilationArtifacts javaArtifacts = collectJavaArtifacts(jars, interfaceJars);
     common.setJavaCompilationArtifacts(javaArtifacts);
 
-    NestedSet<LinkerInput> transitiveJavaNativeLibraries =
+    NestedSet<LibraryToLink> transitiveJavaNativeLibraries =
         common.collectTransitiveJavaNativeLibraries();
     boolean neverLink = JavaCommon.isNeverLink(ruleContext);
     JavaCompilationArgsProvider javaCompilationArgs =
@@ -101,8 +102,6 @@ public class JavaImport implements RuleConfiguredTargetFactory {
                 .addArtifacts(javaArtifacts.getRuntimeJars())
                 .addTargets(targets, RunfilesProvider.DEFAULT_RUNFILES)
                 .addRunfiles(ruleContext, RunfilesProvider.DEFAULT_RUNFILES)
-                .addTargets(targets, JavaRunfilesProvider.TO_RUNFILES)
-                .add(ruleContext, JavaRunfilesProvider.TO_RUNFILES)
                 .build();
 
     RuleConfiguredTargetBuilder ruleBuilder = new RuleConfiguredTargetBuilder(ruleContext);
@@ -111,21 +110,18 @@ public class JavaImport implements RuleConfiguredTargetFactory {
 
     ImmutableBiMap<Artifact, Artifact> compilationToRuntimeJarMap =
         compilationToRuntimeJarMapBuilder.build();
-    semantics.addProviders(ruleContext, common, /* gensrcJar= */ null, ruleBuilder);
 
     NestedSet<Artifact> filesToBuild = filesBuilder.build();
-
-    JavaSourceInfoProvider javaSourceInfoProvider =
-        new JavaSourceInfoProvider.Builder()
-            .setJarFiles(jars)
-            .setSourceJarsForJarFiles(srcJars)
-            .build();
 
     JavaRuleOutputJarsProvider.Builder ruleOutputJarsProviderBuilder =
         JavaRuleOutputJarsProvider.builder();
     for (Artifact jar : jars) {
-      ruleOutputJarsProviderBuilder.addOutputJar(
-          jar, compilationToRuntimeJarMap.inverse().get(jar), null /* manifestProto */, srcJars);
+      ruleOutputJarsProviderBuilder.addJavaOutput(
+          JavaOutput.builder()
+              .setClassJar(jar)
+              .setCompileJar(compilationToRuntimeJarMap.inverse().get(jar))
+              .addSourceJar(srcJar)
+              .build());
     }
 
     NestedSet<Artifact> proguardSpecs = new ProguardLibrary(ruleContext).collectProguardSpecs();
@@ -143,7 +139,7 @@ public class JavaImport implements RuleConfiguredTargetFactory {
             .addProvider(JavaCompilationArgsProvider.class, compilationArgsProvider)
             .addProvider(JavaRuleOutputJarsProvider.class, ruleOutputJarsProvider)
             .addProvider(JavaSourceJarsProvider.class, sourceJarsProvider)
-            .addProvider(JavaSourceInfoProvider.class, javaSourceInfoProvider)
+            .addTransitiveOnlyRuntimeJars(common.getDependencies())
             .setRuntimeJars(javaArtifacts.getRuntimeJars())
             .setJavaConstraints(JavaCommon.getConstraints(ruleContext))
             .setNeverlink(neverLink)
@@ -151,15 +147,14 @@ public class JavaImport implements RuleConfiguredTargetFactory {
 
     return ruleBuilder
         .setFilesToBuild(filesToBuild)
-        .addSkylarkTransitiveInfo(
-            JavaSkylarkApiProvider.NAME, JavaSkylarkApiProvider.fromRuleContext())
         .addNativeDeclaredProvider(javaInfo)
         .add(RunfilesProvider.class, RunfilesProvider.simple(runfiles))
-        .add(
-            JavaNativeLibraryProvider.class,
-            new JavaNativeLibraryProvider(transitiveJavaNativeLibraries))
+        .addNativeDeclaredProvider(new JavaNativeLibraryInfo(transitiveJavaNativeLibraries))
         .addNativeDeclaredProvider(new ProguardSpecProvider(proguardSpecs))
         .addOutputGroup(JavaSemantics.SOURCE_JARS_OUTPUT_GROUP, transitiveJavaSourceJars)
+        .addOutputGroup(
+            JavaSemantics.DIRECT_SOURCE_JARS_OUTPUT_GROUP,
+            NestedSetBuilder.wrap(Order.STABLE_ORDER, sourceJarsProvider.getSourceJars()))
         .addOutputGroup(OutputGroupInfo.HIDDEN_TOP_LEVEL, proguardSpecs)
         .build();
   }
@@ -172,7 +167,7 @@ public class JavaImport implements RuleConfiguredTargetFactory {
     }
     for (JavaSourceJarsProvider other :
         JavaInfo.getProvidersFromListOfTargets(
-            JavaSourceJarsProvider.class, ruleContext.getPrerequisites("exports", Mode.TARGET))) {
+            JavaSourceJarsProvider.class, ruleContext.getPrerequisites("exports"))) {
       transitiveJavaSourceJarBuilder.addTransitive(other.getTransitiveSourceJars());
     }
     return transitiveJavaSourceJarBuilder.build();
@@ -182,19 +177,18 @@ public class JavaImport implements RuleConfiguredTargetFactory {
       ImmutableList<Artifact> jars, ImmutableList<Artifact> interfaceJars) {
     return new JavaCompilationArtifacts.Builder()
         .addRuntimeJars(jars)
-        .addFullCompileTimeJars(jars)
         // interfaceJars Artifacts have proper owner labels
-        .addInterfaceJars(interfaceJars)
+        .addInterfaceJarsWithFullJars(interfaceJars, jars)
         .build();
   }
 
   private ImmutableList<Artifact> collectJars(RuleContext ruleContext) {
     Set<Artifact> jars = new LinkedHashSet<>();
-    for (TransitiveInfoCollection info : ruleContext.getPrerequisites("jars", Mode.TARGET)) {
+    for (TransitiveInfoCollection info : ruleContext.getPrerequisites("jars")) {
       if (JavaInfo.getProvider(JavaCompilationArgsProvider.class, info) != null) {
         ruleContext.attributeError("jars", "should not refer to Java rules");
       }
-      for (Artifact jar : info.getProvider(FileProvider.class).getFilesToBuild()) {
+      for (Artifact jar : info.getProvider(FileProvider.class).getFilesToBuild().toList()) {
         if (!JavaSemantics.JAR.matches(jar.getFilename())) {
           ruleContext.attributeError("jars", jar.getFilename() + " is not a .jar file");
         } else {
@@ -218,7 +212,7 @@ public class JavaImport implements RuleConfiguredTargetFactory {
           useIjar
               ? JavaCompilationHelper.createIjarAction(
                   ruleContext,
-                  JavaCompilationHelper.getJavaToolchainProvider(ruleContext),
+                  JavaToolchainProvider.from(ruleContext),
                   jar,
                   ruleContext.getLabel(),
                   /* injectingRuleKind */ null,

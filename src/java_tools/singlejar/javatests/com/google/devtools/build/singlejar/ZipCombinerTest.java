@@ -17,7 +17,7 @@ package com.google.devtools.build.singlejar;
 import static com.google.common.truth.Truth.assertThat;
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static java.nio.charset.StandardCharsets.UTF_8;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ListMultimap;
@@ -493,10 +493,7 @@ public class ZipCombinerTest {
     };
     ByteArrayOutputStream out = new ByteArrayOutputStream();
     try (ZipCombiner zipCombiner = new ZipCombiner(badFilter, out)) {
-      zipCombiner.addZip(sampleZip());
-      fail();
-    } catch (IllegalStateException e) {
-      // Expected exception.
+      assertThrows(IllegalStateException.class, () -> zipCombiner.addZip(sampleZip()));
     }
   }
 
@@ -510,10 +507,7 @@ public class ZipCombinerTest {
     };
     ByteArrayOutputStream out = new ByteArrayOutputStream();
     try (ZipCombiner zipCombiner = new ZipCombiner(badFilter, out)) {
-      zipCombiner.addZip(sampleZip());
-      fail();
-    } catch (IllegalStateException e) {
-      // Expected exception.
+      assertThrows(IllegalStateException.class, () -> zipCombiner.addZip(sampleZip()));
     }
   }
 

@@ -17,13 +17,17 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Verify;
 import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.cmdline.LabelConstants;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.packages.BuildFileName;
 import com.google.devtools.build.lib.packages.BuildFileNotFoundException;
 import com.google.devtools.build.lib.packages.NoSuchPackageException;
+import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
+import com.google.devtools.build.lib.server.FailureDetails.PackageLoading;
+import com.google.devtools.build.lib.util.DetailedExitCode;
+import com.google.devtools.build.lib.vfs.Dirent;
 import com.google.devtools.build.lib.vfs.FileStatus;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -79,7 +83,18 @@ public class PathPackageLocator implements Serializable {
   public Path getPackageBuildFile(PackageIdentifier packageName) throws NoSuchPackageException {
     Path buildFile  = getPackageBuildFileNullable(packageName, UnixGlob.DEFAULT_SYSCALLS_REF);
     if (buildFile == null) {
-      throw new BuildFileNotFoundException(packageName, "BUILD file not found on package path");
+      String message = "BUILD file not found on package path";
+      throw new BuildFileNotFoundException(
+          packageName,
+          message,
+          DetailedExitCode.of(
+              FailureDetail.newBuilder()
+                  .setMessage(message)
+                  .setPackageLoading(
+                      PackageLoading.newBuilder()
+                          .setCode(PackageLoading.Code.BUILD_FILE_MISSING)
+                          .build())
+                  .build()));
     }
     return buildFile;
   }
@@ -118,6 +133,8 @@ public class PathPackageLocator implements Serializable {
       for (BuildFileName buildFileName : buildFilesByPriority) {
         Path buildFile =
             outputBase
+                .getRelative(LabelConstants.EXTERNAL_REPOSITORY_LOCATION)
+                .getRelative(packageIdentifier.getRepository().strippedName())
                 .getRelative(packageIdentifier.getSourceRoot())
                 .getRelative(buildFileName.getFilenameFragment());
         try {
@@ -144,7 +161,7 @@ public class PathPackageLocator implements Serializable {
     return "PathPackageLocator" + pathEntries;
   }
 
-  public static String maybeReplaceWorkspaceInString(String pathElement, Path workspace) {
+  public static String maybeReplaceWorkspaceInString(String pathElement, PathFragment workspace) {
     return pathElement.replace(WORKSPACE_WILDCARD, workspace.getPathString());
   }
   /**
@@ -171,7 +188,7 @@ public class PathPackageLocator implements Serializable {
       Path outputBase,
       List<String> pathElements,
       EventHandler eventHandler,
-      Path workspace,
+      PathFragment workspace,
       Path clientWorkingDirectory,
       List<BuildFileName> buildFilesByPriority) {
     return createInternal(
@@ -180,8 +197,7 @@ public class PathPackageLocator implements Serializable {
         eventHandler,
         workspace,
         clientWorkingDirectory,
-        buildFilesByPriority,
-        true);
+        buildFilesByPriority);
   }
 
   /**
@@ -203,10 +219,9 @@ public class PathPackageLocator implements Serializable {
       Path outputBase,
       List<String> pathElements,
       EventHandler eventHandler,
-      Path workspace,
+      PathFragment workspace,
       Path clientWorkingDirectory,
-      List<BuildFileName> buildFilesByPriority,
-      boolean checkExistence) {
+      List<BuildFileName> buildFilesByPriority) {
     List<Root> resolvedPaths = new ArrayList<>();
 
     for (String pathElement : pathElements) {
@@ -215,11 +230,12 @@ public class PathPackageLocator implements Serializable {
 
       PathFragment pathElementFragment = PathFragment.create(pathElement);
 
-      // If the path string started with "%workspace%" or "/", it is already absolute,
-      // so the following line is a no-op.
+      // If the path string started with "%workspace%" or "/", it is already absolute, so the
+      // following line returns a path pointing to pathElementFragment.
       Path rootPath = clientWorkingDirectory.getRelative(pathElementFragment);
 
-      if (!pathElementFragment.isAbsolute() && !clientWorkingDirectory.equals(workspace)) {
+      if (!pathElementFragment.isAbsolute()
+          && !clientWorkingDirectory.asFragment().equals(workspace)) {
         eventHandler.handle(
             Event.warn(
                 "The package path element '"
@@ -231,7 +247,7 @@ public class PathPackageLocator implements Serializable {
                     + "' wildcard."));
       }
 
-      if (!checkExistence || rootPath.exists()) {
+      if (rootPath.exists()) {
         resolvedPaths.add(Root.fromPath(rootPath));
       }
     }
@@ -249,7 +265,11 @@ public class PathPackageLocator implements Serializable {
     AtomicReference<? extends UnixGlob.FilesystemCalls> cache = UnixGlob.DEFAULT_SYSCALLS_REF;
     // TODO(bazel-team): correctness in the presence of changes to the location of the WORKSPACE
     // file.
-    return getFilePath(Label.WORKSPACE_FILE_NAME, cache);
+    Path workspaceFile = getFilePath(LabelConstants.WORKSPACE_DOT_BAZEL_FILE_NAME, cache);
+    if (workspaceFile != null) {
+      return workspaceFile;
+    }
+    return getFilePath(LabelConstants.WORKSPACE_FILE_NAME, cache);
   }
 
   private Path getFilePath(PathFragment suffix,
@@ -257,8 +277,8 @@ public class PathPackageLocator implements Serializable {
     for (Root pathEntry : pathEntries) {
       Path buildFile = pathEntry.getRelative(suffix);
       try {
-        FileStatus stat = cache.get().statIfFound(buildFile, Symlinks.FOLLOW);
-        if (stat != null && stat.isFile()) {
+        Dirent.Type type = cache.get().getType(buildFile, Symlinks.FOLLOW);
+        if (type == Dirent.Type.FILE || type == Dirent.Type.UNKNOWN) {
           return buildFile;
         }
       } catch (IOException ignored) {

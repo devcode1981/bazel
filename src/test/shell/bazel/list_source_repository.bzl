@@ -31,7 +31,7 @@ def _impl(rctx):
 
     if "SRCS_EXCLUDES" in rctx.os.environ:
         srcs_excludes = rctx.os.environ["SRCS_EXCLUDES"]
-    r = rctx.execute(["find", str(workspace), "-type", "f"])
+    r = rctx.execute(["find", "-L", str(workspace), "-type", "f"])
     rctx.file("find.result.raw", r.stdout.replace(str(workspace) + "/", ""))
     rctx.file("BUILD", """
 genrule(
@@ -41,7 +41,7 @@ genrule(
   visibility = ["//visibility:public"],
   cmd = " | ".join([
     "cat $<",
-    "grep -Ev '^(\\\\.git|out/|output/|bazel-|derived|tools/defaults/BUILD)'",
+    "grep -Ev '^(\\\\.git|.ijwb|out/|output/|bazel-|derived|tools/defaults/BUILD)'",
     "grep -Ev '%s'",
     "sort -u > $@",
   ]),

@@ -1,3 +1,4 @@
+# Lint as: python2, python3
 # Copyright 2015 The Bazel Authors. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,86 +15,19 @@
 """Archive manipulation library for the Docker rules."""
 
 # pylint: disable=g-import-not-at-top
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
 import gzip
 import io
 import os
 import subprocess
 import tarfile
+import six
 
-
-class SimpleArFile(object):
-  """A simple AR file reader.
-
-  This enable to read AR file (System V variant) as described
-  in https://en.wikipedia.org/wiki/Ar_(Unix).
-
-  The standard usage of this class is:
-
-  with SimpleArFile(filename) as ar:
-    nextFile = ar.next()
-    while nextFile:
-      print(nextFile.filename)
-      nextFile = ar.next()
-
-  Upon error, this class will raise a ArError exception.
-  """
-
-  # TODO(dmarting): We should use a standard library instead but python 2.7
-  #   does not have AR reading library.
-
-  class ArError(Exception):
-    pass
-
-  class SimpleArFileEntry(object):
-    """Represent one entry in a AR archive.
-
-    Attributes:
-      filename: the filename of the entry, as described in the archive.
-      timestamp: the timestamp of the file entry.
-      owner_id, group_id: numeric id of the user and group owning the file.
-      mode: unix permission mode of the file
-      size: size of the file
-      data: the content of the file.
-    """
-
-    def __init__(self, f):
-      self.filename = f.read(16).decode('utf-8').strip()
-      if self.filename.endswith('/'):  # SysV variant
-        self.filename = self.filename[:-1]
-      self.timestamp = int(f.read(12).strip())
-      self.owner_id = int(f.read(6).strip())
-      self.group_id = int(f.read(6).strip())
-      self.mode = int(f.read(8).strip(), 8)
-      self.size = int(f.read(10).strip())
-      pad = f.read(2)
-      if pad != b'\x60\x0a':
-        raise SimpleArFile.ArError('Invalid AR file header')
-      self.data = f.read(self.size)
-
-  MAGIC_STRING = b'!<arch>\n'
-
-  def __init__(self, filename):
-    self.filename = filename
-
-  def __enter__(self):
-    self.f = open(self.filename, 'rb')
-    if self.f.read(len(self.MAGIC_STRING)) != self.MAGIC_STRING:
-      raise self.ArError('Not a ar file: ' + self.filename)
-    return self
-
-  def __exit__(self, t, v, traceback):
-    self.f.close()
-
-  def next(self):
-    """Read the next file. Returns None when reaching the end of file."""
-    # AR sections are two bit aligned using new lines.
-    if self.f.tell() % 2 != 0:
-      self.f.read(1)
-    # An AR sections is at least 60 bytes. Some file might contains garbage
-    # bytes at the end of the archive, ignore them.
-    if self.f.tell() > os.fstat(self.f.fileno()).st_size - 60:
-      return None
-    return self.SimpleArFileEntry(self.f)
+# Use a deterministic mtime that doesn't confuse other programs.
+# See: https://github.com/bazelbuild/bazel/issues/1299
+PORTABLE_MTIME = 946684800  # 2000-01-01 00:00:00.000 UTC
 
 
 class TarFileWriter(object):
@@ -102,7 +36,23 @@ class TarFileWriter(object):
   class Error(Exception):
     pass
 
-  def __init__(self, name, compression='', root_directory='./'):
+  def __init__(self,
+               name,
+               compression='',
+               root_directory='./',
+               default_mtime=None,
+               preserve_tar_mtimes=False):
+    """TarFileWriter wraps tarfile.open().
+
+    Args:
+      name: the tar file name.
+      compression: compression type: bzip2, bz2, gz, tgz, xz, lzma.
+      root_directory: virtual root to prepend to elements in the archive.
+      default_mtime: default mtime to use for elements in the archive.
+          May be an integer or the value 'portable' to use the date
+          2000-01-01, which is compatible with non *nix OSes'.
+      preserve_tar_mtimes: if true, keep file mtimes from input tar file.
+    """
     if compression in ['bzip2', 'bz2']:
       mode = 'w:bz2'
     else:
@@ -111,14 +61,23 @@ class TarFileWriter(object):
     # Support xz compression through xz... until we can use Py3
     self.xz = compression in ['xz', 'lzma']
     self.name = name
-    self.root_directory = root_directory.rstrip('/')
+    self.root_directory = six.ensure_str(root_directory).rstrip('/')
+
+    self.preserve_mtime = preserve_tar_mtimes
+
+    if default_mtime is None:
+      self.default_mtime = 0
+    elif default_mtime == 'portable':
+      self.default_mtime = PORTABLE_MTIME
+    else:
+      self.default_mtime = int(default_mtime)
 
     self.fileobj = None
     if self.gz:
       # The Tarfile class doesn't allow us to specify gzip's mtime attribute.
       # Instead, we manually re-implement gzopen from tarfile.py and set mtime.
       self.fileobj = gzip.GzipFile(
-          filename=name, mode='w', compresslevel=9, mtime=0)
+          filename=name, mode='w', compresslevel=9, mtime=self.default_mtime)
     self.tar = tarfile.open(name=name, mode=mode, fileobj=self.fileobj)
     self.members = set([])
     self.directories = set([])
@@ -136,7 +95,7 @@ class TarFileWriter(object):
               gid=0,
               uname='',
               gname='',
-              mtime=0,
+              mtime=None,
               mode=None,
               depth=100):
     """Recursively add a directory.
@@ -157,9 +116,11 @@ class TarFileWriter(object):
       TarFileWriter.Error: when the recursion depth has exceeded the
                            `depth` argument.
     """
-    if not (name == self.root_directory or name.startswith('/') or
-            name.startswith(self.root_directory + '/')):
+    if not (name == self.root_directory or six.ensure_str(name).startswith('/')
+            or name.startswith(self.root_directory + '/')):
       name = os.path.join(self.root_directory, name)
+    if mtime is None:
+      mtime = self.default_mtime
     if os.path.isdir(path):
       # Remove trailing '/' (index -1 => last character)
       if name[-1] == '/':
@@ -167,14 +128,15 @@ class TarFileWriter(object):
       # Add the x bit to directories to prevent non-traversable directories.
       # The x bit is set only to if the read bit is set.
       dirmode = (mode | ((0o444 & mode) >> 2)) if mode else mode
-      self.add_file(name + '/',
-                    tarfile.DIRTYPE,
-                    uid=uid,
-                    gid=gid,
-                    uname=uname,
-                    gname=gname,
-                    mtime=mtime,
-                    mode=dirmode)
+      self.add_file(
+          six.ensure_str(name) + '/',
+          tarfile.DIRTYPE,
+          uid=uid,
+          gid=gid,
+          uname=uname,
+          gname=gname,
+          mtime=mtime,
+          mode=dirmode)
       if depth <= 0:
         raise self.Error('Recursion depth exceeded, probably in '
                          'an infinite directory loop.')
@@ -199,15 +161,16 @@ class TarFileWriter(object):
 
   def _addfile(self, info, fileobj=None):
     """Add a file in the tar file if there is no conflict."""
-    if not info.name.endswith('/') and info.type == tarfile.DIRTYPE:
+    if not six.ensure_str(
+        info.name).endswith('/') and info.type == tarfile.DIRTYPE:
       # Enforce the ending / for directories so we correctly deduplicate.
       info.name += '/'
     if info.name not in self.members:
       self.tar.addfile(info, fileobj)
       self.members.add(info.name)
     elif info.type != tarfile.DIRTYPE:
-      print('Duplicate file in archive: %s, '
-            'picking first occurrence' % info.name)
+      print(('Duplicate file in archive: %s, '
+             'picking first occurrence' % info.name))
 
   def add_file(self,
                name,
@@ -219,7 +182,7 @@ class TarFileWriter(object):
                gid=0,
                uname='',
                gname='',
-               mtime=0,
+               mtime=None,
                mode=None):
     """Add a file to the current tar.
 
@@ -248,6 +211,8 @@ class TarFileWriter(object):
       name = name.rstrip('/')
       if name in self.directories:
         return
+    if mtime is None:
+      mtime = self.default_mtime
 
     components = name.rsplit('/', 1)
     if len(components) > 1:
@@ -274,7 +239,7 @@ class TarFileWriter(object):
     if link:
       tarinfo.linkname = link
     if content:
-      content_bytes = content.encode('utf-8')
+      content_bytes = six.ensure_binary(content, 'utf-8')
       tarinfo.size = len(content_bytes)
       self._addfile(tarinfo, io.BytesIO(content_bytes))
     elif file_content:
@@ -312,7 +277,7 @@ class TarFileWriter(object):
     """
     if root and root[0] not in ['/', '.']:
       # Root prefix should start with a '/', adds it if missing
-      root = '/' + root
+      root = '/' + six.ensure_str(root)
     compression = os.path.splitext(tar)[-1][1:]
     if compression == 'tgz':
       compression = 'gz'
@@ -344,13 +309,14 @@ class TarFileWriter(object):
         # prevent performance issues due to accidentally-introduced seeks
         # during intar traversal by opening in "streaming" mode. gz, bz2
         # are supported natively by python 2.7 and 3.x
-        inmode = 'r|' + compression
+        inmode = 'r|' + six.ensure_str(compression)
       else:
-        inmode = 'r:' + compression
+        inmode = 'r:' + six.ensure_str(compression)
       intar = tarfile.open(name=tar, mode=inmode)
     for tarinfo in intar:
       if name_filter is None or name_filter(tarinfo.name):
-        tarinfo.mtime = 0
+        if not self.preserve_mtime:
+          tarinfo.mtime = self.default_mtime
         if rootuid is not None and tarinfo.uid == rootuid:
           tarinfo.uid = 0
           tarinfo.uname = 'root'

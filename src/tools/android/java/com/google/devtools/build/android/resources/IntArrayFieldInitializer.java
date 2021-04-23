@@ -16,61 +16,229 @@ package com.google.devtools.build.android.resources;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
-import com.google.common.collect.ImmutableCollection;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Iterables;
+import com.google.devtools.build.android.DependencyInfo;
 import java.io.IOException;
 import java.io.Writer;
+import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
+import org.objectweb.asm.AnnotationVisitor;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.FieldVisitor;
+import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.commons.InstructionAdapter;
 
 /** Models an int[] field initializer. */
 public final class IntArrayFieldInitializer implements FieldInitializer {
 
-  public static final String DESC = "[I";
-  private final ImmutableCollection<Integer> values;
+  private static final String DESC = "[I";
 
-  private IntArrayFieldInitializer(ImmutableCollection<Integer> values) {
+  /** Represents a value that can be encoded into an int[] field initializer. */
+  public interface IntArrayValue {
+    public void pushValueOntoStack(InstructionAdapter insts);
+
+    public String sourceRepresentation();
+  }
+
+  /** Represents an integer primitive. */
+  public static class IntegerValue implements IntArrayValue {
+    private final int value;
+
+    public IntegerValue(int value) {
+      this.value = value;
+    }
+
+    @Override
+    public void pushValueOntoStack(InstructionAdapter insts) {
+      insts.iconst(value);
+    }
+
+    @Override
+    public String sourceRepresentation() {
+      return String.format("0x%x", value);
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+      if (obj instanceof IntegerValue) {
+        IntegerValue other = (IntegerValue) obj;
+        return value == other.value;
+      }
+      return false;
+    }
+
+    @Override
+    public int hashCode() {
+      return Integer.hashCode(value);
+    }
+
+    @Override
+    public String toString() {
+      return Integer.toString(value);
+    }
+  }
+
+  /** Represents an reference to a static field that holds an integer primitive. */
+  public static class StaticIntFieldReference implements IntArrayValue {
+    private final String className;
+    private final String fieldName;
+
+    private StaticIntFieldReference(String className, String fieldName) {
+      this.className = className;
+      this.fieldName = fieldName;
+    }
+
+    public static StaticIntFieldReference parse(String s) {
+      final int fieldSep = s.lastIndexOf('.');
+      if (fieldSep < 0) {
+        throw new IllegalArgumentException("Unable to parse field reference from '" + s + "'");
+      }
+      final String className = s.substring(0, fieldSep);
+      final String fieldName = s.substring(fieldSep + 1);
+      if (className.isEmpty() || fieldName.isEmpty()) {
+        throw new IllegalArgumentException(
+            "Unable to extract class and field name from '" + s + "'");
+      }
+      return new StaticIntFieldReference(className, fieldName);
+    }
+
+    @Override
+    public void pushValueOntoStack(InstructionAdapter insts) {
+      // The syntax of class names that appear in class file structures differs from the syntax of
+      // class names in source code.
+      // See: https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.2.1
+
+      final List<String> parts = Splitter.on('.').splitToList(className);
+
+      // If the class name ends in R.[type], replace the ending with R$[type] since [type] is a
+      // class nested within the R class.
+      final boolean replacePeriod = !Iterables.getLast(parts).startsWith("R$");
+
+      final StringBuilder asmClassName = new StringBuilder();
+      for (int i = 0, n = parts.size(); i < n; i++) {
+        final String part = parts.get(i);
+        asmClassName.append(part);
+        if (i == n - 2 && replacePeriod && part.equals("R")) {
+          asmClassName.append('$');
+          continue;
+        }
+        if (i != n - 1) {
+          // Replace all package seperating periods with forward slashes.
+          asmClassName.append('/');
+        }
+      }
+
+      insts.getstatic(asmClassName.toString(), fieldName, "I");
+    }
+
+    @Override
+    public String sourceRepresentation() {
+      return String.format(Locale.US, "%s.%s", className, fieldName);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(className, fieldName);
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+      if (obj instanceof StaticIntFieldReference) {
+        StaticIntFieldReference other = (StaticIntFieldReference) obj;
+        return Objects.equals(className, other.className)
+            && Objects.equals(fieldName, other.fieldName);
+      }
+      return false;
+    }
+
+    @Override
+    public String toString() {
+      return sourceRepresentation();
+    }
+  }
+
+  private final DependencyInfo dependencyInfo;
+  private final Visibility visibility;
+  private final String fieldName;
+  private final ImmutableList<IntArrayValue> values;
+
+  private IntArrayFieldInitializer(
+      DependencyInfo dependencyInfo,
+      Visibility visibility,
+      String fieldName,
+      ImmutableList<IntArrayValue> values) {
+    this.dependencyInfo = dependencyInfo;
+    this.visibility = visibility;
+    this.fieldName = fieldName;
     this.values = values;
   }
 
-  public static FieldInitializer of(String value) {
+  public static FieldInitializer of(
+      DependencyInfo dependencyInfo, Visibility visibility, String fieldName, String value) {
     Preconditions.checkArgument(value.startsWith("{ "), "Expected list starting with { ");
     Preconditions.checkArgument(value.endsWith(" }"), "Expected list ending with } ");
     // Check for an empty list, which is "{ }".
     if (value.length() < 4) {
-      return of(ImmutableList.<Integer>of());
+      return of(dependencyInfo, visibility, fieldName, ImmutableList.of());
     }
-    ImmutableList.Builder<Integer> intValues = ImmutableList.builder();
+    ImmutableList.Builder<IntArrayValue> intValues = ImmutableList.builder();
     String trimmedValue = value.substring(2, value.length() - 2);
     Iterable<String> valueStrings = Splitter.on(',').trimResults().split(trimmedValue);
     for (String valueString : valueStrings) {
-      intValues.add(Integer.decode(valueString));
+      IntArrayValue elementValue;
+      try {
+        elementValue = StaticIntFieldReference.parse(valueString);
+      } catch (IllegalArgumentException e) {
+        elementValue = new IntegerValue(Integer.decode(valueString));
+      }
+      intValues.add(elementValue);
     }
-    return of(intValues.build());
+    return of(dependencyInfo, visibility, fieldName, intValues.build());
   }
 
-  public static IntArrayFieldInitializer of(ImmutableCollection<Integer> values) {
-    return new IntArrayFieldInitializer(values);
+  public static IntArrayFieldInitializer of(
+      DependencyInfo dependencyInfo,
+      Visibility visibility,
+      String fieldName,
+      ImmutableList<IntArrayValue> values) {
+    return new IntArrayFieldInitializer(dependencyInfo, visibility, fieldName, values);
   }
 
   @Override
   public boolean writeFieldDefinition(
-      String fieldName, ClassWriter cw, int accessLevel, boolean isFinal) {
-    cw.visitField(accessLevel, fieldName, DESC, null, null).visitEnd();
+      ClassWriter cw, boolean isFinal, boolean annotateTransitiveFields) {
+    int accessLevel = Opcodes.ACC_STATIC;
+    if (visibility != Visibility.PRIVATE) {
+      accessLevel |= Opcodes.ACC_PUBLIC;
+    }
+    if (isFinal) {
+      accessLevel |= Opcodes.ACC_FINAL;
+    }
+    FieldVisitor fv = cw.visitField(accessLevel, fieldName, DESC, null, null);
+    if (annotateTransitiveFields
+        && dependencyInfo.dependencyType() == DependencyInfo.DependencyType.TRANSITIVE) {
+      AnnotationVisitor av =
+          fv.visitAnnotation(
+              RClassGenerator.PROVENANCE_ANNOTATION_CLASS_DESCRIPTOR, /*visible=*/ true);
+      av.visit(RClassGenerator.PROVENANCE_ANNOTATION_LABEL_KEY, dependencyInfo.label());
+      av.visitEnd();
+    }
+    fv.visitEnd();
     return true;
   }
 
   @Override
-  public int writeCLInit(String fieldName, InstructionAdapter insts, String className) {
+  public int writeCLInit(InstructionAdapter insts, String className) {
     insts.iconst(values.size());
     insts.newarray(Type.INT_TYPE);
     int curIndex = 0;
-    for (Integer value : values) {
+    for (IntArrayValue value : values) {
       insts.dup();
       insts.iconst(curIndex);
-      insts.iconst(value);
+      value.pushValueOntoStack(insts);
       insts.astore(Type.INT_TYPE);
       ++curIndex;
     }
@@ -81,23 +249,30 @@ public final class IntArrayFieldInitializer implements FieldInitializer {
   }
 
   @Override
-  public void writeInitSource(String fieldName, Writer writer, boolean finalFields)
-      throws IOException {
+  public void writeInitSource(Writer writer, boolean finalFields) throws IOException {
     StringBuilder builder = new StringBuilder();
     boolean first = true;
-    for (Integer attrId : values) {
+    for (IntArrayValue value : values) {
       if (first) {
         first = false;
-        builder.append(String.format("0x%x", attrId));
+        builder.append(value.sourceRepresentation());
       } else {
-        builder.append(String.format(", 0x%x", attrId));
+        builder.append(String.format(Locale.US, ", %s", value.sourceRepresentation()));
       }
     }
 
     writer.write(
         String.format(
-            "        public static %sint[] %s = { %s };\n",
-            finalFields ? "final " : "", fieldName, builder.toString()));
+            "        %s static %sint[] %s = { %s };\n",
+            visibility != Visibility.PRIVATE ? "public" : "",
+            finalFields ? "final " : "",
+            fieldName,
+            builder));
+  }
+
+  @Override
+  public String getFieldName() {
+    return fieldName;
   }
 
   @Override
@@ -114,7 +289,9 @@ public final class IntArrayFieldInitializer implements FieldInitializer {
   public boolean equals(Object obj) {
     if (obj instanceof IntArrayFieldInitializer) {
       IntArrayFieldInitializer other = (IntArrayFieldInitializer) obj;
-      return Objects.equals(values, other.values);
+      return Objects.equals(dependencyInfo, other.dependencyInfo)
+          && Objects.equals(fieldName, other.fieldName)
+          && Objects.equals(values, other.values);
     }
     return false;
   }

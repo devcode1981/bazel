@@ -23,6 +23,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.platform.PlatformInfo;
 import com.google.devtools.build.lib.analysis.util.AnalysisMock;
+import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.rules.platform.ToolchainTestCase;
 import com.google.devtools.build.lib.skyframe.PlatformLookupUtil.InvalidPlatformException;
 import com.google.devtools.build.lib.skyframe.util.SkyframeExecutorTestUtils;
@@ -69,9 +70,15 @@ public class PlatformLookupUtilTest extends ToolchainTestCase {
   @Test
   public void testPlatformLookup() throws Exception {
     ConfiguredTargetKey linuxKey =
-        ConfiguredTargetKey.of(makeLabel("//platforms:linux"), targetConfigKey, false);
+        ConfiguredTargetKey.builder()
+            .setLabel(Label.parseAbsoluteUnchecked("//platforms:linux"))
+            .setConfigurationKey(targetConfigKey)
+            .build();
     ConfiguredTargetKey macKey =
-        ConfiguredTargetKey.of(makeLabel("//platforms:mac"), targetConfigKey, false);
+        ConfiguredTargetKey.builder()
+            .setLabel(Label.parseAbsoluteUnchecked("//platforms:mac"))
+            .setConfigurationKey(targetConfigKey)
+            .build();
     GetPlatformInfoKey key = GetPlatformInfoKey.create(ImmutableList.of(linuxKey, macKey));
 
     EvaluationResult<GetPlatformInfoValue> result = getPlatformInfo(key);
@@ -90,7 +97,10 @@ public class PlatformLookupUtilTest extends ToolchainTestCase {
     scratch.file("invalid/BUILD", "filegroup(name = 'not_a_platform')");
 
     ConfiguredTargetKey targetKey =
-        ConfiguredTargetKey.of(makeLabel("//invalid:not_a_platform"), targetConfigKey, false);
+        ConfiguredTargetKey.builder()
+            .setLabel(Label.parseAbsoluteUnchecked("//invalid:not_a_platform"))
+            .setConfigurationKey(targetConfigKey)
+            .build();
     GetPlatformInfoKey key = GetPlatformInfoKey.create(ImmutableList.of(targetKey));
 
     EvaluationResult<GetPlatformInfoValue> result = getPlatformInfo(key);
@@ -110,7 +120,10 @@ public class PlatformLookupUtilTest extends ToolchainTestCase {
   @Test
   public void testPlatformLookup_targetDoesNotExist() throws Exception {
     ConfiguredTargetKey targetKey =
-        ConfiguredTargetKey.of(makeLabel("//fake:missing"), targetConfigKey, false);
+        ConfiguredTargetKey.builder()
+            .setLabel(Label.parseAbsoluteUnchecked("//fake:missing"))
+            .setConfigurationKey(targetConfigKey)
+            .build();
     GetPlatformInfoKey key = GetPlatformInfoKey.create(ImmutableList.of(targetKey));
 
     EvaluationResult<GetPlatformInfoValue> result = getPlatformInfo(key);
@@ -124,7 +137,7 @@ public class PlatformLookupUtilTest extends ToolchainTestCase {
         .hasErrorEntryForKeyThat(key)
         .hasExceptionThat()
         .hasMessageThat()
-        .contains("no such package 'fake': BUILD file not found on package path");
+        .contains("no such package 'fake': BUILD file not found");
   }
 
   // Calls PlatformLookupUtil.getPlatformInfo.
@@ -138,14 +151,14 @@ public class PlatformLookupUtilTest extends ToolchainTestCase {
       return GET_PLATFORM_INFO_FUNCTION;
     }
 
-    abstract Iterable<ConfiguredTargetKey> platformKeys();
+    abstract ImmutableList<ConfiguredTargetKey> platformKeys();
 
-    public static GetPlatformInfoKey create(Iterable<ConfiguredTargetKey> platformKeys) {
+    public static GetPlatformInfoKey create(ImmutableList<ConfiguredTargetKey> platformKeys) {
       return new AutoValue_PlatformLookupUtilTest_GetPlatformInfoKey(platformKeys);
     }
   }
 
-  EvaluationResult<GetPlatformInfoValue> getPlatformInfo(GetPlatformInfoKey key)
+  private EvaluationResult<GetPlatformInfoValue> getPlatformInfo(GetPlatformInfoKey key)
       throws InterruptedException {
     try {
       // Must re-enable analysis for Skyframe functions that create configured targets.
@@ -192,8 +205,8 @@ public class PlatformLookupUtilTest extends ToolchainTestCase {
     }
   }
 
-  private static class GetPlatformInfoFunctionException extends SkyFunctionException {
-    public GetPlatformInfoFunctionException(InvalidPlatformException e) {
+  private static final class GetPlatformInfoFunctionException extends SkyFunctionException {
+    GetPlatformInfoFunctionException(InvalidPlatformException e) {
       super(e, Transience.PERSISTENT);
     }
   }

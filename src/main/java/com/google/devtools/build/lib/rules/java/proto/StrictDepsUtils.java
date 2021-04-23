@@ -17,7 +17,7 @@ package com.google.devtools.build.lib.rules.java.proto;
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
-import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.packages.Type;
 import com.google.devtools.build.lib.rules.java.JavaCompilationArgsProvider;
 import com.google.devtools.build.lib.rules.java.JavaConfiguration;
 import com.google.devtools.build.lib.rules.java.JavaInfo;
@@ -43,7 +43,7 @@ public class StrictDepsUtils {
       boolean alwaysStrict) {
     JavaCompilationArgsProvider strictCompProvider =
         JavaCompilationArgsProvider.merge(
-            ruleContext.getPrerequisites("deps", Mode.TARGET, JavaCompilationArgsProvider.class));
+            ruleContext.getPrerequisites("deps", JavaCompilationArgsProvider.class));
     if (alwaysStrict || StrictDepsUtils.isStrictDepsJavaProtoLibrary(ruleContext)) {
       return strictCompProvider;
     } else {
@@ -56,8 +56,7 @@ public class StrictDepsUtils {
             .addDirectCompileTimeJars(
                 /* interfaceJars= */ args.getDirectCompileTimeJars(),
                 /* fullJars= */ args.getDirectFullCompileTimeJars())
-            .addTransitiveCompileTimeJars(args.getTransitiveCompileTimeJars())
-            .addInstrumentationMetadata(args.getInstrumentationMetadata());
+            .addTransitiveCompileTimeJars(args.getTransitiveCompileTimeJars());
       }
       // Don't collect .jdeps recursively for legacy "feature" compatibility reasons. Collecting
       // .jdeps here is probably a mistake; see JavaCompilationArgsProvider#makeNonStrict.
@@ -97,9 +96,10 @@ public class StrictDepsUtils {
    * <p>Using this method requires requesting the JavaConfiguration fragment.
    */
   public static boolean isStrictDepsJavaProtoLibrary(RuleContext ruleContext) {
-    if (ruleContext.getFragment(JavaConfiguration.class).strictDepsJavaProtos()) {
+    if (ruleContext.getFragment(JavaConfiguration.class).strictDepsJavaProtos()
+        || !ruleContext.attributes().has("strict_deps", Type.BOOLEAN)) {
       return true;
     }
-    return (boolean) ruleContext.getRule().getAttributeContainer().getAttr("strict_deps");
+    return (boolean) ruleContext.getRule().getAttr("strict_deps");
   }
 }

@@ -16,6 +16,8 @@ package com.google.devtools.build.lib.blackbox.framework;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
+import com.google.common.flogger.GoogleLogger;
+import com.google.common.flogger.LazyArgs;
 import com.google.common.io.LineReader;
 import com.google.devtools.build.lib.util.StringUtilities;
 import java.io.BufferedReader;
@@ -33,7 +35,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
-import java.util.logging.Logger;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 
@@ -41,8 +42,8 @@ import javax.annotation.Nullable;
  * Helper class for running Bazel process as external process from JUnit tests. Can be used to run
  * arbitrary external process and explore the results.
  */
-public final class ProcessRunner {
-  private static final Logger logger = Logger.getLogger(ProcessRunner.class.getName());
+final class ProcessRunner {
+  private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
   private final ProcessParameters parameters;
   private final ExecutorService executorService;
 
@@ -70,7 +71,8 @@ public final class ProcessRunner {
     commandParts.add(parameters.name());
     commandParts.addAll(args);
 
-    logger.info("Running: " + commandParts.stream().collect(Collectors.joining(" ")));
+    logger.atInfo().log(
+        "Running: %s", LazyArgs.lazy(() -> commandParts.stream().collect(Collectors.joining(" "))));
 
     ProcessBuilder processBuilder = new ProcessBuilder(commandParts);
     processBuilder.directory(parameters.workingDirectory());
@@ -107,12 +109,25 @@ public final class ProcessRunner {
               ? outReader.get()
               : Files.readAllLines(parameters.redirectOutput().get());
 
-      if (parameters.expectedExitCode() != process.exitValue()) {
+      int exitValue = process.exitValue();
+      boolean expectedToFail = parameters.expectedToFail() || parameters.expectedExitCode() != 0;
+      if ((exitValue == 0) == expectedToFail) {
+        throw new ProcessRunnerException(
+            String.format(
+                "Expected to %s, but %s.\nError: %s\nOutput: %s",
+                expectedToFail ? "fail" : "succeed",
+                exitValue == 0 ? "succeeded" : "failed",
+                StringUtilities.joinLines(err),
+                StringUtilities.joinLines(out)));
+      }
+      // We want to check the exact exit code if it was explicitly set to something;
+      // we already checked the variant when it is equal to zero above.
+      if (parameters.expectedExitCode() != 0 && parameters.expectedExitCode() != exitValue) {
         throw new ProcessRunnerException(
             String.format(
                 "Expected exit code %d, but found %d.\nError: %s\nOutput: %s",
                 parameters.expectedExitCode(),
-                process.exitValue(),
+                exitValue,
                 StringUtilities.joinLines(err),
                 StringUtilities.joinLines(out)));
       }
@@ -123,14 +138,15 @@ public final class ProcessRunner {
               "Expected empty error stream, but found: " + StringUtilities.joinLines(err));
         }
       }
-      return ProcessResult.create(parameters.expectedExitCode(), out, err);
+      return ProcessResult.create(exitValue, out, err);
     } finally {
       process.destroy();
     }
   }
 
   private ProcessStreamReader createReader(InputStream stream, String prefix) {
-    return new ProcessStreamReader(executorService, stream, s -> logger.fine(prefix + s));
+    return new ProcessStreamReader(
+        executorService, stream, s -> logger.atFine().log("%s%s", prefix, s));
   }
 
   /** Specific runtime exception for external process errors */

@@ -126,7 +126,7 @@ public class ResourceManager {
   // LocalHostCapacity.getLocalHostCapacity() as an argument.
   private ResourceSet staticResources = null;
 
-  private ResourceSet availableResources = null;
+  @VisibleForTesting public ResourceSet availableResources = null;
 
   // Used amount of CPU capacity (where 1.0 corresponds to the one fully
   // occupied CPU core. Corresponds to the CPU resource definition in the
@@ -139,10 +139,6 @@ public class ResourceManager {
 
   // Used local test count. Corresponds to the local test count definition in the ResourceSet class.
   private int usedLocalTestCount;
-
-  // Specifies how much of the RAM in staticResources we should allow to be used.
-  public static final int DEFAULT_RAM_UTILIZATION_PERCENTAGE = 67;
-  private int ramUtilizationPercentage = DEFAULT_RAM_UTILIZATION_PERCENTAGE;
 
   // Determines if local memory estimates are used.
   private boolean localMemoryEstimate = false;
@@ -177,18 +173,12 @@ public class ResourceManager {
   public synchronized void setAvailableResources(ResourceSet resources) {
     Preconditions.checkNotNull(resources);
     staticResources = resources;
-    availableResources = ResourceSet.create(
-        staticResources.getMemoryMb() * this.ramUtilizationPercentage / 100.0,
-        staticResources.getCpuUsage(),
-        staticResources.getLocalTestCount());
+    availableResources =
+        ResourceSet.create(
+            staticResources.getMemoryMb(),
+            staticResources.getCpuUsage(),
+            staticResources.getLocalTestCount());
     processWaitingThreads();
-  }
-
-  /**
-   * Specify how much of the available RAM we should allow to be used.
-   */
-  public synchronized void setRamUtilizationPercentage(int percentage) {
-    ramUtilizationPercentage = percentage;
   }
 
   /**
@@ -210,7 +200,8 @@ public class ResourceManager {
     Preconditions.checkState(
         !threadHasResources(), "acquireResources with existing resource lock during %s", owner);
 
-    AutoProfiler p = profiled(owner.describe(), ProfilerTask.ACTION_LOCK);
+    AutoProfiler p =
+        profiled("Aquiring resources for: " + owner.describe(), ProfilerTask.ACTION_LOCK);
     CountDownLatch latch = null;
     try {
       latch = acquire(resources);
@@ -397,22 +388,16 @@ public class ResourceManager {
       try {
         ProcMeminfoParser memInfo = new ProcMeminfoParser();
         double totalFreeRam = memInfo.getFreeRamKb() / 1024;
-        double reserveMemory =
-            staticResources.getMemoryMb() * (100.0 - this.ramUtilizationPercentage) / 100.0;
+        double reserveMemory = staticResources.getMemoryMb();
         remainingRam = totalFreeRam - reserveMemory;
       } catch (IOException e) {
-        // If we get an error trying to determine the currently free
-        // system memory for any reason, just continue on.  It is not
-        // terribly clear what could cause this, aside from an
-        // unexpected ABI breakage in the linux kernel or an OS-level
-        // misconfiguration such as not having permissions to read
-        // /proc/meminfo.
+        // If we get an error trying to determine the currently free system memory for any reason,
+        // just continue on.  It is not terribly clear what could cause this, aside from an
+        // unexpected ABI breakage in the linux kernel or an OS-level misconfiguration such as not
+        // having permissions to read /proc/meminfo.
         //
-        // remainingRam is initialized to a value that results in
-        // behavior as if localMemoryEstimate was disabled.
-      } catch (ProcMeminfoParser.KeywordNotFoundException e) {
-        // Similarly fall back to the non-localMemoryEstimate
-        // behavior.
+        // remainingRam is initialized to a value that results in behavior as if localMemoryEstimate
+        // was disabled.
       }
     }
 

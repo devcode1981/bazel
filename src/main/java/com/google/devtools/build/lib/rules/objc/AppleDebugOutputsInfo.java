@@ -17,16 +17,17 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
+import com.google.devtools.build.lib.packages.BuiltinProvider;
 import com.google.devtools.build.lib.packages.NativeInfo;
-import com.google.devtools.build.lib.packages.NativeProvider;
-import com.google.devtools.build.lib.skylarkbuildapi.apple.AppleDebugOutputsApi;
+import com.google.devtools.build.lib.starlarkbuildapi.apple.AppleDebugOutputsApi;
 import java.util.HashMap;
 import java.util.Map;
+import net.starlark.java.eval.Dict;
 
 /**
  * A provider that holds debug outputs of an Apple binary rule.
  *
- * <p>This provider has no native interface and is intended to be read in Skylark code.
+ * <p>This provider has no native interface and is intended to be read in Starlark code.
  *
  * <p>The only field it has is {@code output_map}, which is a dictionary of: { arch: { output_type:
  * Artifact, output_type: Artifact, ... } }
@@ -59,15 +60,14 @@ public final class AppleDebugOutputsInfo extends NativeInfo
     }
   }
 
-  /** Skylark name for the AppleDebugOutputsInfo. */
-  public static final String SKYLARK_NAME = "AppleDebugOutputs";
+  /** Starlark name for the AppleDebugOutputsInfo. */
+  public static final String STARLARK_NAME = "AppleDebugOutputs";
 
-  /** Skylark constructor and identifier for AppleDebugOutputsInfo. */
-  public static final NativeProvider<AppleDebugOutputsInfo> SKYLARK_CONSTRUCTOR =
-      new NativeProvider<AppleDebugOutputsInfo>(
-          AppleDebugOutputsInfo.class, SKYLARK_NAME) {};
+  /** Starlark constructor and identifier for AppleDebugOutputsInfo. */
+  public static final BuiltinProvider<AppleDebugOutputsInfo> STARLARK_CONSTRUCTOR =
+      new BuiltinProvider<AppleDebugOutputsInfo>(STARLARK_NAME, AppleDebugOutputsInfo.class) {};
 
-  private final ImmutableMap<String, ImmutableMap<String, Artifact>> outputsMap;
+  private final ImmutableMap<String, Dict<String, Artifact>> outputsMap;
 
   /**
    * Creates a new provider instance.
@@ -84,16 +84,18 @@ public final class AppleDebugOutputsInfo extends NativeInfo
    *       <li>output_type - an instance of {@link OutputType}
    *     </ul>
    */
-  private AppleDebugOutputsInfo(ImmutableMap<String, ImmutableMap<String, Artifact>> map) {
-    super(SKYLARK_CONSTRUCTOR);
+  private AppleDebugOutputsInfo(ImmutableMap<String, Dict<String, Artifact>> map) {
     this.outputsMap = map;
   }
 
-  /**
-   * Returns the multi-architecture dylib binary that apple_binary created.
-   */
   @Override
-  public ImmutableMap<String, ImmutableMap<String, Artifact>> getOutputsMap() {
+  public BuiltinProvider<AppleDebugOutputsInfo> getProvider() {
+    return STARLARK_CONSTRUCTOR;
+  }
+
+  /** Returns the multi-architecture dylib binary that apple_binary created. */
+  @Override
+  public ImmutableMap<String, Dict<String, Artifact>> getOutputsMap() {
     return outputsMap;
   }
 
@@ -123,10 +125,10 @@ public final class AppleDebugOutputsInfo extends NativeInfo
     }
 
     public AppleDebugOutputsInfo build() {
-      ImmutableMap.Builder<String, ImmutableMap<String, Artifact>> builder = ImmutableMap.builder();
+      ImmutableMap.Builder<String, Dict<String, Artifact>> builder = ImmutableMap.builder();
 
       for (Map.Entry<String, HashMap<String, Artifact>> e : outputsByArch.entrySet()) {
-        builder.put(e.getKey(), ImmutableMap.copyOf(e.getValue()));
+        builder.put(e.getKey(), Dict.immutableCopyOf(e.getValue()));
       }
 
       return new AppleDebugOutputsInfo(builder.build());

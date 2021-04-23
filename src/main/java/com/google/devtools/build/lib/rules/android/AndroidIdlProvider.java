@@ -14,14 +14,14 @@
 package com.google.devtools.build.lib.rules.android;
 
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.collect.nestedset.Depset;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.packages.BuiltinProvider;
 import com.google.devtools.build.lib.packages.NativeInfo;
-import com.google.devtools.build.lib.skylarkbuildapi.android.AndroidIdlProviderApi;
-import com.google.devtools.build.lib.syntax.EvalException;
-import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
+import com.google.devtools.build.lib.starlarkbuildapi.android.AndroidIdlProviderApi;
+import net.starlark.java.eval.EvalException;
 
 /**
  * Configured targets implementing this provider can contribute Android IDL information to the
@@ -31,7 +31,6 @@ import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
 public final class AndroidIdlProvider extends NativeInfo
     implements AndroidIdlProviderApi<Artifact> {
 
-  public static final String PROVIDER_NAME = "AndroidIdlInfo";
   public static final Provider PROVIDER = new Provider();
 
   private final NestedSet<String> transitiveIdlImportRoots;
@@ -44,7 +43,6 @@ public final class AndroidIdlProvider extends NativeInfo
       NestedSet<Artifact> transitiveIdlImports,
       NestedSet<Artifact> transitiveIdlJars,
       NestedSet<Artifact> transitiveIdlPreprocessed) {
-    super(PROVIDER);
     this.transitiveIdlImportRoots = transitiveIdlImportRoots;
     this.transitiveIdlImports = transitiveIdlImports;
     this.transitiveIdlJars = transitiveIdlJars;
@@ -52,22 +50,43 @@ public final class AndroidIdlProvider extends NativeInfo
   }
 
   @Override
-  public NestedSet<String> getTransitiveIdlImportRoots() {
+  public Provider getProvider() {
+    return PROVIDER;
+  }
+
+  @Override
+  public Depset /*<String>*/ getTransitiveIdlImportRootsForStarlark() {
+    return Depset.of(Depset.ElementType.STRING, transitiveIdlImportRoots);
+  }
+
+  NestedSet<String> getTransitiveIdlImportRoots() {
     return transitiveIdlImportRoots;
   }
 
   @Override
-  public NestedSet<Artifact> getTransitiveIdlImports() {
+  public Depset /*<Artifact>*/ getTransitiveIdlImportsForStarlark() {
+    return Depset.of(Artifact.TYPE, transitiveIdlImports);
+  }
+
+  NestedSet<Artifact> getTransitiveIdlImports() {
     return transitiveIdlImports;
   }
 
   @Override
-  public NestedSet<Artifact> getTransitiveIdlJars() {
+  public Depset /*<Artifact>*/ getTransitiveIdlJarsForStarlark() {
+    return Depset.of(Artifact.TYPE, transitiveIdlJars);
+  }
+
+  NestedSet<Artifact> getTransitiveIdlJars() {
     return transitiveIdlJars;
   }
 
   @Override
-  public NestedSet<Artifact> getTransitiveIdlPreprocessed() {
+  public Depset /*<Artifact>*/ getTransitiveIdlPreprocessedForStarlark() {
+    return Depset.of(Artifact.TYPE, transitiveIdlPreprocessed);
+  }
+
+  NestedSet<Artifact> getTransitiveIdlPreprocessed() {
     return transitiveIdlPreprocessed;
   }
 
@@ -76,28 +95,33 @@ public final class AndroidIdlProvider extends NativeInfo
       implements AndroidIdlProviderApi.Provider<Artifact> {
 
     private Provider() {
-      super(PROVIDER_NAME, AndroidIdlProvider.class);
+      super(NAME, AndroidIdlProvider.class);
     }
 
     @Override
     public AndroidIdlProvider createInfo(
-        SkylarkNestedSet transitiveIdlImportRoots,
-        SkylarkNestedSet transitiveIdlImports,
-        SkylarkNestedSet transitiveIdlJars,
-        SkylarkNestedSet transitiveIdlPreprocessed)
+        Depset transitiveIdlImportRoots,
+        Depset transitiveIdlImports,
+        Depset transitiveIdlJars,
+        Depset transitiveIdlPreprocessed)
         throws EvalException {
       return new AndroidIdlProvider(
           NestedSetBuilder.<String>stableOrder()
-              .addTransitive(transitiveIdlImportRoots.getSet(String.class))
+              .addTransitive(
+                  Depset.cast(
+                      transitiveIdlImportRoots, String.class, "transitive_idl_import_roots"))
               .build(),
           NestedSetBuilder.<Artifact>stableOrder()
-              .addTransitive(transitiveIdlImports.getSet(Artifact.class))
+              .addTransitive(
+                  Depset.cast(transitiveIdlImports, Artifact.class, "transitive_idl_imports"))
               .build(),
           NestedSetBuilder.<Artifact>stableOrder()
-              .addTransitive(transitiveIdlJars.getSet(Artifact.class))
+              .addTransitive(Depset.cast(transitiveIdlJars, Artifact.class, "transitive_idl_jars"))
               .build(),
           NestedSetBuilder.<Artifact>stableOrder()
-              .addTransitive(transitiveIdlPreprocessed.getSet(Artifact.class))
+              .addTransitive(
+                  Depset.cast(
+                      transitiveIdlPreprocessed, Artifact.class, "transitive_idl_preprocessed"))
               .build());
     }
   }

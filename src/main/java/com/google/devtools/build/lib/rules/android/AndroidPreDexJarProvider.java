@@ -18,14 +18,14 @@ import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.packages.BuiltinProvider;
 import com.google.devtools.build.lib.packages.NativeInfo;
-import com.google.devtools.build.lib.skylarkbuildapi.android.AndroidPreDexJarProviderApi;
-import com.google.devtools.build.lib.syntax.EvalException;
+import com.google.devtools.build.lib.starlarkbuildapi.android.AndroidPreDexJarProviderApi;
+import net.starlark.java.eval.EvalException;
 
 /** A provider of the final Jar to be dexed for targets that build APKs. */
 @Immutable
 public final class AndroidPreDexJarProvider extends NativeInfo
     implements AndroidPreDexJarProviderApi<Artifact> {
-  public static final String PROVIDER_NAME = "AndroidPreDexJarInfo";
+
   public static final Provider PROVIDER = new Provider();
 
   private final Artifact preDexJar;
@@ -37,15 +37,19 @@ public final class AndroidPreDexJarProvider extends NativeInfo
   }
 
   public AndroidPreDexJarProvider(Artifact preDexJar) {
-    super(PROVIDER);
     this.preDexJar = preDexJar;
+  }
+
+  @Override
+  public Provider getProvider() {
+    return PROVIDER;
   }
 
   /** Provider class for {@link AndroidPreDexJarProvider} objects. */
   public static class Provider extends BuiltinProvider<AndroidPreDexJarProvider>
       implements AndroidPreDexJarProviderApi.Provider<Artifact> {
     private Provider() {
-      super(PROVIDER_NAME, AndroidPreDexJarProvider.class);
+      super(NAME, AndroidPreDexJarProvider.class);
     }
 
     @Override
